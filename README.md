@@ -230,7 +230,7 @@ npm run build
 enabled = true
 required = true
 command = "node"
-args = ["dist/mcp/main.js"]
+args = ["dist/src/mcp/main.js"]
 cwd = "C:/Users/user/Desktop/codex-mcp"
 startup_timeout_sec = 10.0
 tool_timeout_sec = 60.0
@@ -324,7 +324,7 @@ data/bridge.db
 
 - 트리거: 사용자 로그인 시
 - 프로그램: Node.js 실행 파일, 일반적으로 `C:\Program Files\nodejs\node.exe`
-- 인수: `dist\worker\main.js`
+- 인수: `dist\src\worker\main.js`
 - 시작 위치: `C:\Users\user\Desktop\codex-mcp`
 - 실패 시 1분 간격 재시작, 3회 이상
 - 가능한 경우 “예약된 시작을 놓친 경우 가능한 즉시 실행”

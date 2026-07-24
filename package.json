@@ -13,8 +13,8 @@
     "dev:worker": "tsx src/worker/main.ts",
     "inspect:ninehire": "tsx src/cli/inspect-ninehire.ts",
     "inspect:slack-source": "tsx src/cli/inspect-slack-source.ts",
-    "start:mcp": "node dist/mcp/main.js",
-    "start:worker": "node dist/worker/main.js",
+    "start:mcp": "node dist/src/mcp/main.js",
+    "start:worker": "node dist/src/worker/main.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
