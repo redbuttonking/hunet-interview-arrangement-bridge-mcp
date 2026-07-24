@@ -1,0 +1,38 @@
+{
+  "name": "interview-arrangement-bridge-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local MCP bridge for NineHire interview workflows and Slack availability collection.",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev:mcp": "tsx src/mcp/main.ts",
+    "dev:worker": "tsx src/worker/main.ts",
+    "inspect:ninehire": "tsx src/cli/inspect-ninehire.ts",
+    "inspect:slack-source": "tsx src/cli/inspect-slack-source.ts",
+    "start:mcp": "node dist/mcp/main.js",
+    "start:worker": "node dist/worker/main.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@slack/bolt": "^5.0.0",
+    "@slack/types": "^3.0.0",
+    "@slack/web-api": "^8.0.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  },
+  "overrides": {
+    "@hono/node-server": "2.0.11"
+  }
+}

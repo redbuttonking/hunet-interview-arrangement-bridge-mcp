@@ -1,0 +1,571 @@
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { WebClient } from "@slack/web-api";
+import { z } from "zod";
+import type { AppConfig } from "../config.js";
+import {
+  BridgeDatabase,
+  type InterviewCaseRow,
+} from "../db/database.js";
+import { suggestCommonSlots } from "../domain/availability.js";
+import {
+  MappedNinehireWorkflowAdapter,
+  type NinehireWorkflowAdapter,
+} from "../ninehire/adapter.js";
+import { NinehireMcpGateway } from "../ninehire/gateway.js";
+import {
+  WorkflowService,
+  type SlackIdentityResolver,
+} from "../services/workflow.js";
+import { SlackReconciler } from "../slack/reconciler.js";
+
+function result(value: unknown) {
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
+    structuredContent:
+      typeof value === "object" && value !== null
+        ? (value as Record<string, unknown>)
+        : { value },
+  };
+}
+
+class WebClientIdentityResolver implements SlackIdentityResolver {
+  constructor(private readonly client: WebClient) {}
+
+  async lookupUserIdByEmail(email: string): Promise<string | undefined> {
+    try {
+      const response = await this.client.users.lookupByEmail({ email });
+      return response.user?.id;
+    } catch (error) {
+      const slackError =
+        typeof error === "object" && error !== null && "data" in error
+          ? (error as { data?: { error?: string } }).data?.error
+          : undefined;
+      if (slackError === "users_not_found") return undefined;
+      throw error;
+    }
+  }
+}
+
+function caseSummary(interviewCase: InterviewCaseRow) {
+  return {
+    id: interviewCase.id,
+    candidateName: interviewCase.candidateName,
+    recruitmentName: interviewCase.recruitmentName,
+    status: interviewCase.status,
+    durationMinutes: interviewCase.durationMinutes,
+    proposalDates: interviewCase.proposalDates,
+    createdAt: interviewCase.createdAt,
+  };
+}
+
+export function createBridgeMcpServer(
+  config: AppConfig,
+  db: BridgeDatabase,
+  dependencies?: {
+    gateway?: NinehireMcpGateway;
+    ninehire?: NinehireWorkflowAdapter;
+    slackClient?: WebClient;
+  },
+): McpServer {
+  const gateway =
+    dependencies?.gateway ?? new NinehireMcpGateway(config.ninehire);
+  const ninehire =
+    dependencies?.ninehire ??
+    new MappedNinehireWorkflowAdapter(config.ninehire, gateway);
+  const slackClient =
+    dependencies?.slackClient ??
+    (config.slack.botToken
+      ? new WebClient(config.slack.botToken)
+      : undefined);
+  const identityResolver = slackClient
+    ? new WebClientIdentityResolver(slackClient)
+    : undefined;
+  const workflow = new WorkflowService(
+    db,
+    config,
+    ninehire,
+    identityResolver,
+  );
+
+  const server = new McpServer({
+    name: "interview-arrangement-bridge",
+    version: "0.1.0",
+  });
+
+  server.registerTool(
+    "bridge_status",
+    {
+      title: "인터뷰 브릿지 상태",
+      description:
+        "로컬 DB의 인터뷰 건, 검토 대기, 메시지 초안 및 면접관 응답 현황을 조회합니다.",
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () =>
+      result({
+        database: db.getStatus(),
+        integrations: {
+          slackBotToken: Boolean(config.slack.botToken),
+          slackAppToken: Boolean(config.slack.appToken),
+          sourceChannel: Boolean(config.slack.sourceChannelId),
+          requestChannel: Boolean(config.slack.requestChannelId),
+          ninehireKey: gateway.isConfigured(),
+          ninehireEvaluationMapping: Boolean(
+            config.ninehire.evaluation.toolName &&
+              config.ninehire.evaluation.argsJson &&
+              config.ninehire.evaluation.resultPath,
+          ),
+          ninehireInterviewerMapping: Boolean(
+            config.ninehire.interviewers.toolName &&
+              config.ninehire.interviewers.argsJson &&
+              config.ninehire.interviewers.resultPath,
+          ),
+          daouOffice: "DEFERRED",
+        },
+      }),
+  );
+
+  server.registerTool(
+    "list_interview_cases",
+    {
+      title: "인터뷰 건 목록",
+      description: "로컬에 생성된 인터뷰 조율 건을 조회합니다.",
+      inputSchema: {
+        status: z
+          .enum([
+            "READY_FOR_DRAFT",
+            "DRAFT_CREATED",
+            "REQUEST_SENT",
+            "COLLECTING_AVAILABILITY",
+            "READY_TO_SCHEDULE",
+            "REVIEW_REQUIRED",
+            "CLOSED",
+          ])
+          .optional(),
+        limit: z.number().int().min(1).max(200).default(100),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ status, limit }) =>
+      result({
+        cases: db.listCases(status, limit).map(caseSummary),
+      }),
+  );
+
+  server.registerTool(
+    "get_interview_case",
+    {
+      title: "인터뷰 건 상세",
+      description:
+        "면접관, 가용시간, 메시지 초안을 포함한 인터뷰 건 상세를 조회합니다.",
+      inputSchema: { caseId: z.string().uuid() },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ caseId }) => {
+      const bundle = db.getCaseBundle(caseId);
+      if (!bundle) throw new Error(`Case not found: ${caseId}`);
+      return result(bundle);
+    },
+  );
+
+  server.registerTool(
+    "suggest_common_interview_slots",
+    {
+      title: "공통 인터뷰 가능시간 계산",
+      description:
+        "필수 면접관이 제출한 가용시간의 교집합에서 건별 소요시간을 만족하는 후보를 계산합니다. 다우오피스 회의실은 아직 확인하지 않습니다.",
+      inputSchema: { caseId: z.string().uuid() },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ caseId }) => {
+      const bundle = db.getCaseBundle(caseId);
+      if (!bundle) throw new Error(`Case not found: ${caseId}`);
+      return result(suggestCommonSlots(bundle));
+    },
+  );
+
+  server.registerTool(
+    "list_workflow_reviews",
+    {
+      title: "검토 대기 목록",
+      description:
+        "평가 결과 미매핑, 면접관 미응답/불참 등 사람의 판단이 필요한 항목을 조회합니다.",
+      inputSchema: {
+        limit: z.number().int().min(1).max(200).default(100),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ limit }) => result({ reviews: db.listOpenReviews(limit) }),
+  );
+
+  server.registerTool(
+    "inspect_ninehire_tools",
+    {
+      title: "나인하이어 도구 검사",
+      description:
+        "나인하이어 MCP가 제공하는 실제 도구명과 입력/출력 스키마를 읽기 전용으로 조회합니다.",
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async () => result({ tools: await gateway.listTools() }),
+  );
+
+  server.registerTool(
+    "sync_slack_notifications",
+    {
+      title: "Slack 알림 즉시 동기화",
+      description:
+        "5분 주기를 기다리지 않고 나인하이어 알림 채널을 지금 읽어 로컬 상태를 갱신합니다.",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async () => {
+      if (!slackClient) throw new Error("SLACK_BOT_TOKEN is not configured.");
+      const reconciler = new SlackReconciler(
+        db,
+        config,
+        slackClient,
+        workflow,
+      );
+      return result(await reconciler.reconcile());
+    },
+  );
+
+  server.registerTool(
+    "resolve_evaluation_review",
+    {
+      title: "평가 결과 검토 확정",
+      description:
+        "나인하이어 평가 조회가 자동 매핑되지 않은 알림에 대해 합격/불합격 판단을 명시적으로 기록합니다.",
+      inputSchema: {
+        reviewId: z.string().uuid(),
+        decision: z.enum(["PASS", "FAIL"]),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ reviewId, decision }) =>
+      result(await workflow.resolveEvaluationReview(reviewId, decision)),
+  );
+
+  server.registerTool(
+    "resolve_interviewer_review",
+    {
+      title: "면접관 예외 검토 완료",
+      description:
+        "면접관 불참·미응답·조회 실패에 대해 교체/제외/선택 참여 등의 조치를 한 뒤 검토 건을 완료 처리합니다. 평가 결과 검토에는 사용할 수 없습니다.",
+      inputSchema: {
+        reviewId: z.string().uuid(),
+        resolution: z.string().min(3).max(500),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ reviewId, resolution }) => {
+      const review = db.getReview(reviewId);
+      if (!review || review.status !== "OPEN") {
+        throw new Error(`Open review not found: ${reviewId}`);
+      }
+      const allowed = new Set([
+        "INTERVIEWER_DECLINED",
+        "INTERVIEWER_NO_RESPONSE",
+        "INTERVIEWER_LOOKUP_REQUIRED",
+      ]);
+      if (!allowed.has(review.reviewType)) {
+        throw new Error(
+          "This review type requires its dedicated resolution tool.",
+        );
+      }
+      db.resolveReview(reviewId, resolution);
+      if (review.caseId) db.refreshCaseCollectionStatus(review.caseId);
+      return result({
+        resolved: true,
+        reviewId,
+        caseId: review.caseId,
+        resolution,
+      });
+    },
+  );
+
+  server.registerTool(
+    "sync_case_interviewers",
+    {
+      title: "면접관 다시 조회",
+      description:
+        "나인하이어에서 해당 면접 건의 최신 면접관을 다시 읽고 로컬 스냅샷과 Slack 사용자 매핑을 갱신합니다.",
+      inputSchema: { caseId: z.string().uuid() },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ caseId }) =>
+      result(await workflow.syncCaseInterviewers(caseId)),
+  );
+
+  server.registerTool(
+    "map_interviewer_to_slack",
+    {
+      title: "면접관 Slack 사용자 연결",
+      description:
+        "자동 이메일 매칭이 실패한 나인하이어 사용자를 Slack 사용자 ID에 한 번 연결해 캐시합니다.",
+      inputSchema: {
+        ninehireUserId: z.string().min(1),
+        slackUserId: z.string().min(1),
+        displayName: z.string().min(1).optional(),
+        email: z.string().email().optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (input) => {
+      db.upsertIdentityMapping(input);
+      return result({ mapped: true, ...input });
+    },
+  );
+
+  server.registerTool(
+    "add_case_interviewer",
+    {
+      title: "면접 건에 면접관 추가",
+      description:
+        "이번 면접 건에만 추가 면접관을 넣습니다. 전역 채용 설정은 변경하지 않습니다.",
+      inputSchema: {
+        caseId: z.string().uuid(),
+        displayName: z.string().min(1),
+        slackUserId: z.string().min(1).optional(),
+        email: z.string().email().optional(),
+        required: z.boolean().default(true),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    async ({ caseId, ...person }) =>
+      result(
+        db.addOrUpdateInterviewer({
+          caseId,
+          ...person,
+          source: "MANUAL",
+        }),
+      ),
+  );
+
+  server.registerTool(
+    "exclude_case_interviewer",
+    {
+      title: "면접 건에서 면접관 제외",
+      description:
+        "면접관을 이번 건의 활성 목록에서 제외하되 감사 이력은 보존합니다.",
+      inputSchema: {
+        caseId: z.string().uuid(),
+        interviewerId: z.string().uuid(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    async ({ caseId, interviewerId }) => {
+      db.excludeInterviewer(caseId, interviewerId);
+      return result({ excluded: true, caseId, interviewerId });
+    },
+  );
+
+  server.registerTool(
+    "set_interviewer_required",
+    {
+      title: "필수 면접관 여부 변경",
+      description:
+        "특정 면접관을 이번 건에서 필수 또는 선택 참여자로 변경합니다.",
+      inputSchema: {
+        caseId: z.string().uuid(),
+        interviewerId: z.string().uuid(),
+        required: z.boolean(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ caseId, interviewerId, required }) => {
+      db.setInterviewerRequired(caseId, interviewerId, required);
+      return result({ updated: true, caseId, interviewerId, required });
+    },
+  );
+
+  server.registerTool(
+    "set_case_schedule_rules",
+    {
+      title: "인터뷰 시간·제안 날짜 변경",
+      description:
+        "기본 60분 또는 PDF 날짜 규칙에서 벗어나는 건의 소요시간과 제안 날짜를 건별로 변경합니다.",
+      inputSchema: {
+        caseId: z.string().uuid(),
+        durationMinutes: z.number().int().min(15).max(480).optional(),
+        proposalDates: z
+          .array(z.string().regex(/^\d{4}-\d{2}-\d{2}$/))
+          .min(1)
+          .max(20)
+          .optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ caseId, durationMinutes, proposalDates }) => {
+      workflow.getCaseOrThrow(caseId);
+      if (durationMinutes !== undefined) {
+        db.setCaseDuration(caseId, durationMinutes);
+      }
+      if (proposalDates) db.setCaseProposalDates(caseId, proposalDates);
+      return result(db.getCase(caseId));
+    },
+  );
+
+  server.registerTool(
+    "record_manual_availability",
+    {
+      title: "가용시간 수동 기록",
+      description:
+        "체크박스의 1시간 단위로 표현할 수 없는 예외 시간을 면접관별로 직접 기록합니다.",
+      inputSchema: {
+        caseId: z.string().uuid(),
+        interviewerId: z.string().uuid(),
+        slots: z
+          .array(
+            z.object({
+              date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+              start: z.string().regex(/^\d{2}:\d{2}$/),
+              end: z.string().regex(/^\d{2}:\d{2}$/),
+            }),
+          )
+          .min(1),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ caseId, interviewerId, slots }) =>
+      result(
+        db.replaceAvailabilityForInterviewer(
+          caseId,
+          interviewerId,
+          slots,
+        ),
+      ),
+  );
+
+  server.registerTool(
+    "create_interviewer_request_draft",
+    {
+      title: "면접관 일정 요청 초안 생성",
+      description:
+        "Slack에 발송하지 않고 대상·날짜·버튼이 포함된 메시지 초안을 로컬에 생성합니다.",
+      inputSchema: { caseId: z.string().uuid() },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ caseId }) => result(await workflow.createRequestDraft(caseId)),
+  );
+
+  server.registerTool(
+    "list_pending_message_drafts",
+    {
+      title: "발송 승인 대기 초안",
+      description: "사용자 승인 전인 Slack 메시지 초안을 조회합니다.",
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () => result({ drafts: db.listDrafts("DRAFT") }),
+  );
+
+  server.registerTool(
+    "approve_and_send_interviewer_request",
+    {
+      title: "면접관 일정 요청 승인·발송",
+      description:
+        "선택한 초안을 명시적으로 승인하고 설정된 테스트 채널에 Slack 메시지를 발송합니다.",
+      inputSchema: { draftId: z.string().uuid() },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ draftId }) => {
+      if (!slackClient) throw new Error("SLACK_BOT_TOKEN is not configured.");
+      return result(await workflow.approveAndSendDraft(draftId, slackClient));
+    },
+  );
+
+  return server;
+}

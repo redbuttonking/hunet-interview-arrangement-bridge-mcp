@@ -1,0 +1,18 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+data/*.db
+data/*.db-shm
+data/*.db-wal
+data/*.sqlite
+data/*.sqlite-shm
+data/*.sqlite-wal
+*.log
+.DS_Store
+Thumbs.db
+
+# Internal planning source; keep it local unless explicitly approved for sharing.
+/인터뷰_어레인지_업무_분석_목차_및_문제점_최종본.pdf

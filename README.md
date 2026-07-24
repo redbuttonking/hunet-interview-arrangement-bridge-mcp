@@ -1,0 +1,424 @@
+# Interview Arrangement Bridge MCP
+
+나인하이어의 평가 완료 알림을 감지하고, 합격자로 확인된 지원자의 면접관 가용시간을 Slack에서 수집하는 **로컬 업무형 브릿지 MCP 서버**입니다.
+
+Codex는 이 서버의 MCP 도구를 호출하고, 로컬 백그라운드 워커는 Slack Socket Mode 연결·5분 주기 동기화·리마인드를 담당합니다. 상태와 이력은 별도 클라우드 DB 없이 이 PC의 SQLite 파일에 저장됩니다.
+
+> 현재 단계는 **MCP 서버 + Slack 테스트 앱 + 로컬 워커**입니다. 다우오피스 회의실 조회와 대시보드는 의도적으로 다음 단계로 미뤘습니다.
+
+## 현재 구현 범위
+
+- Slack 비공개 나인하이어 알림 채널을 실시간 수신하고 5분마다 누락 메시지를 재확인
+- `서류 평가가 완료되었습니다.` 또는 `평가가 완료되었습니다.` 알림만 조율 시작 후보로 분류
+- 나인하이어 MCP에서 실제 평가 결과를 조회해 `PASS`일 때만 인터뷰 조율 건 생성
+- 나인하이어 MCP에서 건별 최신 면접관을 조회하고 Slack 사용자와 이메일로 자동 연결
+- 자동 연결 실패 시 나인하이어 사용자 ID와 Slack 사용자 ID를 한 번 수동 매핑
+- 건별 면접관 추가·제외·필수/선택 참여 변경
+- Slack 발송 전 메시지 초안 생성 → 사용자 승인 → 테스트 채널 발송
+- Slack 모달에서 다음 항목 선택
+  - 모든 제안 날짜·시간 가능
+  - 날짜별 모든 시간 가능
+  - 날짜별 `09:00–10:00`부터 `17:00–18:00`까지 1시간 단위
+- 기본 인터뷰 60분, 건별 소요시간·제안 날짜 변경
+- 1시간 단위로 표현할 수 없는 시간은 MCP 도구로 수동 기록
+- 필수 면접관 가용시간의 교집합과 건별 소요시간을 반영한 후보 시간 계산
+- 미응답자에게 2영업시간 후 1차, 다음 영업일 10:00에 2차 리마인드
+- 2차 리마인드 뒤 담당자 검토 대기 전환
+- 중복 이벤트 방지, 상태 이력, 검토 대기 사유, 메시지 발송 상태 저장
+
+## 중요한 범위 구분
+
+나인하이어 공식 설명에 따르면 지원자 단계 이동, 불합격 처리, 안내 메일 발송, 면접 일정 조율 같은 규칙 기반 작업은 나인하이어 MCP가 아니라 나인하이어 워크플로우 자동화의 범위입니다. 따라서 이 프로젝트는 다음처럼 역할을 나눕니다.
+
+- **나인하이어 MCP:** 평가 결과·면접관 등 채용 데이터 조회
+- **Slack 앱:** 면접관에게 가능한 시간 요청, 응답 수집, 리마인드
+- **로컬 브릿지 MCP:** 두 시스템 사이의 업무 규칙·승인·상태·이력 관리
+- **나인하이어 워크플로우:** 후보자 단계 이동, 불합격 처리, 안내 메일 등
+
+참고: [나인하이어 MCP 공식 소개와 FAQ](https://blog.ninehire.com/tip-ai-recruitment-mcp)
+
+## 구조
+
+```mermaid
+flowchart LR
+    C[Codex] -->|stdio MCP| M[Local Bridge MCP]
+    M --> DB[(Local SQLite)]
+    M -->|조회 / 승인된 발송| NH[NineHire MCP]
+    M -->|Web API| S[Slack]
+
+    W[Long-running Slack Worker] --> DB
+    W -->|Socket Mode + 5분 재확인| S
+    W -->|평가 / 면접관 조회| NH
+
+    D[DaouOffice adapter<br/>phase 2] -.-> M
+    DB -.-> V[Dashboard<br/>later]
+```
+
+MCP 프로세스와 워커를 나눈 이유는 명확합니다. Codex가 실행하는 stdio MCP 프로세스는 대화 세션에 종속될 수 있지만 Slack 버튼·모달은 언제든 들어옵니다. 따라서 Slack 워커는 PC에서 계속 실행되어야 합니다.
+
+## 선택한 방식과 대안
+
+| 항목 | 선택 | 장점 | 단점 / 대안 |
+|---|---|---|---|
+| Slack 연결 | Socket Mode | 공개 URL·포트 포워딩 없이 로컬 PC에서 이벤트와 버튼 처리 가능 | PC와 워커가 켜져 있어야 함. 서버 배포 시 HTTP Events API가 운영 관측성에 유리 |
+| 저장소 | 로컬 SQLite | 별도 DB 구축·비용 없음, 백업이 단순함 | 한 PC에 종속. 다중 사용자·고가용성이 필요해지면 PostgreSQL이 적합 |
+| 나인하이어 도구 연결 | 실행 시 실제 스키마 검사 후 환경변수 매핑 | 존재하지 않는 도구명이나 필드를 추측하지 않음 | 최초 1회 매핑 필요. 도구 스키마가 확정되면 코드 어댑터로 고정하는 방법도 가능 |
+| 면접관 관리 | 나인하이어를 원본으로 건별 동기화, 로컬은 ID 매핑·예외만 보관 | 면접관 변경 시 전역 목록을 매번 수동 수정하지 않음 | 나인하이어 도구가 면접관을 반환하지 않으면 건별 수동 추가 필요 |
+| Slack 발송 | 초안 → 명시적 승인 → 발송 | 잘못된 대상·내용의 자동 발송을 방지 | 완전 자동 발송보다 한 단계 더 필요 |
+
+## 요구 환경
+
+- Windows 10/11
+- Node.js 24 이상
+- 나인하이어 Enterprise 요금제와 MCP 키
+- 새 Slack 앱을 워크스페이스에 설치해 줄 관리자
+- 앱을 초대할 비공개 채널 2개
+  - 나인하이어 알림을 읽는 원본 채널
+  - 면접관 요청을 보낼 테스트 채널
+
+현재 프로젝트는 Node 24 내장 `node:sqlite`를 사용합니다. 실행 시 experimental 경고가 나올 수 있지만 이 프로젝트의 테스트 대상인 Node 24에서 동작합니다. 장기 운영에서 Node 내장 SQLite 안정성 정책이 맞지 않으면 `better-sqlite3` 또는 PostgreSQL 어댑터로 교체할 수 있습니다.
+
+## 빠른 시작
+
+### 1. 설치와 빌드
+
+```powershell
+cd C:\Users\user\Desktop\codex-mcp
+npm install
+Copy-Item .env.example .env
+npm run build
+npm test
+```
+
+실제 키는 반드시 `.env`에만 넣습니다. `.env`, SQLite DB, WAL 파일은 Git에서 제외되어 있습니다.
+
+### 2. 새 Slack 앱 만들기
+
+1. [Slack 앱 관리](https://api.slack.com/apps)에서 **Create New App → From an app manifest**를 선택합니다.
+2. 워크스페이스를 고른 뒤 [`slack-app-manifest.yaml`](./slack-app-manifest.yaml)의 내용을 붙여 넣어 앱을 생성합니다.
+3. **Basic Information → App-Level Tokens**에서 토큰을 만들고 `connections:write` 범위를 부여합니다.
+   - 발급된 `xapp-...` 값을 `.env`의 `SLACK_APP_TOKEN`에 입력합니다.
+4. 관리자에게 앱 설치를 요청합니다.
+   - 설치 후 Bot User OAuth Token `xoxb-...`를 `SLACK_BOT_TOKEN`에 입력합니다.
+5. Slack에서 앱을 두 비공개 채널 모두에 초대합니다.
+   - 원본 나인하이어 알림 채널
+   - 분리된 면접 요청 테스트 채널
+6. 두 채널의 채널 ID를 `.env`에 입력합니다.
+   - `SLACK_SOURCE_CHANNEL_ID`
+   - `SLACK_REQUEST_CHANNEL_ID`
+
+Manifest에 포함된 권한은 다음과 같습니다.
+
+| 권한 / 이벤트 | 용도 |
+|---|---|
+| `groups:history` | 앱이 참여한 비공개 원본 채널 메시지 읽기 |
+| `message.groups` | 비공개 채널 신규 메시지 이벤트 수신 |
+| `chat:write` | 승인된 요청과 리마인드 발송 |
+| `users:read`, `users:read.email` | 나인하이어 면접관 이메일을 Slack 사용자 ID로 연결 |
+| `connections:write` | App-Level Token에서 Socket Mode 연결 |
+
+Socket Mode는 공개 요청 URL 없이 이벤트와 상호작용을 받을 수 있습니다. 참고: [Slack Socket Mode 공식 문서](https://docs.slack.dev/apis/events-api/using-socket-mode/)
+
+#### 나인하이어 Slack 앱의 `bot_id` 확인
+
+토큰과 원본 채널 ID를 입력한 뒤 다음 명령을 실행합니다.
+
+```powershell
+npm run inspect:slack-source
+```
+
+출력에는 본문 전체 대신 최근 메시지의 `botId`, 제목, 분류 결과만 표시됩니다. 나인하이어 알림의 `botId`를 `.env`의 `SLACK_NINEHIRE_BOT_ID`에 넣으세요.
+
+`SLACK_NINEHIRE_BOT_ID`를 비워도 전용 테스트 채널에서는 작동하지만, 같은 채널의 다른 앱 메시지도 로컬 파서가 읽게 됩니다. 운영 전에는 반드시 설정하는 것을 권장합니다.
+
+### 3. 나인하이어 MCP 확인과 매핑
+
+`.env`에 MCP URL과 키를 입력합니다.
+
+```dotenv
+NINEHIRE_MCP_URL=https://api.ninehire.com/developer/mcp
+NINEHIRE_MCP_API_KEY=실제_키
+NINEHIRE_MCP_AUTH_HEADER=Authorization
+NINEHIRE_MCP_AUTH_SCHEME=Bearer
+```
+
+인증 헤더·스킴은 나인하이어 설정 화면이 제공하는 연결 예시와 반드시 대조하세요. 이 저장소에는 실제 키를 넣지 않습니다.
+키를 스킴 없이 보내라는 안내를 받은 경우 `NINEHIRE_MCP_AUTH_SCHEME=`처럼 빈 값으로 둡니다.
+
+다음 명령은 나인하이어 도구를 실행하지 않고 도구명과 스키마만 조회합니다.
+
+```powershell
+npm run inspect:ninehire
+```
+
+출력에서 다음 두 종류의 **실제 읽기 도구**를 찾습니다.
+
+1. 완료된 평가표 또는 지원자의 평가 결과를 조회하는 도구
+2. 채용/지원자/인터뷰 건의 면접관을 조회하는 도구
+
+그 후 `.env`의 매핑 항목을 채웁니다. 아래 값은 구조 설명용 예시이며 그대로 복사할 실제 나인하이어 도구명이 아닙니다.
+
+```dotenv
+# 예시일 뿐: inspect 결과의 실제 도구명·필드명으로 바꿔야 함
+NINEHIRE_EVALUATION_TOOL_NAME=<실제_평가조회_도구명>
+NINEHIRE_EVALUATION_ARGS_JSON={"applicantId":"{{candidateRef}}"}
+NINEHIRE_EVALUATION_RESULT_PATH=data.evaluation.result
+
+NINEHIRE_INTERVIEWERS_TOOL_NAME=<실제_면접관조회_도구명>
+NINEHIRE_INTERVIEWERS_ARGS_JSON={"applicantId":"{{candidateRef}}"}
+NINEHIRE_INTERVIEWERS_RESULT_PATH=data.interviewers
+NINEHIRE_INTERVIEWER_ID_PATH=id
+NINEHIRE_INTERVIEWER_NAME_PATH=name
+NINEHIRE_INTERVIEWER_EMAIL_PATH=email
+```
+
+도구 결과 자체가 찾으려는 값이면 결과 경로에 `$`를 사용할 수 있습니다.
+
+지원하는 템플릿 값은 다음과 같습니다.
+
+- `{{candidateRef}}`
+- `{{candidateName}}`
+- `{{recruitmentRef}}`
+- `{{recruitmentName}}`
+
+평가 결과 문자열은 다음 설정으로 대응합니다.
+
+```dotenv
+NINEHIRE_EVALUATION_PASS_VALUES=합격,pass,passed
+NINEHIRE_EVALUATION_FAIL_VALUES=불합격,fail,failed
+```
+
+실제 스키마가 위 템플릿 방식으로 표현하기 어렵다면 임의로 맞추지 말고 `src/ninehire/adapter.ts`에 해당 스키마 전용 어댑터를 추가하는 편이 안전합니다.
+
+### 4. 로컬 워커 실행
+
+개발 중:
+
+```powershell
+npm run dev:worker
+```
+
+빌드 결과 실행:
+
+```powershell
+npm run build
+npm run start:worker
+```
+
+워커가 하는 일:
+
+- Socket Mode로 Slack 메시지·버튼·모달 수신
+- 시작 직후 및 5분마다 `conversations.history` 재확인
+- 평가 완료 알림의 나인하이어 평가 결과 조회
+- 면접관 응답 저장
+- 미응답 리마인드 발송
+
+PC가 절전·종료되거나 워커가 꺼져 있으면 실시간 버튼 처리와 5분 재확인은 멈춥니다. 다시 시작하면 마지막 Slack 타임스탬프 이후 메시지를 재확인합니다.
+
+### 5. Codex에 로컬 MCP 등록
+
+먼저 빌드합니다.
+
+```powershell
+npm run build
+```
+
+프로젝트별 `.codex/config.toml` 또는 사용자 Codex 설정의 `mcp_servers`에 다음과 같이 등록합니다. 경로는 실제 저장 위치에 맞게 수정하세요.
+
+```toml
+[mcp_servers.interview_bridge]
+enabled = true
+required = true
+command = "node"
+args = ["dist/mcp/main.js"]
+cwd = "C:/Users/user/Desktop/codex-mcp"
+startup_timeout_sec = 10.0
+tool_timeout_sec = 60.0
+```
+
+공식 Codex 설정은 stdio MCP에 `command`, `args`, `cwd`를 둘 수 있고, 프로젝트 설정은 `.codex/config.toml`에 둘 수 있습니다. 설정 후 Codex 세션을 새로 시작해 도구 목록을 갱신하세요.
+
+## 일반 사용 흐름
+
+1. 워커가 Slack 원본 채널에서 평가 완료 알림을 감지합니다.
+2. 나인하이어 평가 결과가 합격이면 인터뷰 조율 건을 만듭니다.
+3. Codex에 “검토 대기와 새 인터뷰 건을 보여줘”라고 요청합니다.
+4. 면접관 매핑과 소요시간·제안 날짜를 확인합니다.
+5. “이 건의 Slack 요청 초안만 만들어서 보여줘”라고 요청합니다.
+6. 초안의 대상·날짜·내용을 확인합니다.
+7. “이 초안을 승인하고 테스트 채널에 보내줘”라고 명시적으로 요청합니다.
+8. 면접관은 Slack 버튼과 모달로 가용시간을 제출합니다.
+9. Codex에서 인터뷰 건 상세를 조회해 공통 가능시간을 검토합니다.
+
+평가 도구 매핑이 아직 없거나 결과 문자열을 해석할 수 없으면 자동으로 합격이라고 추측하지 않습니다. `list_workflow_reviews`에 검토 건이 생기며, 사람이 확인한 뒤 `resolve_evaluation_review`로 `PASS` 또는 `FAIL`을 명시해야 합니다.
+
+## 제공 MCP 도구
+
+| 도구 | 역할 | 외부 변경 |
+|---|---|---|
+| `bridge_status` | 연결 설정 및 로컬 상태 요약 | 없음 |
+| `list_interview_cases` | 인터뷰 건 목록 | 없음 |
+| `get_interview_case` | 면접관·가용시간·초안 상세 | 없음 |
+| `suggest_common_interview_slots` | 필수 면접관 공통 가능시간 계산 | 없음 |
+| `list_workflow_reviews` | 사람 판단이 필요한 항목 | 없음 |
+| `inspect_ninehire_tools` | 나인하이어 도구 스키마 조회 | 읽기 |
+| `sync_slack_notifications` | Slack 원본 채널 즉시 재확인 | 외부 읽기, 로컬 상태 갱신 |
+| `resolve_evaluation_review` | 수동 평가 판단 기록 | 로컬 상태 갱신 |
+| `resolve_interviewer_review` | 면접관 교체·제외 등 조치 후 검토 완료 | 로컬 상태 갱신 |
+| `sync_case_interviewers` | 나인하이어 최신 면접관 반영 | 외부 읽기, 로컬 상태 갱신 |
+| `map_interviewer_to_slack` | 나인하이어–Slack ID 매핑 | 로컬 상태 갱신 |
+| `add_case_interviewer` | 이번 건에 면접관 추가 | 로컬 상태 갱신 |
+| `exclude_case_interviewer` | 이번 건에서 면접관 제외 | 로컬 상태 갱신, 이력 보존 |
+| `set_interviewer_required` | 필수/선택 면접관 변경 | 로컬 상태 갱신 |
+| `set_case_schedule_rules` | 소요시간·제안 날짜 변경 | 로컬 상태 갱신 |
+| `record_manual_availability` | 예외 시간 직접 기록 | 로컬 상태 갱신 |
+| `create_interviewer_request_draft` | Slack 메시지 초안 생성 | 발송 없음 |
+| `list_pending_message_drafts` | 승인 대기 초안 조회 | 없음 |
+| `approve_and_send_interviewer_request` | 초안 승인 후 Slack 발송 | **Slack 메시지 발송** |
+
+## 날짜와 리마인드 규칙
+
+PDF의 날짜 제안 규칙을 그대로 코드화했습니다.
+
+- 요청일이 월요일이면 이번 주 목요일 + 다음 주 월~목, 총 5일
+- 그 외에는 다음 주 월~목, 총 4일
+- 기본 시간대 09:00–18:00
+- 기본 소요시간 60분
+
+리마인드는 주말을 제외한 09:00–18:00 업무시간으로 계산합니다.
+
+- 1차: 요청 후 업무시간 기준 2시간
+- 2차: 다음 영업일 10:00
+- 1차와 2차 시간이 겹치거나 역전되면 중복 발송을 피하기 위해 2차를 1차 다음 영업일 10:00으로 이동
+- 최대 2회 후 담당자 검토 대기
+
+현재는 **공휴일 캘린더를 적용하지 않고 토·일만 제외**합니다. 회사 공휴일·대체휴무까지 반영하려면 다음 단계에서 휴일 캘린더 어댑터가 필요합니다.
+
+## 로컬 데이터
+
+기본 DB 위치:
+
+```text
+data/bridge.db
+```
+
+주요 저장 대상:
+
+- Slack 알림의 해시·분류·최소 식별 정보
+- 인터뷰 조율 건 상태
+- 건별 면접관 스냅샷과 Slack ID 매핑
+- 면접관 가용시간
+- 메시지 초안·승인·발송 상태
+- 리마인드 상태
+- 검토 대기 사유와 감사 이벤트
+
+원본 Slack 이벤트 전체를 장기 보관하지 않고, 파싱에 필요한 텍스트와 링크만 축약 저장합니다. 그래도 지원자 이름 등 개인정보가 포함될 수 있으므로 DB를 Git·공유 폴더·개인 클라우드 동기화 대상에 넣지 마세요.
+
+백업하려면 워커와 Codex MCP를 종료한 뒤 `data/bridge.db`를 암호화된 안전한 위치에 복사합니다.
+
+## Windows에서 워커 자동 시작
+
+작업 스케줄러에는 “5분마다 짧게 실행”하는 작업이 아니라 **로그인 시 장기 실행 워커를 시작하고 실패 시 재시작**하도록 등록해야 합니다. 버튼과 모달 이벤트는 5분 작업 사이에도 들어오기 때문입니다.
+
+권장 설정:
+
+- 트리거: 사용자 로그인 시
+- 프로그램: Node.js 실행 파일, 일반적으로 `C:\Program Files\nodejs\node.exe`
+- 인수: `dist\worker\main.js`
+- 시작 위치: `C:\Users\user\Desktop\codex-mcp`
+- 실패 시 1분 간격 재시작, 3회 이상
+- 가능한 경우 “예약된 시작을 놓친 경우 가능한 즉시 실행”
+- 절전 중 실행 여부는 회사 PC 정책에 맞게 결정
+
+먼저 터미널에서 `npm run start:worker`가 정상 동작하는지 확인한 뒤 작업 스케줄러에 등록하세요.
+
+## 상태 흐름
+
+```text
+Slack 평가 완료 알림
+  ├─ 평가 FAIL → 처리 종료
+  ├─ 평가 확인 불가 → REVIEW_REQUIRED
+  └─ 평가 PASS → READY_FOR_DRAFT
+                     ↓ 초안 생성
+                 DRAFT_CREATED
+                     ↓ 사용자 승인·발송
+              COLLECTING_AVAILABILITY
+                  ├─ 면접관 불참/미응답 → REVIEW_REQUIRED
+                  └─ 필수 면접관 모두 제출 → READY_TO_SCHEDULE
+```
+
+면접관이 “이번 인터뷰 참여 어려움”을 누르면 자동 제외하지 않습니다. `DECLINED_PENDING_REVIEW`로 저장하고 담당자가 대체 면접관 추가, 선택 참여 전환, 제외 중 하나를 결정합니다.
+
+## 개발 명령
+
+```powershell
+npm run dev:mcp
+npm run dev:worker
+npm run inspect:ninehire
+npm run inspect:slack-source
+npm run typecheck
+npm test
+npm run build
+```
+
+## 테스트
+
+현재 자동 테스트는 다음 핵심 규칙을 검증합니다.
+
+- 월요일/비월요일 날짜 제안 규칙
+- 가용시간 중복 제거와 연속 시간 병합
+- 업무시간·주말을 고려한 리마인드
+- 평가 완료와 평가 기한 만료 메시지 구분
+- Slack 링크에서 지원자·채용 정보 추출
+- 날짜별 체크박스가 Slack 제한인 10개 이하인지 확인
+- Slack 메시지 중복 저장 방지
+- 제외된 면접관 이력 보존
+
+실제 Slack/NineHire 키를 사용하는 통합 테스트는 비밀값과 외부 상태 변경 위험 때문에 자동 테스트에 포함하지 않았습니다. 테스트 채널에서 다음 순서로 수동 검증하세요.
+
+1. `npm run inspect:ninehire`
+2. `npm run inspect:slack-source`
+3. 워커 시작
+4. `bridge_status`
+5. `sync_slack_notifications`
+6. 초안 생성
+7. 초안 내용 확인 후 승인·발송
+8. 테스트 면접관 계정으로 모달 제출
+9. `get_interview_case`로 저장 결과 확인
+
+## 알려진 제한과 다음 단계
+
+- 다우오피스 회의실 확인은 `src/domain/daou-office.ts`의 어댑터 경계만 있고 실제 연동은 아직 없습니다.
+- 면접관 캘린더와 회의실의 교집합 계산은 다우오피스 단계에서 추가해야 합니다.
+- 대시보드는 아직 없습니다. SQLite의 구조화 상태를 그대로 읽는 방식으로 후속 구현할 수 있습니다.
+- 나인하이어가 실제 제공하는 도구 스키마를 키 없이 확인할 수 없으므로 최초 매핑은 필요합니다.
+- Slack 알림 Block Kit 원본 형식이 바뀌면 파서 fixture를 추가하고 `src/slack/parser.ts`를 조정해야 합니다.
+- 공휴일은 아직 제외하지 않습니다.
+- 한 대의 로컬 PC를 기준으로 설계했습니다. 여러 운영자가 동시에 쓰거나 24시간 가용성이 필요하면 서버 배포와 PostgreSQL 전환을 검토해야 합니다.
+
+## GitHub에 올리기 전 확인
+
+다음 파일은 커밋하면 안 됩니다.
+
+- `.env`
+- `data/*.db`
+- `data/*.db-wal`
+- `data/*.db-shm`
+- 로그와 실제 나인하이어 도구 응답
+
+확인 명령:
+
+```powershell
+git status
+git diff -- . ':!.env'
+```
+
+저장소가 아직 초기화되지 않았다면:
+
+```powershell
+git init
+git add .
+git commit -m "feat: scaffold local interview arrangement bridge MCP"
+```
+
+그 다음 본인이 만든 GitHub 원격 저장소 URL을 연결해 푸시하세요. 이 프로젝트는 라이선스를 아직 선택하지 않았으므로 공개 저장소로 배포할 계획이라면 회사 정책에 맞는 라이선스와 개인정보 처리 방침을 먼저 결정해야 합니다.

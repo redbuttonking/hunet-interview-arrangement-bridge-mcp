@@ -1,0 +1,223 @@
+import type { KnownBlock, ModalView } from "@slack/types";
+import { defaultHourlySlots, normalizeSlots } from "../domain/calendar.js";
+import type {
+  CaseBundle,
+  InterviewCaseRow,
+  InterviewerRow,
+} from "../db/database.js";
+import type { TimeSlot } from "../domain/types.js";
+
+export const OPEN_AVAILABILITY_ACTION = "open_interview_availability";
+export const DECLINE_INTERVIEW_ACTION = "decline_interview_participation";
+export const AVAILABILITY_VIEW_CALLBACK = "submit_interview_availability";
+
+function dateLabel(date: string): string {
+  return new Intl.DateTimeFormat("ko-KR", {
+    month: "long",
+    day: "numeric",
+    weekday: "short",
+    timeZone: "UTC",
+  }).format(new Date(`${date}T00:00:00Z`));
+}
+
+function candidateLabel(interviewCase: InterviewCaseRow): string {
+  return interviewCase.candidateName ?? "이름 미확인 지원자";
+}
+
+export function buildRequestMessage(bundle: CaseBundle): {
+  text: string;
+  blocks: KnownBlock[];
+} {
+  const { interviewCase } = bundle;
+  const active = bundle.interviewers.filter((item) => item.active);
+  const mentions = active
+    .map((item) =>
+      item.slackUserId ? `<@${item.slackUserId}>` : item.displayName,
+    )
+    .join(", ");
+  const dates = interviewCase.proposalDates.map(dateLabel).join(", ");
+  const text = `${candidateLabel(interviewCase)} 지원자 인터뷰 가능 일정 입력 요청`;
+  const blocks: KnownBlock[] = [
+    {
+      type: "header",
+      text: { type: "plain_text", text: "인터뷰 가능 일정 입력 요청" },
+    },
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: [
+          `*지원자:* ${candidateLabel(interviewCase)}`,
+          `*채용:* ${interviewCase.recruitmentName ?? "채용 정보 미확인"}`,
+          `*면접관:* ${mentions || "면접관 매핑 필요"}`,
+          `*예상 소요시간:* ${interviewCase.durationMinutes}분`,
+          `*제안 날짜:* ${dates}`,
+        ].join("\n"),
+      },
+    },
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text:
+          "가능한 시간을 선택해 주세요. 현재 참여가 어려운 경우 별도로 알려주시면 담당자가 면접관 구성을 검토합니다.",
+      },
+    },
+    {
+      type: "actions",
+      block_id: `case_actions_${interviewCase.id}`,
+      elements: [
+        {
+          type: "button",
+          action_id: OPEN_AVAILABILITY_ACTION,
+          text: { type: "plain_text", text: "가능 일정 입력" },
+          style: "primary",
+          value: interviewCase.id,
+        },
+        {
+          type: "button",
+          action_id: DECLINE_INTERVIEW_ACTION,
+          text: { type: "plain_text", text: "이번 인터뷰 참여 어려움" },
+          style: "danger",
+          value: interviewCase.id,
+          confirm: {
+            title: { type: "plain_text", text: "참여 어려움 확인" },
+            text: {
+              type: "mrkdwn",
+              text: "담당자 검토 대기 상태로 변경할까요?",
+            },
+            confirm: { type: "plain_text", text: "변경" },
+            deny: { type: "plain_text", text: "취소" },
+          },
+        },
+      ],
+    },
+    {
+      type: "context",
+      elements: [
+        {
+          type: "mrkdwn",
+          text: "기본 시간대 09:00–18:00 · 버튼 응답은 면접 건별로 저장됩니다.",
+        },
+      ],
+    },
+  ];
+  return { text, blocks };
+}
+
+export function buildAvailabilityModal(
+  interviewCase: InterviewCaseRow,
+  interviewer: InterviewerRow,
+): ModalView {
+  const slotOptions = defaultHourlySlots().map((slot) => ({
+    text: {
+      type: "plain_text" as const,
+      text: `${slot.start}–${slot.end}`,
+    },
+    value: `${slot.start}-${slot.end}`,
+  }));
+  const blocks: KnownBlock[] = [
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: [
+          `*지원자:* ${candidateLabel(interviewCase)}`,
+          `*면접관:* ${interviewer.displayName}`,
+          `*예상 소요시간:* ${interviewCase.durationMinutes}분`,
+        ].join("\n"),
+      },
+    },
+    {
+      type: "input",
+      block_id: "global_all",
+      optional: true,
+      label: { type: "plain_text", text: "전체 선택" },
+      element: {
+        type: "checkboxes",
+        action_id: "all_dates",
+        options: [
+          {
+            text: {
+              type: "plain_text",
+              text: "모든 제안 날짜의 모든 시간 가능",
+            },
+            value: "ALL_DATES",
+          },
+        ],
+      },
+    },
+  ];
+
+  for (const date of interviewCase.proposalDates) {
+    blocks.push({
+      type: "input",
+      block_id: `date_${date}`,
+      optional: true,
+      label: { type: "plain_text", text: dateLabel(date) },
+      element: {
+        type: "checkboxes",
+        action_id: "time_slots",
+        options: [
+          {
+            text: {
+              type: "plain_text",
+              text: "이 날짜 전체 시간 가능",
+            },
+            value: "ALL_DAY",
+          },
+          ...slotOptions,
+        ],
+      },
+    });
+  }
+
+  return {
+    type: "modal",
+    callback_id: AVAILABILITY_VIEW_CALLBACK,
+    private_metadata: JSON.stringify({
+      caseId: interviewCase.id,
+      slackUserId: interviewer.slackUserId,
+    }),
+    title: { type: "plain_text", text: "가능 일정 입력" },
+    submit: { type: "plain_text", text: "제출" },
+    close: { type: "plain_text", text: "취소" },
+    blocks,
+  };
+}
+
+interface SelectedOption {
+  value?: string;
+}
+
+function selectedValues(action: unknown): string[] {
+  if (!action || typeof action !== "object") return [];
+  const options = (action as { selected_options?: SelectedOption[] })
+    .selected_options;
+  return Array.isArray(options)
+    ? options
+        .map((option) => option.value)
+        .filter((value): value is string => Boolean(value))
+    : [];
+}
+
+export function availabilityFromViewState(
+  interviewCase: InterviewCaseRow,
+  values: Record<string, Record<string, unknown>>,
+): TimeSlot[] {
+  const global = selectedValues(values.global_all?.all_dates);
+  const hourly = defaultHourlySlots();
+  const slots: TimeSlot[] = [];
+  const allDates = global.includes("ALL_DATES");
+
+  for (const date of interviewCase.proposalDates) {
+    const selected = selectedValues(values[`date_${date}`]?.time_slots);
+    const allDay = allDates || selected.includes("ALL_DAY");
+    for (const slot of hourly) {
+      if (allDay || selected.includes(`${slot.start}-${slot.end}`)) {
+        slots.push({ date, start: slot.start, end: slot.end });
+      }
+    }
+  }
+  return normalizeSlots(slots);
+}
