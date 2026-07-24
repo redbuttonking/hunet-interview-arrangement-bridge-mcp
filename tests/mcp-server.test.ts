@@ -21,10 +21,6 @@ describe("bridge MCP server", () => {
         url: "https://example.invalid/mcp",
         authHeader: "Authorization",
         authScheme: "Bearer",
-        evaluation: {
-          passValues: ["합격"],
-          failValues: ["불합격"],
-        },
         interviewers: {
           idPath: "id",
           namePath: "name",
@@ -33,8 +29,8 @@ describe("bridge MCP server", () => {
       },
     };
     const fakeNinehire: NinehireWorkflowAdapter = {
-      async lookupEvaluation() {
-        return { decision: "REVIEW_REQUIRED" };
+      async lookupCompletedEvaluation() {
+        return { reason: "평가표 조회 전 테스트입니다." };
       },
       async listInterviewers() {
         return [];
@@ -56,6 +52,9 @@ describe("bridge MCP server", () => {
     expect(tools.tools.map((tool) => tool.name)).toContain("bridge_status");
     expect(tools.tools.map((tool) => tool.name)).toContain(
       "approve_and_send_interviewer_request",
+    );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
+      "approve_interview_arrangement",
     );
 
     const status = await client.callTool({ name: "bridge_status" });

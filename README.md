@@ -1,6 +1,6 @@
 # Interview Arrangement Bridge MCP
 
-나인하이어의 평가 완료 알림을 감지하고, 합격자로 확인된 지원자의 면접관 가용시간을 Slack에서 수집하는 **로컬 업무형 브릿지 MCP 서버**입니다.
+나인하이어의 평가 완료 알림을 감지하고, 완료된 평가표 요약을 사용자에게 보여준 뒤 승인된 지원자의 면접관 가용시간을 Slack에서 수집하는 **로컬 업무형 브릿지 MCP 서버**입니다.
 
 Codex는 이 서버의 MCP 도구를 호출하고, 로컬 백그라운드 워커는 Slack Socket Mode 연결·5분 주기 동기화·리마인드를 담당합니다. 상태와 이력은 별도 클라우드 DB 없이 이 PC의 SQLite 파일에 저장됩니다.
 
@@ -10,8 +10,9 @@ Codex는 이 서버의 MCP 도구를 호출하고, 로컬 백그라운드 워커
 
 - Slack 비공개 나인하이어 알림 채널을 실시간 수신하고 5분마다 누락 메시지를 재확인
 - `서류 평가가 완료되었습니다.` 또는 `평가가 완료되었습니다.` 알림만 조율 시작 후보로 분류
-- 나인하이어 MCP에서 실제 평가 결과를 조회해 `PASS`일 때만 인터뷰 조율 건 생성
-- 나인하이어 MCP에서 건별 최신 면접관을 조회하고 Slack 사용자와 이메일로 자동 연결
+- 나인하이어 MCP에서 완료된 평가표·평가자·의견·선택 점수를 조회해 검토 대기 건 생성
+- 사용자가 MCP에서 `면접 조율 시작`을 승인한 경우에만 인터뷰 조율 건 생성
+- 면접관 기본값은 별도 정책을 정한 뒤 나인하이어 조회 또는 건별 수동 추가로 연결
 - 자동 연결 실패 시 나인하이어 사용자 ID와 Slack 사용자 ID를 한 번 수동 매핑
 - 건별 면접관 추가·제외·필수/선택 참여 변경
 - Slack 발송 전 메시지 초안 생성 → 사용자 승인 → 테스트 채널 발송
@@ -131,7 +132,7 @@ npm run inspect:slack-source
 
 `SLACK_NINEHIRE_BOT_ID`를 비워도 전용 테스트 채널에서는 작동하지만, 같은 채널의 다른 앱 메시지도 로컬 파서가 읽게 됩니다. 운영 전에는 반드시 설정하는 것을 권장합니다.
 
-### 3. 나인하이어 MCP 확인과 매핑
+### 3. 나인하이어 MCP 연결 확인
 
 `.env`에 MCP URL과 키를 입력합니다.
 
@@ -151,44 +152,11 @@ NINEHIRE_MCP_AUTH_SCHEME=Bearer
 npm run inspect:ninehire
 ```
 
-출력에서 다음 두 종류의 **실제 읽기 도구**를 찾습니다.
+현재 서버는 나인하이어의 실제 읽기 도구인 `get_recruitments`, `get_applicant_progresses`, `get_applicant_progress`를 사용합니다. Slack 알림의 지원자·채용 링크를 우선 사용하고, 링크 ID를 쓸 수 없으면 이름이 정확히 하나만 일치할 때만 보완 조회합니다.
 
-1. 완료된 평가표 또는 지원자의 평가 결과를 조회하는 도구
-2. 채용/지원자/인터뷰 건의 면접관을 조회하는 도구
+완료된 평가표는 평가 방식, 완료 시각, 평가 참여자, 평가자별 전체 의견, 항목별 선택값과 점수를 요약해 로컬 검토 건에 저장합니다. 이름이나 채용명이 중복되거나 완료된 평가표를 찾지 못하면 자동으로 면접 조율을 시작하지 않고 검토 사유만 남깁니다.
 
-그 후 `.env`의 매핑 항목을 채웁니다. 아래 값은 구조 설명용 예시이며 그대로 복사할 실제 나인하이어 도구명이 아닙니다.
-
-```dotenv
-# 예시일 뿐: inspect 결과의 실제 도구명·필드명으로 바꿔야 함
-NINEHIRE_EVALUATION_TOOL_NAME=<실제_평가조회_도구명>
-NINEHIRE_EVALUATION_ARGS_JSON={"applicantId":"{{candidateRef}}"}
-NINEHIRE_EVALUATION_RESULT_PATH=data.evaluation.result
-
-NINEHIRE_INTERVIEWERS_TOOL_NAME=<실제_면접관조회_도구명>
-NINEHIRE_INTERVIEWERS_ARGS_JSON={"applicantId":"{{candidateRef}}"}
-NINEHIRE_INTERVIEWERS_RESULT_PATH=data.interviewers
-NINEHIRE_INTERVIEWER_ID_PATH=id
-NINEHIRE_INTERVIEWER_NAME_PATH=name
-NINEHIRE_INTERVIEWER_EMAIL_PATH=email
-```
-
-도구 결과 자체가 찾으려는 값이면 결과 경로에 `$`를 사용할 수 있습니다.
-
-지원하는 템플릿 값은 다음과 같습니다.
-
-- `{{candidateRef}}`
-- `{{candidateName}}`
-- `{{recruitmentRef}}`
-- `{{recruitmentName}}`
-
-평가 결과 문자열은 다음 설정으로 대응합니다.
-
-```dotenv
-NINEHIRE_EVALUATION_PASS_VALUES=합격,pass,passed
-NINEHIRE_EVALUATION_FAIL_VALUES=불합격,fail,failed
-```
-
-실제 스키마가 위 템플릿 방식으로 표현하기 어렵다면 임의로 맞추지 말고 `src/ninehire/adapter.ts`에 해당 스키마 전용 어댑터를 추가하는 편이 안전합니다.
+`list_workflow_reviews`로 평가 요약을 확인한 뒤 `approve_interview_arrangement`를 호출하면 면접 조율 건이 생성됩니다. 이 승인 단계에서는 Slack 메시지가 발송되지 않습니다.
 
 ### 4. 로컬 워커 실행
 
@@ -241,16 +209,17 @@ tool_timeout_sec = 60.0
 ## 일반 사용 흐름
 
 1. 워커가 Slack 원본 채널에서 평가 완료 알림을 감지합니다.
-2. 나인하이어 평가 결과가 합격이면 인터뷰 조율 건을 만듭니다.
-3. Codex에 “검토 대기와 새 인터뷰 건을 보여줘”라고 요청합니다.
-4. 면접관 매핑과 소요시간·제안 날짜를 확인합니다.
-5. “이 건의 Slack 요청 초안만 만들어서 보여줘”라고 요청합니다.
-6. 초안의 대상·날짜·내용을 확인합니다.
-7. “이 초안을 승인하고 테스트 채널에 보내줘”라고 명시적으로 요청합니다.
-8. 면접관은 Slack 버튼과 모달로 가용시간을 제출합니다.
-9. Codex에서 인터뷰 건 상세를 조회해 공통 가능시간을 검토합니다.
+2. 나인하이어에서 완료된 평가표 요약을 조회해 검토 대기 건에 저장합니다.
+3. Codex에 “검토 대기 평가표를 보여줘”라고 요청합니다.
+4. 평가표를 검토하고 `approve_interview_arrangement`로 면접 조율 시작을 승인합니다.
+5. 면접관과 소요시간·제안 날짜를 확인합니다.
+6. “이 건의 Slack 요청 초안만 만들어서 보여줘”라고 요청합니다.
+7. 초안의 대상·날짜·내용을 확인합니다.
+8. “이 초안을 승인하고 테스트 채널에 보내줘”라고 명시적으로 요청합니다.
+9. 면접관은 Slack 버튼과 모달로 가용시간을 제출합니다.
+10. Codex에서 인터뷰 건 상세를 조회해 공통 가능시간을 검토합니다.
 
-평가 도구 매핑이 아직 없거나 결과 문자열을 해석할 수 없으면 자동으로 합격이라고 추측하지 않습니다. `list_workflow_reviews`에 검토 건이 생기며, 사람이 확인한 뒤 `resolve_evaluation_review`로 `PASS` 또는 `FAIL`을 명시해야 합니다.
+완료된 평가표가 있어도 자동으로 합격 또는 면접 진행으로 추측하지 않습니다. `list_workflow_reviews`에서 평가 요약을 확인한 뒤에만 `approve_interview_arrangement`로 면접 조율을 시작할 수 있습니다.
 
 ## 제공 MCP 도구
 
@@ -263,7 +232,7 @@ tool_timeout_sec = 60.0
 | `list_workflow_reviews` | 사람 판단이 필요한 항목 | 없음 |
 | `inspect_ninehire_tools` | 나인하이어 도구 스키마 조회 | 읽기 |
 | `sync_slack_notifications` | Slack 원본 채널 즉시 재확인 | 외부 읽기, 로컬 상태 갱신 |
-| `resolve_evaluation_review` | 수동 평가 판단 기록 | 로컬 상태 갱신 |
+| `approve_interview_arrangement` | 평가표 검토 후 면접 조율 시작 승인 | 로컬 상태 갱신 |
 | `resolve_interviewer_review` | 면접관 교체·제외 등 조치 후 검토 완료 | 로컬 상태 갱신 |
 | `sync_case_interviewers` | 나인하이어 최신 면접관 반영 | 외부 읽기, 로컬 상태 갱신 |
 | `map_interviewer_to_slack` | 나인하이어–Slack ID 매핑 | 로컬 상태 갱신 |
@@ -336,15 +305,16 @@ data/bridge.db
 
 ```text
 Slack 평가 완료 알림
-  ├─ 평가 FAIL → 처리 종료
-  ├─ 평가 확인 불가 → REVIEW_REQUIRED
-  └─ 평가 PASS → READY_FOR_DRAFT
-                     ↓ 초안 생성
-                 DRAFT_CREATED
-                     ↓ 사용자 승인·발송
-              COLLECTING_AVAILABILITY
-                  ├─ 면접관 불참/미응답 → REVIEW_REQUIRED
-                  └─ 필수 면접관 모두 제출 → READY_TO_SCHEDULE
+  ├─ 지원자·채용·완료 평가표 확인 불가 → REVIEW_REQUIRED
+  └─ 평가표 요약 저장 → START_APPROVAL_REQUIRED
+                               ↓ 사용자 승인
+                           READY_FOR_DRAFT
+                               ↓ 초안 생성
+                           DRAFT_CREATED
+                               ↓ 사용자 승인·발송
+                        COLLECTING_AVAILABILITY
+                            ├─ 면접관 불참/미응답 → REVIEW_REQUIRED
+                            └─ 필수 면접관 모두 제출 → READY_TO_SCHEDULE
 ```
 
 면접관이 “이번 인터뷰 참여 어려움”을 누르면 자동 제외하지 않습니다. `DECLINED_PENDING_REVIEW`로 저장하고 담당자가 대체 면접관 추가, 선택 참여 전환, 제외 중 하나를 결정합니다.

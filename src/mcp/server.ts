@@ -114,11 +114,7 @@ export function createBridgeMcpServer(
           sourceChannel: Boolean(config.slack.sourceChannelId),
           requestChannel: Boolean(config.slack.requestChannelId),
           ninehireKey: gateway.isConfigured(),
-          ninehireEvaluationMapping: Boolean(
-            config.ninehire.evaluation.toolName &&
-              config.ninehire.evaluation.argsJson &&
-              config.ninehire.evaluation.resultPath,
-          ),
+          ninehireEvaluationSummary: gateway.isConfigured(),
           ninehireInterviewerMapping: Boolean(
             config.ninehire.interviewers.toolName &&
               config.ninehire.interviewers.argsJson &&
@@ -264,14 +260,13 @@ export function createBridgeMcpServer(
   );
 
   server.registerTool(
-    "resolve_evaluation_review",
+    "approve_interview_arrangement",
     {
-      title: "평가 결과 검토 확정",
+      title: "면접 조율 시작 승인",
       description:
-        "나인하이어 평가 조회가 자동 매핑되지 않은 알림에 대해 합격/불합격 판단을 명시적으로 기록합니다.",
+        "완료된 나인하이어 평가표 요약을 확인한 뒤 이 지원자의 면접 조율 건을 생성합니다. Slack 메시지는 발송하지 않습니다.",
       inputSchema: {
         reviewId: z.string().uuid(),
-        decision: z.enum(["PASS", "FAIL"]),
       },
       annotations: {
         readOnlyHint: false,
@@ -280,8 +275,8 @@ export function createBridgeMcpServer(
         openWorldHint: false,
       },
     },
-    async ({ reviewId, decision }) =>
-      result(await workflow.resolveEvaluationReview(reviewId, decision)),
+    async ({ reviewId }) =>
+      result(await workflow.approveInterviewArrangement(reviewId)),
   );
 
   server.registerTool(

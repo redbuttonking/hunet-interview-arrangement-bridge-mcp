@@ -18,13 +18,6 @@ export interface AppConfig {
     apiKey?: string;
     authHeader: string;
     authScheme: string;
-    evaluation: {
-      toolName?: string;
-      argsJson?: string;
-      resultPath?: string;
-      passValues: string[];
-      failValues: string[];
-    };
     interviewers: {
       toolName?: string;
       argsJson?: string;
@@ -49,16 +42,6 @@ export function loadLocalEnv(envPath = resolve(".env")): void {
 function optional(name: string): string | undefined {
   const value = process.env[name]?.trim();
   return value ? value : undefined;
-}
-
-function list(name: string, fallback: string[]): string[] {
-  const value = optional(name);
-  return value
-    ? value
-        .split(",")
-        .map((item) => item.trim())
-        .filter(Boolean)
-    : fallback;
 }
 
 function positiveInteger(name: string, fallback: number): number {
@@ -97,21 +80,6 @@ export function getConfig(): AppConfig {
         process.env.NINEHIRE_MCP_AUTH_SCHEME === undefined
           ? "Bearer"
           : process.env.NINEHIRE_MCP_AUTH_SCHEME.trim(),
-      evaluation: {
-        toolName: optional("NINEHIRE_EVALUATION_TOOL_NAME"),
-        argsJson: optional("NINEHIRE_EVALUATION_ARGS_JSON"),
-        resultPath: optional("NINEHIRE_EVALUATION_RESULT_PATH"),
-        passValues: list("NINEHIRE_EVALUATION_PASS_VALUES", [
-          "합격",
-          "pass",
-          "passed",
-        ]),
-        failValues: list("NINEHIRE_EVALUATION_FAIL_VALUES", [
-          "불합격",
-          "fail",
-          "failed",
-        ]),
-      },
       interviewers: {
         toolName: optional("NINEHIRE_INTERVIEWERS_TOOL_NAME"),
         argsJson: optional("NINEHIRE_INTERVIEWERS_ARGS_JSON"),

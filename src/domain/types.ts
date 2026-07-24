@@ -1,5 +1,3 @@
-export type EvaluationDecision = "PASS" | "FAIL" | "REVIEW_REQUIRED";
-
 export type InterviewCaseStatus =
   | "READY_FOR_DRAFT"
   | "DRAFT_CREATED"
@@ -30,9 +28,43 @@ export interface NinehireInterviewer {
   required: boolean;
 }
 
+export interface EvaluationOptionSummary {
+  title: string;
+  score?: number;
+}
+
+export interface EvaluationItemSummary {
+  title: string;
+  finalEvaluation: boolean;
+  selectedOptions: EvaluationOptionSummary[];
+  comment?: string;
+}
+
+export interface EvaluatorSummary {
+  name: string;
+  submittedAt?: string;
+  comment?: string;
+  items: EvaluationItemSummary[];
+}
+
+export interface ScoreSheetSummary {
+  scoreSheetId: string;
+  title: string;
+  evaluationMethod?: string;
+  completedAt?: string;
+  participants: string[];
+  evaluators: EvaluatorSummary[];
+}
+
+export interface EvaluationSummary {
+  applicantProgressId: string;
+  recruitmentId: string;
+  scoreSheets: ScoreSheetSummary[];
+}
+
 export interface EvaluationLookup {
-  decision: EvaluationDecision;
-  rawValue?: string;
+  context?: CandidateContext;
+  summary?: EvaluationSummary;
   reason?: string;
 }
 

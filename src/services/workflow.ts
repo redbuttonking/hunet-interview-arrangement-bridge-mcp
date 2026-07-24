@@ -9,7 +9,7 @@ import {
 import { proposalDates } from "../domain/calendar.js";
 import type {
   CandidateContext,
-  EvaluationDecision,
+  EvaluationSummary,
   SlackNotificationInput,
 } from "../domain/types.js";
 import type { NinehireWorkflowAdapter } from "../ninehire/adapter.js";
@@ -36,21 +36,41 @@ function hashPayload(text: string, blocks: unknown): string {
     .digest("hex");
 }
 
-function contextFromNotification(row: Record<string, unknown>): CandidateContext {
-  const optional = (name: string): string | undefined => {
-    const value = row[name];
-    return value === null || value === undefined ? undefined : String(value);
-  };
-  return {
-    candidateRef: optional("candidate_ref"),
-    candidateName: optional("candidate_name"),
-    recruitmentRef: optional("recruitment_ref"),
-    recruitmentName: optional("recruitment_name"),
-  };
-}
-
 export interface SlackIdentityResolver {
   lookupUserIdByEmail(email: string): Promise<string | undefined>;
+}
+
+interface EvaluationApprovalPayload {
+  context: CandidateContext;
+  evaluation: EvaluationSummary;
+}
+
+function evaluationApprovalPayload(
+  value: Record<string, unknown> | null,
+): EvaluationApprovalPayload | undefined {
+  if (!value) return undefined;
+  const context = value.context;
+  const evaluation = value.evaluation;
+  if (
+    !context ||
+    typeof context !== "object" ||
+    Array.isArray(context) ||
+    !evaluation ||
+    typeof evaluation !== "object" ||
+    Array.isArray(evaluation)
+  ) {
+    return undefined;
+  }
+  const candidateContext = context as CandidateContext;
+  const evaluationSummary = evaluation as EvaluationSummary;
+  if (
+    !evaluationSummary.applicantProgressId ||
+    !evaluationSummary.recruitmentId ||
+    !Array.isArray(evaluationSummary.scoreSheets)
+  ) {
+    return undefined;
+  }
+  return { context: candidateContext, evaluation: evaluationSummary };
 }
 
 export class WorkflowService {
@@ -94,13 +114,32 @@ export class WorkflowService {
     }
 
     try {
-      const evaluation = await this.ninehire.lookupEvaluation(input.parsed);
-      return await this.applyEvaluationDecision(
-        stored.id,
+      const evaluation = await this.ninehire.lookupCompletedEvaluation(
         input.parsed,
-        evaluation.decision,
-        evaluation.reason,
       );
+      if (!evaluation.context || !evaluation.summary) {
+        this.db.updateNotificationStatus(stored.id, "REVIEW_REQUIRED");
+        this.db.createReview({
+          notificationId: stored.id,
+          reviewType: "EVALUATION_LOOKUP_REQUIRED",
+          reason:
+            evaluation.reason ??
+            "평가표를 조회했지만 검토에 필요한 정보를 만들지 못했습니다.",
+        });
+        return { notificationId: stored.id, result: "REVIEW_REQUIRED" };
+      }
+      this.db.updateNotificationStatus(stored.id, "AWAITING_START_APPROVAL");
+      this.db.createReview({
+        notificationId: stored.id,
+        reviewType: "INTERVIEW_ARRANGEMENT_START_REQUIRED",
+        reason:
+          "완료된 평가표 요약을 확인한 뒤 면접 조율 시작 여부를 승인하세요.",
+        summary: {
+          context: evaluation.context,
+          evaluation: evaluation.summary,
+        },
+      });
+      return { notificationId: stored.id, result: "EVALUATION_READY_FOR_APPROVAL" };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.db.updateNotificationStatus(stored.id, "ERROR", message);
@@ -113,58 +152,34 @@ export class WorkflowService {
     }
   }
 
-  async resolveEvaluationReview(
+  async approveInterviewArrangement(
     reviewId: string,
-    decision: Exclude<EvaluationDecision, "REVIEW_REQUIRED">,
-  ): Promise<{ notificationId: string; result: string; caseId?: string }> {
+  ): Promise<{ notificationId: string; result: string; caseId: string }> {
     const review = this.db.getReview(reviewId);
-    if (!review || review.status !== "OPEN" || !review.notificationId) {
-      throw new Error(`Open evaluation review not found: ${reviewId}`);
+    if (
+      !review ||
+      review.status !== "OPEN" ||
+      !review.notificationId ||
+      review.reviewType !== "INTERVIEW_ARRANGEMENT_START_REQUIRED"
+    ) {
+      throw new Error(`Open interview-arrangement approval not found: ${reviewId}`);
     }
-    const row = this.db.getNotification(review.notificationId);
-    if (!row) throw new Error("The review's Slack notification is missing.");
-    const result = await this.applyEvaluationDecision(
-      review.notificationId,
-      contextFromNotification(row),
-      decision,
-      "Manually resolved by user.",
-    );
-    this.db.resolveReview(reviewId, decision);
-    return result;
-  }
-
-  private async applyEvaluationDecision(
-    notificationId: string,
-    context: CandidateContext,
-    decision: EvaluationDecision,
-    reason?: string,
-  ): Promise<{ notificationId: string; result: string; caseId?: string }> {
-    if (decision === "FAIL") {
-      this.db.updateNotificationStatus(notificationId, "PROCESSED");
-      return { notificationId, result: "EVALUATION_FAILED" };
+    const approval = evaluationApprovalPayload(review.summary);
+    if (!approval) {
+      throw new Error("Evaluation approval summary is missing or invalid.");
     }
-    if (decision === "REVIEW_REQUIRED") {
-      this.db.updateNotificationStatus(notificationId, "REVIEW_REQUIRED");
-      this.db.createReview({
-        notificationId,
-        reviewType: "EVALUATION_DECISION_REQUIRED",
-        reason: reason ?? "NineHire did not return a mapped evaluation result.",
-      });
-      return { notificationId, result: "REVIEW_REQUIRED" };
-    }
-
     const interviewCase = this.db.createInterviewCase({
-      notificationId,
-      candidateRef: context.candidateRef,
-      candidateName: context.candidateName,
-      recruitmentRef: context.recruitmentRef,
-      recruitmentName: context.recruitmentName,
+      notificationId: review.notificationId,
+      candidateRef: approval.context.candidateRef,
+      candidateName: approval.context.candidateName,
+      recruitmentRef: approval.context.recruitmentRef,
+      recruitmentName: approval.context.recruitmentName,
       proposalDates: proposalDates(todayInKorea()),
     });
-    this.db.updateNotificationStatus(notificationId, "PROCESSED");
-    await this.syncCaseInterviewers(interviewCase.id);
+    this.db.updateNotificationStatus(review.notificationId, "PROCESSED");
+    this.db.resolveReview(reviewId, "INTERVIEW_ARRANGEMENT_STARTED");
     return {
-      notificationId,
+      notificationId: review.notificationId,
       result: "INTERVIEW_CASE_CREATED",
       caseId: interviewCase.id,
     };

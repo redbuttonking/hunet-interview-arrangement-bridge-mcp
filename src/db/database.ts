@@ -60,6 +60,7 @@ export interface ReviewRow {
   caseId: string | null;
   reviewType: string;
   reason: string;
+  summary: Record<string, unknown> | null;
   status: "OPEN" | "RESOLVED";
   resolution: string | null;
   createdAt: string;
@@ -132,12 +133,25 @@ function toDraft(row: SqlRow): DraftRow {
 }
 
 function toReview(row: SqlRow): ReviewRow {
+  const summaryJson = nullableString(row.summary_json);
+  let summary: Record<string, unknown> | null = null;
+  if (summaryJson) {
+    try {
+      const parsed = JSON.parse(summaryJson) as unknown;
+      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+        summary = parsed as Record<string, unknown>;
+      }
+    } catch {
+      summary = null;
+    }
+  }
   return {
     id: asString(row.id),
     notificationId: nullableString(row.notification_id),
     caseId: nullableString(row.case_id),
     reviewType: asString(row.review_type),
     reason: asString(row.reason),
+    summary,
     status: asString(row.status) as ReviewRow["status"],
     resolution: nullableString(row.resolution),
     createdAt: asString(row.created_at),
@@ -300,6 +314,20 @@ export class BridgeDatabase {
       INSERT OR IGNORE INTO schema_migrations(version, applied_at)
       VALUES (1, datetime('now'));
     `);
+
+    const versionTwo = this.connection
+      .prepare("SELECT version FROM schema_migrations WHERE version = 2")
+      .get() as SqlRow | undefined;
+    if (!versionTwo) {
+      this.connection.exec(
+        "ALTER TABLE workflow_reviews ADD COLUMN summary_json TEXT",
+      );
+      this.connection
+        .prepare(
+          "INSERT INTO schema_migrations(version, applied_at) VALUES (2, datetime('now'))",
+        )
+        .run();
+    }
   }
 
   transaction<T>(operation: () => T): T {
@@ -400,13 +428,15 @@ export class BridgeDatabase {
     caseId?: string;
     reviewType: string;
     reason: string;
+    summary?: Record<string, unknown>;
   }): string {
     const id = randomUUID();
     const insert = this.connection
       .prepare(`
         INSERT OR IGNORE INTO workflow_reviews(
-          id, notification_id, case_id, review_type, reason, status, created_at
-        ) VALUES (?, ?, ?, ?, ?, 'OPEN', ?)
+          id, notification_id, case_id, review_type, reason, summary_json,
+          status, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?)
       `)
       .run(
         id,
@@ -414,6 +444,7 @@ export class BridgeDatabase {
         input.caseId ?? null,
         input.reviewType,
         input.reason,
+        input.summary ? JSON.stringify(input.summary) : null,
         new Date().toISOString(),
       );
     if (Number(insert.changes) === 0) {
