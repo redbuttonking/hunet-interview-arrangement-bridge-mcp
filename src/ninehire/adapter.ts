@@ -1,8 +1,8 @@
-import type { AppConfig } from "../config.js";
 import type {
   CandidateContext,
   EvaluationLookup,
   EvaluationSummary,
+  InterviewerLookup,
   NinehireInterviewer,
 } from "../domain/types.js";
 import { NinehireMcpGateway } from "./gateway.js";
@@ -11,46 +11,7 @@ export interface NinehireWorkflowAdapter {
   lookupCompletedEvaluation(
     context: CandidateContext,
   ): Promise<EvaluationLookup>;
-  listInterviewers(context: CandidateContext): Promise<NinehireInterviewer[]>;
-}
-
-function valueAtPath(value: unknown, path?: string): unknown {
-  if (!path || path === "$") return value;
-  return path
-    .split(".")
-    .filter(Boolean)
-    .reduce<unknown>((current, segment) => {
-      if (typeof current !== "object" || current === null) return undefined;
-      return (current as Record<string, unknown>)[segment];
-    }, value);
-}
-
-function escapedTemplateValue(value: string | undefined): string {
-  return JSON.stringify(value ?? "").slice(1, -1);
-}
-
-function renderArgs(
-  template: string,
-  context: CandidateContext,
-): Record<string, unknown> {
-  const replacements: Record<string, string | undefined> = {
-    candidateRef: context.candidateRef,
-    candidateName: context.candidateName,
-    recruitmentRef: context.recruitmentRef,
-    recruitmentName: context.recruitmentName,
-  };
-  let rendered = template;
-  for (const [key, value] of Object.entries(replacements)) {
-    rendered = rendered.replaceAll(
-      `{{${key}}}`,
-      escapedTemplateValue(value),
-    );
-  }
-  const parsed = JSON.parse(rendered) as unknown;
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("NineHire argument template must render to a JSON object.");
-  }
-  return parsed as Record<string, unknown>;
+  listInterviewers(context: CandidateContext): Promise<InterviewerLookup>;
 }
 
 export function upstreamPayload(result: Record<string, unknown>): unknown {
@@ -178,11 +139,10 @@ function summarizeCompletedScoreSheets(
   return { applicantProgressId, recruitmentId, scoreSheets };
 }
 
-export class MappedNinehireWorkflowAdapter
+export class NinehireRecruitmentWorkflowAdapter
   implements NinehireWorkflowAdapter
 {
   constructor(
-    private readonly config: AppConfig["ninehire"],
     private readonly gateway: Pick<NinehireMcpGateway, "callTool">,
   ) {}
 
@@ -311,36 +271,41 @@ export class MappedNinehireWorkflowAdapter
 
   async listInterviewers(
     context: CandidateContext,
-  ): Promise<NinehireInterviewer[]> {
-    const mapping = this.config.interviewers;
-    if (!mapping.toolName || !mapping.argsJson || !mapping.resultPath) {
-      return [];
+  ): Promise<InterviewerLookup> {
+    const recruitmentId = identifierFromReference(context.recruitmentRef);
+    if (!recruitmentId) {
+      return { interviewers: [], unresolvedUserGroups: [] };
     }
-    const result = await this.gateway.callTool(
-      mapping.toolName,
-      renderArgs(mapping.argsJson, context),
+    const recruitment = asRecord(
+      upstreamPayload(
+        await this.gateway.callTool("get_recruitment", { recruitmentId }),
+      ),
     );
-    const raw = valueAtPath(upstreamPayload(result), mapping.resultPath);
-    if (!Array.isArray(raw)) {
-      throw new Error(
-        `NineHire interviewer result path did not resolve to an array: ${mapping.resultPath}`,
-      );
+    if (!recruitment) {
+      throw new Error("NineHire recruitment result format is invalid.");
     }
-    return raw.map((item, index) => {
-      const id = valueAtPath(item, mapping.idPath);
-      const name = valueAtPath(item, mapping.namePath);
-      const email = valueAtPath(item, mapping.emailPath);
-      if (!id || !name) {
-        throw new Error(
-          `NineHire interviewer item ${index} is missing its mapped id or name.`,
-        );
+    const unresolvedUserGroups = records(recruitment.participants)
+      .filter((participant) => codeOf(participant.type) === "user_group")
+      .map((participant) => text(asRecord(participant.userGroup)?.name))
+      .filter((name): name is string => Boolean(name));
+    const seenUserIds = new Set<string>();
+    const interviewers: NinehireInterviewer[] = [];
+    for (const participant of records(recruitment.participants)) {
+      if (codeOf(participant.type) !== "user") continue;
+      const user = asRecord(participant.user);
+      const ninehireUserId = text(user?.userId);
+      const displayName = text(user?.name);
+      if (!ninehireUserId || !displayName || seenUserIds.has(ninehireUserId)) {
+        continue;
       }
-      return {
-        ninehireUserId: String(id),
-        displayName: String(name),
-        ...(email ? { email: String(email) } : {}),
+      seenUserIds.add(ninehireUserId);
+      interviewers.push({
+        ninehireUserId,
+        displayName,
+        ...(text(user?.email) ? { email: text(user?.email) } : {}),
         required: true,
-      };
-    });
+      });
+    }
+    return { interviewers, unresolvedUserGroups };
   }
 }

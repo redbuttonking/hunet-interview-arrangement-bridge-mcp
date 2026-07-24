@@ -3,7 +3,7 @@ import type { WebClient } from "@slack/web-api";
 import { getConfig, requireWorkerConfig } from "../config.js";
 import { BridgeDatabase } from "../db/database.js";
 import {
-  MappedNinehireWorkflowAdapter,
+  NinehireRecruitmentWorkflowAdapter,
 } from "../ninehire/adapter.js";
 import { NinehireMcpGateway } from "../ninehire/gateway.js";
 import { WorkflowService, type SlackIdentityResolver } from "../services/workflow.js";
@@ -27,7 +27,7 @@ const app = new App({
   logLevel: LogLevel.INFO,
 });
 const gateway = new NinehireMcpGateway(config.ninehire);
-const ninehire = new MappedNinehireWorkflowAdapter(config.ninehire, gateway);
+const ninehire = new NinehireRecruitmentWorkflowAdapter(gateway);
 
 class SlackEmailIdentityResolver implements SlackIdentityResolver {
   constructor(private readonly client: WebClient) {}

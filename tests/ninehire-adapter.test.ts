@@ -1,23 +1,11 @@
 // 나인하이어 평가표 조회와 승인용 요약 생성을 검증한다.
 import { describe, expect, it } from "vitest";
-import type { AppConfig } from "../src/config.js";
-import { MappedNinehireWorkflowAdapter } from "../src/ninehire/adapter.js";
-
-const config: AppConfig["ninehire"] = {
-  url: "https://example.invalid/mcp",
-  authHeader: "Authorization",
-  authScheme: "Bearer",
-  interviewers: {
-    idPath: "id",
-    namePath: "name",
-    emailPath: "email",
-  },
-};
+import { NinehireRecruitmentWorkflowAdapter } from "../src/ninehire/adapter.js";
 
 describe("NineHire approval adapter", () => {
   it("builds an approval summary from completed score sheets", async () => {
     const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
-    const adapter = new MappedNinehireWorkflowAdapter(config, {
+    const adapter = new NinehireRecruitmentWorkflowAdapter({
       async callTool(name, args) {
         calls.push({ name, args });
         if (name === "get_recruitment") {
@@ -100,5 +88,49 @@ describe("NineHire approval adapter", () => {
         },
       ],
     });
+  });
+
+  it("uses direct recruitment participants and leaves user groups unresolved", async () => {
+    const adapter = new NinehireRecruitmentWorkflowAdapter({
+      async callTool(name) {
+        if (name !== "get_recruitment") {
+          throw new Error(`Unexpected tool: ${name}`);
+        }
+        return {
+          structuredContent: {
+            participants: [
+              {
+                type: { code: "user", name: "개별 멤버" },
+                user: {
+                  userId: "N1",
+                  name: "면접관",
+                  email: "interviewer@example.com",
+                },
+                userGroup: null,
+              },
+              {
+                type: { code: "user_group", name: "유저 그룹" },
+                user: null,
+                userGroup: { userGroupId: "G1", name: "개발팀" },
+              },
+            ],
+          },
+        };
+      },
+    });
+
+    const lookup = await adapter.listInterviewers({
+      recruitmentRef: "J456",
+    });
+
+    expect(lookup.interviewers).toEqual([
+      {
+        ninehireUserId: "N1",
+        displayName: "면접관",
+        email: "interviewer@example.com",
+        required: true,
+      },
+    ]);
+    expect(lookup.unresolvedUserGroups).toEqual(["개발팀"]);
   });
 });

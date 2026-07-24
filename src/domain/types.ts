@@ -28,6 +28,11 @@ export interface NinehireInterviewer {
   required: boolean;
 }
 
+export interface InterviewerLookup {
+  interviewers: NinehireInterviewer[];
+  unresolvedUserGroups: string[];
+}
+
 export interface EvaluationOptionSummary {
   title: string;
   score?: number;

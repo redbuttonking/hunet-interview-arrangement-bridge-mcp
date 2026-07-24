@@ -482,6 +482,15 @@ export class BridgeDatabase {
     return row ? toReview(row) : undefined;
   }
 
+  hasCaseReview(caseId: string, reviewType: string): boolean {
+    const row = this.connection
+      .prepare(
+        "SELECT id FROM workflow_reviews WHERE case_id = ? AND review_type = ? LIMIT 1",
+      )
+      .get(caseId, reviewType) as SqlRow | undefined;
+    return Boolean(row);
+  }
+
   resolveReview(id: string, resolution: string): void {
     const result = this.connection
       .prepare(`

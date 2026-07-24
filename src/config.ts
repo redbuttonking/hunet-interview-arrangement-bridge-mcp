@@ -18,14 +18,6 @@ export interface AppConfig {
     apiKey?: string;
     authHeader: string;
     authScheme: string;
-    interviewers: {
-      toolName?: string;
-      argsJson?: string;
-      resultPath?: string;
-      idPath: string;
-      namePath: string;
-      emailPath: string;
-    };
   };
 }
 
@@ -80,14 +72,6 @@ export function getConfig(): AppConfig {
         process.env.NINEHIRE_MCP_AUTH_SCHEME === undefined
           ? "Bearer"
           : process.env.NINEHIRE_MCP_AUTH_SCHEME.trim(),
-      interviewers: {
-        toolName: optional("NINEHIRE_INTERVIEWERS_TOOL_NAME"),
-        argsJson: optional("NINEHIRE_INTERVIEWERS_ARGS_JSON"),
-        resultPath: optional("NINEHIRE_INTERVIEWERS_RESULT_PATH"),
-        idPath: optional("NINEHIRE_INTERVIEWER_ID_PATH") ?? "id",
-        namePath: optional("NINEHIRE_INTERVIEWER_NAME_PATH") ?? "name",
-        emailPath: optional("NINEHIRE_INTERVIEWER_EMAIL_PATH") ?? "email",
-      },
     },
   };
 }

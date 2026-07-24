@@ -21,11 +21,6 @@ describe("bridge MCP server", () => {
         url: "https://example.invalid/mcp",
         authHeader: "Authorization",
         authScheme: "Bearer",
-        interviewers: {
-          idPath: "id",
-          namePath: "name",
-          emailPath: "email",
-        },
       },
     };
     const fakeNinehire: NinehireWorkflowAdapter = {
@@ -33,7 +28,7 @@ describe("bridge MCP server", () => {
         return { reason: "평가표 조회 전 테스트입니다." };
       },
       async listInterviewers() {
-        return [];
+        return { interviewers: [], unresolvedUserGroups: [] };
       },
     };
     db = new BridgeDatabase(":memory:");

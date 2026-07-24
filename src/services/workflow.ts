@@ -189,6 +189,7 @@ export class WorkflowService {
     addedOrUpdated: number;
     deactivated: number;
     missingSlackMappings: string[];
+    unresolvedUserGroups: string[];
   }> {
     const interviewCase = this.db.getCase(caseId);
     if (!interviewCase) throw new Error(`Case not found: ${caseId}`);
@@ -199,22 +200,38 @@ export class WorkflowService {
       recruitmentName: interviewCase.recruitmentName ?? undefined,
     };
     const upstream = await this.ninehire.listInterviewers(context);
-    if (upstream.length === 0) {
+    if (
+      upstream.unresolvedUserGroups.length > 0 &&
+      !this.db.hasCaseReview(
+        caseId,
+        "INTERVIEWER_GROUP_MEMBERS_REQUIRED",
+      )
+    ) {
+      this.db.createReview({
+        caseId,
+        reviewType: "INTERVIEWER_GROUP_MEMBERS_REQUIRED",
+        reason:
+          `나인하이어 사용자 그룹(${upstream.unresolvedUserGroups.join(", ")})은 구성원을 반환하지 않습니다. ` +
+          "필요한 면접관을 개별로 추가하거나, 이 건에서 제외할지 검토하세요.",
+      });
+    }
+    if (upstream.interviewers.length === 0) {
       this.db.createReview({
         caseId,
         reviewType: "INTERVIEWER_LOOKUP_REQUIRED",
         reason:
-          "NineHire interviewer mapping returned no interviewers. Configure the tool mapping or add a case interviewer manually.",
+          "나인하이어 채용 참여자에서 개별 사용자를 찾지 못했습니다. 면접관을 건별로 직접 추가하세요.",
       });
       return {
         addedOrUpdated: 0,
         deactivated: 0,
         missingSlackMappings: [],
+        unresolvedUserGroups: upstream.unresolvedUserGroups,
       };
     }
 
     const missingSlackMappings: string[] = [];
-    for (const person of upstream) {
+    for (const person of upstream.interviewers) {
       const cached = this.db.findIdentityByNinehireId(person.ninehireUserId);
       let slackUserId =
         cached?.slack_user_id === undefined
@@ -246,12 +263,13 @@ export class WorkflowService {
     }
     const deactivated = this.db.deactivateMissingNinehireInterviewers(
       caseId,
-      upstream.map((person) => person.ninehireUserId),
+      upstream.interviewers.map((person) => person.ninehireUserId),
     );
     return {
-      addedOrUpdated: upstream.length,
+      addedOrUpdated: upstream.interviewers.length,
       deactivated,
       missingSlackMappings,
+      unresolvedUserGroups: upstream.unresolvedUserGroups,
     };
   }
 

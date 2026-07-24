@@ -8,7 +8,7 @@ import {
 } from "../db/database.js";
 import { suggestCommonSlots } from "../domain/availability.js";
 import {
-  MappedNinehireWorkflowAdapter,
+  NinehireRecruitmentWorkflowAdapter,
   type NinehireWorkflowAdapter,
 } from "../ninehire/adapter.js";
 import { NinehireMcpGateway } from "../ninehire/gateway.js";
@@ -71,7 +71,7 @@ export function createBridgeMcpServer(
     dependencies?.gateway ?? new NinehireMcpGateway(config.ninehire);
   const ninehire =
     dependencies?.ninehire ??
-    new MappedNinehireWorkflowAdapter(config.ninehire, gateway);
+    new NinehireRecruitmentWorkflowAdapter(gateway);
   const slackClient =
     dependencies?.slackClient ??
     (config.slack.botToken
@@ -115,11 +115,7 @@ export function createBridgeMcpServer(
           requestChannel: Boolean(config.slack.requestChannelId),
           ninehireKey: gateway.isConfigured(),
           ninehireEvaluationSummary: gateway.isConfigured(),
-          ninehireInterviewerMapping: Boolean(
-            config.ninehire.interviewers.toolName &&
-              config.ninehire.interviewers.argsJson &&
-              config.ninehire.interviewers.resultPath,
-          ),
+          ninehireRecruitmentParticipants: gateway.isConfigured(),
           daouOffice: "DEFERRED",
         },
       }),
@@ -305,6 +301,7 @@ export function createBridgeMcpServer(
         "INTERVIEWER_DECLINED",
         "INTERVIEWER_NO_RESPONSE",
         "INTERVIEWER_LOOKUP_REQUIRED",
+        "INTERVIEWER_GROUP_MEMBERS_REQUIRED",
       ]);
       if (!allowed.has(review.reviewType)) {
         throw new Error(

@@ -18,7 +18,6 @@ const config: AppConfig = {
     url: "https://example.invalid/mcp",
     authHeader: "Authorization",
     authScheme: "Bearer",
-    interviewers: { idPath: "id", namePath: "name", emailPath: "email" },
   },
 };
 
@@ -49,7 +48,7 @@ describe("evaluation approval workflow", () => {
         };
       },
       async listInterviewers() {
-        return [];
+        return { interviewers: [], unresolvedUserGroups: [] };
       },
     };
     const workflow = new WorkflowService(db, config, ninehire);
@@ -85,5 +84,50 @@ describe("evaluation approval workflow", () => {
       recruitmentRef: "J456",
       status: "READY_FOR_DRAFT",
     });
+  });
+
+  it("adds direct recruitment participants and flags unresolved user groups", async () => {
+    db = new BridgeDatabase(":memory:");
+    const ninehire: NinehireWorkflowAdapter = {
+      async lookupCompletedEvaluation() {
+        return { reason: "이 테스트에서는 사용하지 않습니다." };
+      },
+      async listInterviewers() {
+        return {
+          interviewers: [
+            {
+              ninehireUserId: "N1",
+              displayName: "면접관",
+              email: "interviewer@example.com",
+              required: true,
+            },
+          ],
+          unresolvedUserGroups: ["개발팀"],
+        };
+      },
+    };
+    const workflow = new WorkflowService(db, config, ninehire);
+    const interviewCase = db.createInterviewCase({
+      candidateName: "김지원",
+      recruitmentRef: "J456",
+      recruitmentName: "백엔드 엔지니어",
+      proposalDates: ["2026-07-30"],
+    });
+
+    const result = await workflow.syncCaseInterviewers(interviewCase.id);
+
+    expect(result).toMatchObject({
+      addedOrUpdated: 1,
+      unresolvedUserGroups: ["개발팀"],
+    });
+    expect(db.listInterviewers(interviewCase.id)).toMatchObject([
+      { displayName: "면접관", required: true },
+    ]);
+    expect(db.listOpenReviews()).toMatchObject([
+      { reviewType: "INTERVIEWER_GROUP_MEMBERS_REQUIRED" },
+    ]);
+
+    await workflow.syncCaseInterviewers(interviewCase.id);
+    expect(db.listOpenReviews()).toHaveLength(1);
   });
 });
