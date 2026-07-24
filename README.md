@@ -231,6 +231,7 @@ tool_timeout_sec = 60.0
 | `get_interview_case` | 면접관·가용시간·초안 상세 | 없음 |
 | `suggest_common_interview_slots` | 필수 면접관 공통 가능시간 계산 | 없음 |
 | `list_workflow_reviews` | 사람 판단이 필요한 항목 | 없음 |
+| `list_in_progress_recruitments` | 진행 중인 나인하이어 채용 목록과 마감 정보 조회 | 외부 읽기 |
 | `inspect_ninehire_tools` | 나인하이어 도구 스키마 조회 | 읽기 |
 | `sync_slack_notifications` | Slack 원본 채널 즉시 재확인 | 외부 읽기, 로컬 상태 갱신 |
 | `approve_interview_arrangement` | 평가표 검토 후 면접 조율 시작 승인 | 로컬 상태 갱신 |

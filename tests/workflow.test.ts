@@ -50,6 +50,9 @@ describe("evaluation approval workflow", () => {
       async listInterviewers() {
         return { interviewers: [], unresolvedUserGroups: [] };
       },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
     };
     const workflow = new WorkflowService(db, config, ninehire);
     const parsed: ParsedSlackNotification = {
@@ -104,6 +107,9 @@ describe("evaluation approval workflow", () => {
           ],
           unresolvedUserGroups: ["개발팀"],
         };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
       },
     };
     const workflow = new WorkflowService(db, config, ninehire);

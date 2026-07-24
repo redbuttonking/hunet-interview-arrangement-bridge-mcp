@@ -3,6 +3,75 @@ import { describe, expect, it } from "vitest";
 import { NinehireRecruitmentWorkflowAdapter } from "../src/ninehire/adapter.js";
 
 describe("NineHire approval adapter", () => {
+  it("lists only in-progress recruitments", async () => {
+    const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+    const adapter = new NinehireRecruitmentWorkflowAdapter({
+      async callTool(name, args) {
+        calls.push({ name, args });
+        if (name !== "get_recruitments") {
+          throw new Error(`Unexpected tool: ${name}`);
+        }
+        return {
+          structuredContent: {
+            count: 2,
+            limit: 100,
+            offset: 0,
+            results: [
+              {
+                recruitmentId: "R1",
+                title: "진행 중 채용",
+                externalTitle: "진행 중 공개 채용",
+                status: { code: "in_progress", name: "진행 중" },
+                deadlineType: { code: "until_filled", name: "채용 시 마감" },
+                deadlineValue: null,
+                isPrivate: false,
+              },
+              {
+                recruitmentId: "R2",
+                title: "종료 채용",
+                status: { code: "closed", name: "종료" },
+                isPrivate: true,
+              },
+            ],
+          },
+        };
+      },
+    });
+
+    await expect(
+      adapter.listInProgressRecruitments({
+        keyword: "공개",
+        limit: 100,
+        offset: 0,
+      }),
+    ).resolves.toEqual({
+      count: 1,
+      limit: 100,
+      offset: 0,
+      recruitments: [
+        {
+          recruitmentId: "R1",
+          title: "진행 중 채용",
+          externalTitle: "진행 중 공개 채용",
+          status: "진행 중",
+          deadlineType: "채용 시 마감",
+          isPrivate: false,
+        },
+      ],
+    });
+    expect(calls).toEqual([
+      {
+        name: "get_recruitments",
+        args: {
+          status: "in_progress",
+          keyword: "공개",
+          limit: 100,
+          offset: 0,
+        },
+      },
+    ]);
+  });
+
   it("builds an approval summary from completed score sheets", async () => {
     const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
     const adapter = new NinehireRecruitmentWorkflowAdapter({

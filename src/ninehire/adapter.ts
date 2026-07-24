@@ -4,6 +4,7 @@ import type {
   EvaluationSummary,
   InterviewerLookup,
   NinehireInterviewer,
+  NinehireRecruitmentList,
 } from "../domain/types.js";
 import { NinehireMcpGateway } from "./gateway.js";
 
@@ -12,6 +13,11 @@ export interface NinehireWorkflowAdapter {
     context: CandidateContext,
   ): Promise<EvaluationLookup>;
   listInterviewers(context: CandidateContext): Promise<InterviewerLookup>;
+  listInProgressRecruitments(input: {
+    keyword?: string;
+    limit: number;
+    offset: number;
+  }): Promise<NinehireRecruitmentList>;
 }
 
 export function upstreamPayload(result: Record<string, unknown>): unknown {
@@ -145,6 +151,60 @@ export class NinehireRecruitmentWorkflowAdapter
   constructor(
     private readonly gateway: Pick<NinehireMcpGateway, "callTool">,
   ) {}
+
+  async listInProgressRecruitments(input: {
+    keyword?: string;
+    limit: number;
+    offset: number;
+  }): Promise<NinehireRecruitmentList> {
+    const payload = asRecord(
+      upstreamPayload(
+        await this.gateway.callTool("get_recruitments", {
+          status: "in_progress",
+          limit: input.limit,
+          offset: input.offset,
+          ...(input.keyword ? { keyword: input.keyword } : {}),
+        }),
+      ),
+    );
+    const upstreamRecruitments = records(payload?.results);
+    const recruitments = upstreamRecruitments
+      .filter((recruitment) => codeOf(recruitment.status) === "in_progress")
+      .flatMap((recruitment) => {
+        const recruitmentId = text(recruitment.recruitmentId);
+        const title = text(recruitment.title);
+        if (!recruitmentId || !title) return [];
+        return [
+          {
+            recruitmentId,
+            title,
+            ...(text(recruitment.externalTitle)
+              ? { externalTitle: text(recruitment.externalTitle) }
+              : {}),
+            status: nameOf(recruitment.status) ?? "진행 중",
+            ...(nameOf(recruitment.deadlineType)
+              ? { deadlineType: nameOf(recruitment.deadlineType) }
+              : {}),
+            ...(text(recruitment.deadlineValue)
+              ? { deadlineValue: text(recruitment.deadlineValue) }
+              : {}),
+            isPrivate: recruitment.isPrivate === true,
+          },
+        ];
+      });
+    return {
+      count:
+        upstreamRecruitments.length === recruitments.length &&
+        typeof payload?.count === "number"
+          ? payload.count
+          : recruitments.length,
+      limit:
+        typeof payload?.limit === "number" ? payload.limit : input.limit,
+      offset:
+        typeof payload?.offset === "number" ? payload.offset : input.offset,
+      recruitments,
+    };
+  }
 
   async lookupCompletedEvaluation(
     context: CandidateContext,

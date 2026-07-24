@@ -30,6 +30,21 @@ describe("bridge MCP server", () => {
       async listInterviewers() {
         return { interviewers: [], unresolvedUserGroups: [] };
       },
+      async listInProgressRecruitments() {
+        return {
+          count: 1,
+          limit: 100,
+          offset: 0,
+          recruitments: [
+            {
+              recruitmentId: "R1",
+              title: "진행 중 채용",
+              status: "진행 중",
+              isPrivate: false,
+            },
+          ],
+        };
+      },
     };
     db = new BridgeDatabase(":memory:");
     const server = createBridgeMcpServer(config, db, {
@@ -51,12 +66,25 @@ describe("bridge MCP server", () => {
     expect(tools.tools.map((tool) => tool.name)).toContain(
       "approve_interview_arrangement",
     );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
+      "list_in_progress_recruitments",
+    );
 
     const status = await client.callTool({ name: "bridge_status" });
     expect(status.isError).not.toBe(true);
     expect(status.structuredContent).toMatchObject({
       database: { activeCases: 0 },
       integrations: { daouOffice: "DEFERRED" },
+    });
+
+    const recruitments = await client.callTool({
+      name: "list_in_progress_recruitments",
+      arguments: {},
+    });
+    expect(recruitments.isError).not.toBe(true);
+    expect(recruitments.structuredContent).toMatchObject({
+      count: 1,
+      recruitments: [{ recruitmentId: "R1", title: "진행 중 채용" }],
     });
 
     await client.close();

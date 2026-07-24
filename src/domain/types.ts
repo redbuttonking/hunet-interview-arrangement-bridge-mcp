@@ -33,6 +33,23 @@ export interface InterviewerLookup {
   unresolvedUserGroups: string[];
 }
 
+export interface NinehireRecruitmentSummary {
+  recruitmentId: string;
+  title: string;
+  externalTitle?: string;
+  status: string;
+  deadlineType?: string;
+  deadlineValue?: string;
+  isPrivate: boolean;
+}
+
+export interface NinehireRecruitmentList {
+  count: number;
+  limit: number;
+  offset: number;
+  recruitments: NinehireRecruitmentSummary[];
+}
+
 export interface EvaluationOptionSummary {
   title: string;
   score?: number;
