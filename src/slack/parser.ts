@@ -24,10 +24,15 @@ function collectText(value: unknown, output: Set<string>): void {
   }
   if (!value || typeof value !== "object") return;
   const object = value as Record<string, unknown>;
-  if (typeof object.text === "string") output.add(object.text);
-  else if (object.text !== undefined) collectText(object.text, output);
   for (const [key, child] of Object.entries(object)) {
-    if (key !== "text") collectText(child, output);
+    if (
+      ["text", "fallback", "title", "value"].includes(key) &&
+      typeof child === "string"
+    ) {
+      output.add(child);
+      continue;
+    }
+    collectText(child, output);
   }
 }
 
@@ -56,13 +61,52 @@ function linksFrom(value: unknown): Array<{ url: string; label?: string }> {
 function field(text: string, label: string): string | undefined {
   const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const match = text.match(new RegExp(`${escaped}:\\s*([^\\n]+)`));
-  return match?.[1]?.replace(/^[-–—]\s*/, "").trim() || undefined;
+  return match?.[1] ? cleanFieldValue(match[1]) : undefined;
+}
+
+function cleanFieldValue(value: string): string | undefined {
+  const cleaned = cleanSlackText(value)
+    .replace(/^[-–—]\s*/, "")
+    .replace(/^[*_`~]+|[*_`~]+$/g, "")
+    .trim();
+  return cleaned || undefined;
+}
+
+function attachmentField(value: unknown, label: string): string | undefined {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = attachmentField(item, label);
+      if (found) return found;
+    }
+    return undefined;
+  }
+  if (!value || typeof value !== "object") return undefined;
+  const object = value as Record<string, unknown>;
+  if (Array.isArray(object.fields)) {
+    for (const item of object.fields) {
+      if (!item || typeof item !== "object") continue;
+      const field = item as Record<string, unknown>;
+      const title =
+        typeof field.title === "string"
+          ? cleanFieldValue(field.title)?.replace(/:$/, "")
+          : undefined;
+      if (title === label && typeof field.value === "string") {
+        return cleanFieldValue(field.value);
+      }
+    }
+  }
+  for (const child of Object.values(object)) {
+    const found = attachmentField(child, label);
+    if (found) return found;
+  }
+  return undefined;
 }
 
 function classify(text: string): ParsedSlackNotification["eventType"] {
   if (
     text.includes("서류 평가가 완료되었습니다.") ||
-    text.includes("평가가 완료되었습니다.")
+    text.includes("평가가 완료되었습니다.") ||
+    text.includes("평가표 제출이 완료되었습니다.")
   ) {
     return "EVALUATION_COMPLETED";
   }
@@ -91,8 +135,8 @@ export function parseNinehireSlackMessage(
   collectText(payload, fragments);
   const text = cleanSlackText([...fragments].join("\n"));
   const links = linksFrom(payload);
-  const candidateName = field(text, "지원자");
-  const recruitmentName = field(text, "채용");
+  const candidateName = attachmentField(payload, "지원자") ?? field(text, "지원자");
+  const recruitmentName = attachmentField(payload, "채용") ?? field(text, "채용");
   const candidateLink = links.find(
     (link) => candidateName && link.label?.trim() === candidateName,
   );

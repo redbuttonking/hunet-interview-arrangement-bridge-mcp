@@ -30,6 +30,33 @@ describe("NineHire Slack parser", () => {
     expect(parsed.recruitmentRef).toContain("/J456");
   });
 
+  it("recognizes a submitted score sheet in a legacy Slack attachment", () => {
+    const parsed = parseNinehireSlackMessage({
+      text: "",
+      attachments: [
+        {
+          fallback: "평가표 제출이 완료되었습니다.",
+          title: "평가표 제출이 완료되었습니다.\nㅤ",
+          fields: [
+            {
+              value:
+                "*<https://app.ninehire.com/recruitment/R1/applicants?applicantProgressId=A1|테스트 지원자>*",
+              title: "지원자:",
+            },
+            { value: "서류전형 평가표", title: "평가표:" },
+            { value: "인터뷰 어레인지 자동화 테스트 채용", title: "채용:" },
+          ],
+        },
+      ],
+    });
+
+    expect(parsed.eventType).toBe("EVALUATION_COMPLETED");
+    expect(parsed.title).toBe("평가표 제출이 완료되었습니다.");
+    expect(parsed.candidateName).toBe("테스트 지원자");
+    expect(parsed.candidateRef).toContain("applicantProgressId=A1");
+    expect(parsed.recruitmentName).toBe("인터뷰 어레인지 자동화 테스트 채용");
+  });
+
   it("does not confuse an expired evaluation deadline with completion", () => {
     const parsed = parseNinehireSlackMessage({
       text: "평가 기한이 만료되었습니다.\n지원자: 홍길동",
