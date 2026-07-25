@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebClient } from "@slack/web-api";
 import { z } from "zod";
 import type { AppConfig } from "../config.js";
+import { DaouOfficeBrowserController } from "../daou-office/browser.js";
 import {
   BridgeDatabase,
   type InterviewCaseRow,
@@ -86,6 +87,7 @@ export function createBridgeMcpServer(
     ninehire,
     identityResolver,
   );
+  const daouOfficeBrowser = new DaouOfficeBrowserController(config.daouOffice);
 
   const server = new McpServer({
     name: "interview-arrangement-bridge",
@@ -116,9 +118,44 @@ export function createBridgeMcpServer(
           ninehireKey: gateway.isConfigured(),
           ninehireEvaluationSummary: gateway.isConfigured(),
           ninehireRecruitmentParticipants: gateway.isConfigured(),
-          daouOffice: "DEFERRED",
+          daouOffice: {
+            mode: "DEDICATED_EDGE_PROFILE",
+            url: config.daouOffice.url,
+          },
         },
       }),
+  );
+
+  server.registerTool(
+    "daou_office_browser_status",
+    {
+      title: "다우오피스 브라우저 상태",
+      description:
+        "전용 Edge 프로필과 로컬 전용 디버그 연결의 준비 상태를 확인합니다. 다우오피스 예약을 읽거나 변경하지 않습니다.",
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () => result(await daouOfficeBrowser.status()),
+  );
+
+  server.registerTool(
+    "open_daou_office_login",
+    {
+      title: "다우오피스 전용 로그인 브라우저 열기",
+      description:
+        "개인 브라우저와 분리된 로컬 Edge 프로필로 다우오피스를 엽니다. 최초 로그인은 사용자가 직접 수행하며, 예약을 읽거나 변경하지 않습니다.",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async () => result(await daouOfficeBrowser.openLoginWindow()),
   );
 
   server.registerTool(

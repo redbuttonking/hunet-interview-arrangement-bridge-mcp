@@ -13,6 +13,7 @@
     "dev:worker": "tsx src/worker/main.ts",
     "inspect:ninehire": "tsx src/cli/inspect-ninehire.ts",
     "inspect:slack-source": "tsx src/cli/inspect-slack-source.ts",
+    "daou:login": "tsx src/cli/open-daou-office.ts",
     "start:mcp": "node dist/src/mcp/main.js",
     "start:worker": "node dist/src/worker/main.js",
     "test": "vitest run",
@@ -24,6 +25,7 @@
     "@slack/bolt": "^5.0.0",
     "@slack/types": "^3.0.0",
     "@slack/web-api": "^8.0.0",
+    "playwright-core": "^1.62.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {

@@ -13,6 +13,12 @@ const config: AppConfig = {
   dbPath: ":memory:",
   pollIntervalMs: 300_000,
   timeZone: "Asia/Seoul",
+  daouOffice: {
+    url: "https://hug.hunet.co.kr/app/asset",
+    browserProfileDir: "C:/temp/daou-profile",
+    remoteDebugPort: 9222,
+    edgeExecutablePath: "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
+  },
   slack: {},
   ninehire: {
     url: "https://example.invalid/mcp",

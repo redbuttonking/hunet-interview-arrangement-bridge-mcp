@@ -16,6 +16,13 @@ describe("bridge MCP server", () => {
       dbPath: ":memory:",
       pollIntervalMs: 300_000,
       timeZone: "Asia/Seoul",
+      daouOffice: {
+        url: "https://hug.hunet.co.kr/app/asset",
+        browserProfileDir: "C:/temp/daou-profile",
+        remoteDebugPort: 9222,
+        edgeExecutablePath:
+          "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
+      },
       slack: {},
       ninehire: {
         url: "https://example.invalid/mcp",
@@ -69,12 +76,15 @@ describe("bridge MCP server", () => {
     expect(tools.tools.map((tool) => tool.name)).toContain(
       "list_in_progress_recruitments",
     );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
+      "open_daou_office_login",
+    );
 
     const status = await client.callTool({ name: "bridge_status" });
     expect(status.isError).not.toBe(true);
     expect(status.structuredContent).toMatchObject({
       database: { activeCases: 0 },
-      integrations: { daouOffice: "DEFERRED" },
+      integrations: { daouOffice: { mode: "DEDICATED_EDGE_PROFILE" } },
     });
 
     const recruitments = await client.callTool({

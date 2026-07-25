@@ -6,6 +6,12 @@ export interface AppConfig {
   dbPath: string;
   pollIntervalMs: number;
   timeZone: string;
+  daouOffice: {
+    url: string;
+    browserProfileDir: string;
+    remoteDebugPort: number;
+    edgeExecutablePath: string;
+  };
   slack: {
     appToken?: string;
     botToken?: string;
@@ -46,6 +52,14 @@ function positiveInteger(name: string, fallback: number): number {
   return value;
 }
 
+function port(name: string, fallback: number): number {
+  const value = positiveInteger(name, fallback);
+  if (value > 65_535) {
+    throw new Error(`${name} must be between 1 and 65535.`);
+  }
+  return value;
+}
+
 export function getConfig(): AppConfig {
   loadLocalEnv();
   const dbPath = resolve(optional("BRIDGE_DB_PATH") ?? "./data/bridge.db");
@@ -55,6 +69,16 @@ export function getConfig(): AppConfig {
     dbPath,
     pollIntervalMs: positiveInteger("BRIDGE_POLL_INTERVAL_MS", 300_000),
     timeZone: optional("BRIDGE_TIME_ZONE") ?? "Asia/Seoul",
+    daouOffice: {
+      url: optional("DAOU_OFFICE_URL") ?? "https://hug.hunet.co.kr/app/asset",
+      browserProfileDir: resolve(
+        optional("DAOU_BROWSER_PROFILE_DIR") ?? "./data/daou-office-profile",
+      ),
+      remoteDebugPort: port("DAOU_BROWSER_REMOTE_DEBUG_PORT", 9222),
+      edgeExecutablePath:
+        optional("DAOU_EDGE_EXECUTABLE_PATH") ??
+        "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
+    },
     slack: {
       appToken: optional("SLACK_APP_TOKEN"),
       botToken: optional("SLACK_BOT_TOKEN"),
