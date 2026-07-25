@@ -79,6 +79,12 @@ describe("bridge MCP server", () => {
     expect(tools.tools.map((tool) => tool.name)).toContain(
       "open_daou_office_login",
     );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
+      "sync_daou_meeting_room_blocks",
+    );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
+      "suggest_interview_slots_with_rooms",
+    );
 
     const status = await client.callTool({ name: "bridge_status" });
     expect(status.isError).not.toBe(true);

@@ -77,4 +77,53 @@ describe("common availability", () => {
       },
     ]);
   });
+
+  it("offers half-hour starts when a case duration is thirty minutes", () => {
+    const bundle: CaseBundle = {
+      interviewCase: {
+        id: "case",
+        notificationId: null,
+        candidateRef: null,
+        candidateName: "지원자",
+        recruitmentRef: null,
+        recruitmentName: "채용",
+        status: "READY_TO_SCHEDULE",
+        durationMinutes: 30,
+        proposalDates: ["2026-07-30"],
+        createdAt: "2026-07-24T00:00:00.000Z",
+        updatedAt: "2026-07-24T00:00:00.000Z",
+      },
+      interviewers: [
+        {
+          id: "required-1",
+          caseId: "case",
+          ninehireUserId: "N1",
+          slackUserId: "U1",
+          displayName: "필수 면접관",
+          email: null,
+          required: true,
+          active: true,
+          source: "NINEHIRE",
+          status: "SUBMITTED",
+          respondedAt: "2026-07-24T00:00:00.000Z",
+          createdAt: "2026-07-24T00:00:00.000Z",
+          updatedAt: "2026-07-24T00:00:00.000Z",
+        },
+      ],
+      availability: [
+        {
+          interviewerId: "required-1",
+          date: "2026-07-30",
+          start: "09:00",
+          end: "10:00",
+        },
+      ],
+      drafts: [],
+    };
+
+    expect(suggestCommonSlots(bundle).suggestions).toMatchObject([
+      { start: "09:00", end: "09:30" },
+      { start: "09:30", end: "10:00" },
+    ]);
+  });
 });

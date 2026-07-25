@@ -1,5 +1,4 @@
 import type { CaseBundle } from "../db/database.js";
-import { defaultHourlySlots } from "./calendar.js";
 import type { TimeSlot } from "./types.js";
 
 function minutes(time: string): number {
@@ -65,9 +64,15 @@ export function suggestCommonSlots(bundle: CaseBundle): {
 
   const suggestions: CommonSlotSuggestion[] = [];
   for (const date of bundle.interviewCase.proposalDates) {
-    const candidateStarts = new Set(
-      defaultHourlySlots().map((slot) => minutes(slot.start)),
-    );
+    const candidateStarts = new Set<number>();
+    const stepMinutes = Math.min(bundle.interviewCase.durationMinutes, 60);
+    for (
+      let start = 9 * 60;
+      start + bundle.interviewCase.durationMinutes <= 18 * 60;
+      start += stepMinutes
+    ) {
+      candidateStarts.add(start);
+    }
     for (const slot of bundle.availability) {
       if (slot.date === date) candidateStarts.add(minutes(slot.start));
     }

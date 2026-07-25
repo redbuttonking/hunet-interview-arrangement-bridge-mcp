@@ -6,6 +6,7 @@ import type {
   SlackNotificationInput,
   TimeSlot,
 } from "../domain/types.js";
+import type { MeetingRoomBlockInput } from "../domain/daou-office.js";
 import { firstReminderAt, secondReminderAt } from "../domain/calendar.js";
 
 type SqlRow = Record<string, unknown>;
@@ -67,6 +68,26 @@ export interface ReviewRow {
   resolvedAt: string | null;
 }
 
+export interface MeetingRoomBlockRow extends MeetingRoomBlockInput {
+  id: string;
+  active: boolean;
+  seenAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RoomAllocationRow {
+  id: string;
+  caseId: string;
+  roomBlockId: string;
+  date: string;
+  startTime: string;
+  endTime: string;
+  status: "ACTIVE" | "CANCELLED";
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface CaseBundle {
   interviewCase: InterviewCaseRow;
   interviewers: InterviewerRow[];
@@ -80,6 +101,19 @@ function asString(value: unknown): string {
 
 function nullableString(value: unknown): string | null {
   return value === null || value === undefined ? null : String(value);
+}
+
+function isDate(value: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+function timeMinutes(value: string): number {
+  const match = value.match(/^(\d{2}):(\d{2})$/);
+  if (!match) throw new Error(`Invalid time: ${value}`);
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (hour > 23 || minute > 59) throw new Error(`Invalid time: ${value}`);
+  return hour * 60 + minute;
 }
 
 function toCase(row: SqlRow): InterviewCaseRow {
@@ -156,6 +190,39 @@ function toReview(row: SqlRow): ReviewRow {
     resolution: nullableString(row.resolution),
     createdAt: asString(row.created_at),
     resolvedAt: nullableString(row.resolved_at),
+  };
+}
+
+function toMeetingRoomBlock(row: SqlRow): MeetingRoomBlockRow {
+  return {
+    id: asString(row.id),
+    sourceKey: asString(row.source_key),
+    roomId: asString(row.room_id),
+    roomName: asString(row.room_name),
+    reservedBy: asString(row.reserved_by),
+    purpose: asString(row.purpose),
+    date: asString(row.date),
+    startTime: asString(row.start_time),
+    endTime: asString(row.end_time),
+    sourcePayloadHash: asString(row.source_payload_hash),
+    active: Number(row.active) === 1,
+    seenAt: asString(row.seen_at),
+    createdAt: asString(row.created_at),
+    updatedAt: asString(row.updated_at),
+  };
+}
+
+function toRoomAllocation(row: SqlRow): RoomAllocationRow {
+  return {
+    id: asString(row.id),
+    caseId: asString(row.case_id),
+    roomBlockId: asString(row.room_block_id),
+    date: asString(row.date),
+    startTime: asString(row.start_time),
+    endTime: asString(row.end_time),
+    status: asString(row.status) as RoomAllocationRow["status"],
+    createdAt: asString(row.created_at),
+    updatedAt: asString(row.updated_at),
   };
 }
 
@@ -311,6 +378,46 @@ export class BridgeDatabase {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS meeting_room_blocks (
+        id TEXT PRIMARY KEY,
+        source_key TEXT NOT NULL UNIQUE,
+        room_id TEXT NOT NULL,
+        room_name TEXT NOT NULL,
+        reserved_by TEXT NOT NULL,
+        purpose TEXT NOT NULL,
+        date TEXT NOT NULL,
+        start_time TEXT NOT NULL,
+        end_time TEXT NOT NULL,
+        source_payload_hash TEXT NOT NULL,
+        active INTEGER NOT NULL DEFAULT 1,
+        seen_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS meeting_room_blocks_active_date
+        ON meeting_room_blocks(active, date, start_time, end_time);
+
+      CREATE TABLE IF NOT EXISTS meeting_room_sync_dates (
+        date TEXT PRIMARY KEY,
+        synced_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS room_allocations (
+        id TEXT PRIMARY KEY,
+        case_id TEXT NOT NULL REFERENCES interview_cases(id),
+        room_block_id TEXT NOT NULL REFERENCES meeting_room_blocks(id),
+        date TEXT NOT NULL,
+        start_time TEXT NOT NULL,
+        end_time TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS room_allocations_active_block
+        ON room_allocations(room_block_id, status, date, start_time, end_time);
+
       INSERT OR IGNORE INTO schema_migrations(version, applied_at)
       VALUES (1, datetime('now'));
     `);
@@ -358,6 +465,12 @@ export class BridgeDatabase {
       ),
       pendingInterviewers: scalar(
         "SELECT COUNT(*) AS count FROM case_interviewers WHERE active = 1 AND status = 'PENDING'",
+      ),
+      activeMeetingRoomBlocks: scalar(
+        "SELECT COUNT(*) AS count FROM meeting_room_blocks WHERE active = 1",
+      ),
+      activeRoomAllocations: scalar(
+        "SELECT COUNT(*) AS count FROM room_allocations WHERE status = 'ACTIVE'",
       ),
     };
   }
@@ -601,6 +714,268 @@ export class BridgeDatabase {
       })),
       drafts,
     };
+  }
+
+  syncMeetingRoomBlocks(
+    dates: string[],
+    blocks: MeetingRoomBlockInput[],
+  ): MeetingRoomBlockRow[] {
+    const syncedDates = [...new Set(dates)].sort();
+    if (syncedDates.length === 0 || syncedDates.some((date) => !isDate(date))) {
+      throw new Error("At least one YYYY-MM-DD room sync date is required.");
+    }
+    if (blocks.some((block) => !syncedDates.includes(block.date))) {
+      throw new Error("A synced meeting room block is outside the requested dates.");
+    }
+    const now = new Date().toISOString();
+    this.transaction(() => {
+      const deactivate = this.connection.prepare(`
+        UPDATE meeting_room_blocks
+        SET active = 0, updated_at = ?
+        WHERE date = ?
+      `);
+      for (const date of syncedDates) deactivate.run(now, date);
+
+      const existing = this.connection.prepare(
+        "SELECT id FROM meeting_room_blocks WHERE source_key = ?",
+      );
+      const insert = this.connection.prepare(`
+        INSERT INTO meeting_room_blocks(
+          id, source_key, room_id, room_name, reserved_by, purpose,
+          date, start_time, end_time, source_payload_hash, active,
+          seen_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+      `);
+      const update = this.connection.prepare(`
+        UPDATE meeting_room_blocks
+        SET room_id = ?, room_name = ?, reserved_by = ?, purpose = ?,
+          date = ?, start_time = ?, end_time = ?, source_payload_hash = ?,
+          active = 1, seen_at = ?, updated_at = ?
+        WHERE source_key = ?
+      `);
+      for (const block of blocks) {
+        const current = existing.get(block.sourceKey) as SqlRow | undefined;
+        if (current) {
+          update.run(
+            block.roomId,
+            block.roomName,
+            block.reservedBy,
+            block.purpose,
+            block.date,
+            block.startTime,
+            block.endTime,
+            block.sourcePayloadHash,
+            now,
+            now,
+            block.sourceKey,
+          );
+        } else {
+          insert.run(
+            randomUUID(),
+            block.sourceKey,
+            block.roomId,
+            block.roomName,
+            block.reservedBy,
+            block.purpose,
+            block.date,
+            block.startTime,
+            block.endTime,
+            block.sourcePayloadHash,
+            now,
+            now,
+            now,
+          );
+        }
+      }
+
+      const markDate = this.connection.prepare(`
+        INSERT INTO meeting_room_sync_dates(date, synced_at)
+        VALUES (?, ?)
+        ON CONFLICT(date) DO UPDATE SET synced_at = excluded.synced_at
+      `);
+      for (const date of syncedDates) markDate.run(date, now);
+    });
+    return this.listMeetingRoomBlocks(syncedDates, false);
+  }
+
+  listMeetingRoomBlocks(
+    dates?: string[],
+    activeOnly = true,
+  ): MeetingRoomBlockRow[] {
+    const normalizedDates = dates ? [...new Set(dates)].sort() : undefined;
+    const conditions = activeOnly ? ["active = 1"] : [];
+    const params: string[] = [];
+    if (normalizedDates && normalizedDates.length > 0) {
+      conditions.push(`date IN (${normalizedDates.map(() => "?").join(", ")})`);
+      params.push(...normalizedDates);
+    }
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    return (
+      this.connection
+        .prepare(`
+          SELECT * FROM meeting_room_blocks
+          ${where}
+          ORDER BY date ASC, start_time ASC, room_name ASC
+        `)
+        .all(...params) as SqlRow[]
+    ).map(toMeetingRoomBlock);
+  }
+
+  areMeetingRoomDatesSynced(dates: string[]): boolean {
+    const normalizedDates = [...new Set(dates)].sort();
+    if (normalizedDates.length === 0) return false;
+    const row = this.connection
+      .prepare(
+        `SELECT COUNT(*) AS count FROM meeting_room_sync_dates
+         WHERE date IN (${normalizedDates.map(() => "?").join(", ")})`,
+      )
+      .get(...normalizedDates) as SqlRow;
+    return Number(row.count) === normalizedDates.length;
+  }
+
+  listRoomAllocations(caseId?: string): RoomAllocationRow[] {
+    const rows = caseId
+      ? (this.connection
+          .prepare(`
+            SELECT * FROM room_allocations
+            WHERE case_id = ? ORDER BY date ASC, start_time ASC
+          `)
+          .all(caseId) as SqlRow[])
+      : (this.connection
+          .prepare(`
+            SELECT * FROM room_allocations
+            ORDER BY date ASC, start_time ASC
+          `)
+          .all() as SqlRow[]);
+    return rows.map(toRoomAllocation);
+  }
+
+  findAvailableRoomBlocks(
+    date: string,
+    startTime: string,
+    endTime: string,
+  ): MeetingRoomBlockRow[] {
+    if (!isDate(date) || timeMinutes(startTime) >= timeMinutes(endTime)) {
+      throw new Error("A valid room slot is required.");
+    }
+    const rows = this.connection
+      .prepare(`
+        SELECT block.* FROM meeting_room_blocks block
+        WHERE block.active = 1
+          AND block.date = ?
+          AND block.start_time <= ?
+          AND block.end_time >= ?
+          AND NOT EXISTS (
+            SELECT 1 FROM room_allocations allocation
+            WHERE allocation.room_block_id = block.id
+              AND allocation.status = 'ACTIVE'
+              AND allocation.start_time < ?
+              AND allocation.end_time > ?
+          )
+        ORDER BY block.room_name ASC
+      `)
+      .all(date, startTime, endTime, endTime, startTime) as SqlRow[];
+    return rows.map(toMeetingRoomBlock);
+  }
+
+  allocateRoomBlock(input: {
+    caseId: string;
+    roomBlockId: string;
+    startTime: string;
+    endTime: string;
+  }): RoomAllocationRow {
+    const interviewCase = this.getCase(input.caseId);
+    if (!interviewCase) throw new Error(`Case not found: ${input.caseId}`);
+    const blockRow = this.connection
+      .prepare("SELECT * FROM meeting_room_blocks WHERE id = ? AND active = 1")
+      .get(input.roomBlockId) as SqlRow | undefined;
+    if (!blockRow) throw new Error("Active meeting room block not found.");
+    const block = toMeetingRoomBlock(blockRow);
+    const duration = timeMinutes(input.endTime) - timeMinutes(input.startTime);
+    if (
+      duration !== interviewCase.durationMinutes ||
+      timeMinutes(input.startTime) < timeMinutes(block.startTime) ||
+      timeMinutes(input.endTime) > timeMinutes(block.endTime)
+    ) {
+      throw new Error("Room allocation must fit the room block and case duration.");
+    }
+
+    const existingForCase = this.connection
+      .prepare(`
+        SELECT * FROM room_allocations
+        WHERE case_id = ? AND status = 'ACTIVE'
+      `)
+      .get(input.caseId) as SqlRow | undefined;
+    if (existingForCase) {
+      const existing = toRoomAllocation(existingForCase);
+      if (
+        existing.roomBlockId === input.roomBlockId &&
+        existing.startTime === input.startTime &&
+        existing.endTime === input.endTime
+      ) {
+        return existing;
+      }
+      throw new Error("This case already has an active room allocation.");
+    }
+
+    const conflict = this.connection
+      .prepare(`
+        SELECT id FROM room_allocations
+        WHERE room_block_id = ?
+          AND status = 'ACTIVE'
+          AND start_time < ?
+          AND end_time > ?
+        LIMIT 1
+      `)
+      .get(input.roomBlockId, input.endTime, input.startTime) as SqlRow | undefined;
+    if (conflict) throw new Error("The selected room slot is already allocated.");
+
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.connection
+      .prepare(`
+        INSERT INTO room_allocations(
+          id, case_id, room_block_id, date, start_time, end_time,
+          status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)
+      `)
+      .run(
+        id,
+        input.caseId,
+        input.roomBlockId,
+        block.date,
+        input.startTime,
+        input.endTime,
+        now,
+        now,
+      );
+    this.addEvent(input.caseId, "ROOM_ALLOCATED", "USER", {
+      allocationId: id,
+      roomBlockId: input.roomBlockId,
+      date: block.date,
+      startTime: input.startTime,
+      endTime: input.endTime,
+    });
+    return this.listRoomAllocations(input.caseId).find((row) => row.id === id)!;
+  }
+
+  cancelRoomAllocation(caseId: string, allocationId: string): RoomAllocationRow {
+    const row = this.connection
+      .prepare("SELECT * FROM room_allocations WHERE id = ? AND case_id = ?")
+      .get(allocationId, caseId) as SqlRow | undefined;
+    if (!row) throw new Error("Room allocation not found for this case.");
+    const allocation = toRoomAllocation(row);
+    if (allocation.status === "CANCELLED") return allocation;
+    const now = new Date().toISOString();
+    this.connection
+      .prepare(`
+        UPDATE room_allocations
+        SET status = 'CANCELLED', updated_at = ?
+        WHERE id = ?
+      `)
+      .run(now, allocationId);
+    this.addEvent(caseId, "ROOM_ALLOCATION_CANCELLED", "USER", { allocationId });
+    return this.listRoomAllocations(caseId).find((item) => item.id === allocationId)!;
   }
 
   setCaseStatus(id: string, status: InterviewCaseStatus): void {

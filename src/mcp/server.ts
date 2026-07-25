@@ -2,11 +2,13 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebClient } from "@slack/web-api";
 import { z } from "zod";
 import type { AppConfig } from "../config.js";
+import { BrowserDaouOfficeReservationAdapter } from "../daou-office/adapter.js";
 import { DaouOfficeBrowserController } from "../daou-office/browser.js";
 import {
   BridgeDatabase,
   type InterviewCaseRow,
 } from "../db/database.js";
+import type { DaouOfficeReservationAdapter } from "../domain/daou-office.js";
 import { suggestCommonSlots } from "../domain/availability.js";
 import {
   NinehireRecruitmentWorkflowAdapter,
@@ -17,6 +19,7 @@ import {
   WorkflowService,
   type SlackIdentityResolver,
 } from "../services/workflow.js";
+import { suggestInterviewSlotsWithRooms } from "../services/room-scheduling.js";
 import { SlackReconciler } from "../slack/reconciler.js";
 
 function result(value: unknown) {
@@ -66,6 +69,7 @@ export function createBridgeMcpServer(
     gateway?: NinehireMcpGateway;
     ninehire?: NinehireWorkflowAdapter;
     slackClient?: WebClient;
+    daouOffice?: DaouOfficeReservationAdapter;
   },
 ): McpServer {
   const gateway =
@@ -88,6 +92,9 @@ export function createBridgeMcpServer(
     identityResolver,
   );
   const daouOfficeBrowser = new DaouOfficeBrowserController(config.daouOffice);
+  const daouOffice =
+    dependencies?.daouOffice ??
+    new BrowserDaouOfficeReservationAdapter(config.daouOffice);
 
   const server = new McpServer({
     name: "interview-arrangement-bridge",
@@ -156,6 +163,136 @@ export function createBridgeMcpServer(
       },
     },
     async () => result(await daouOfficeBrowser.openLoginWindow()),
+  );
+
+  server.registerTool(
+    "sync_daou_meeting_room_blocks",
+    {
+      title: "다우오피스 면접실 예약 동기화",
+      description:
+        "해당 면접 건의 제안 날짜에 대해 전용 브라우저로 다우오피스 예약을 읽고, 지정 면접실·예약자·이용 목적이 모두 일치하는 예약 블록만 로컬 DB에 반영합니다. 다우오피스 예약을 변경하지 않습니다.",
+      inputSchema: { caseId: z.string().uuid() },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ caseId }) => {
+      const interviewCase = db.getCase(caseId);
+      if (!interviewCase) throw new Error(`Case not found: ${caseId}`);
+      const blocks = await daouOffice.listMeetingRoomBlocks(
+        interviewCase.proposalDates,
+      );
+      const synced = db.syncMeetingRoomBlocks(interviewCase.proposalDates, blocks);
+      return result({
+        caseId,
+        dates: interviewCase.proposalDates,
+        blockCount: synced.filter((block) => block.active).length,
+        blocks: synced
+          .filter((block) => block.active)
+          .map((block) => ({
+            id: block.id,
+            roomName: block.roomName,
+            date: block.date,
+            startTime: block.startTime,
+            endTime: block.endTime,
+          })),
+      });
+    },
+  );
+
+  server.registerTool(
+    "list_daou_meeting_room_blocks",
+    {
+      title: "동기화된 면접실 예약 블록 조회",
+      description:
+        "로컬 DB에 동기화된 면접실 예약 블록을 조회합니다. 예약자 이름은 출력하지 않습니다.",
+      inputSchema: {
+        dates: z
+          .array(z.string().regex(/^\d{4}-\d{2}-\d{2}$/))
+          .min(1)
+          .max(20)
+          .optional(),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ dates }) =>
+      result({
+        blocks: db.listMeetingRoomBlocks(dates).map((block) => ({
+          id: block.id,
+          roomName: block.roomName,
+          date: block.date,
+          startTime: block.startTime,
+          endTime: block.endTime,
+        })),
+      }),
+  );
+
+  server.registerTool(
+    "suggest_interview_slots_with_rooms",
+    {
+      title: "면접관과 면접실을 함께 반영한 일정 추천",
+      description:
+        "면접관 공통 가능 시간과 동기화된 면접실 예약 블록, 이미 로컬에 배정한 면접 시간을 함께 반영해 추천합니다. 일정이나 예약을 변경하지 않습니다.",
+      inputSchema: { caseId: z.string().uuid() },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ caseId }) => result(suggestInterviewSlotsWithRooms(db, caseId)),
+  );
+
+  server.registerTool(
+    "allocate_interview_room_slot",
+    {
+      title: "면접실 내부 시간대 배정",
+      description:
+        "사용자가 선택한 면접 시간과 회의실 블록을 로컬 DB에 배정해 다른 후보자와 겹치지 않도록 합니다. 다우오피스 예약은 변경하지 않습니다.",
+      inputSchema: {
+        caseId: z.string().uuid(),
+        roomBlockId: z.string().uuid(),
+        startTime: z.string().regex(/^\d{2}:\d{2}$/),
+        endTime: z.string().regex(/^\d{2}:\d{2}$/),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (input) => result(db.allocateRoomBlock(input)),
+  );
+
+  server.registerTool(
+    "cancel_interview_room_allocation",
+    {
+      title: "면접실 내부 배정 취소",
+      description:
+        "로컬 DB의 면접실 내부 배정만 취소합니다. 다우오피스 예약은 변경하지 않습니다.",
+      inputSchema: {
+        caseId: z.string().uuid(),
+        allocationId: z.string().uuid(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ caseId, allocationId }) =>
+      result(db.cancelRoomAllocation(caseId, allocationId)),
   );
 
   server.registerTool(
