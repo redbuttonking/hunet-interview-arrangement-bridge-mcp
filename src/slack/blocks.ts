@@ -117,11 +117,19 @@ export function buildScheduleConfirmationMessage(
       item.slackUserId ? `<@${item.slackUserId}>` : item.displayName,
     )
     .join(", ");
-  const text = `${candidateLabel(interviewCase)} 지원자 인터뷰 내부 일정 확정 안내`;
+  const candidateConfirmed = interviewCase.status === "CONFIRMED";
+  const text = candidateConfirmed
+    ? `${candidateLabel(interviewCase)} 지원자 인터뷰 일정 확정 안내`
+    : `${candidateLabel(interviewCase)} 지원자 인터뷰 내부 일정 확정 안내`;
   const blocks: KnownBlock[] = [
     {
       type: "header",
-      text: { type: "plain_text", text: "인터뷰 내부 일정 확정 안내" },
+      text: {
+        type: "plain_text",
+        text: candidateConfirmed
+          ? "인터뷰 일정 확정 안내"
+          : "인터뷰 내부 일정 확정 안내",
+      },
     },
     {
       type: "section",
@@ -141,7 +149,9 @@ export function buildScheduleConfirmationMessage(
       elements: [
         {
           type: "mrkdwn",
-          text: "후보자 최종 확인 전인 내부 확정 일정입니다. 변동 시 별도로 안내합니다.",
+          text: candidateConfirmed
+            ? "후보자 최종 확인이 완료된 확정 일정입니다."
+            : "후보자 최종 확인 전인 내부 확정 일정입니다. 변동 시 별도로 안내합니다.",
         },
       ],
     },

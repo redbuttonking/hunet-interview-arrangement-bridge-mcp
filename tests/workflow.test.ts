@@ -259,7 +259,11 @@ describe("evaluation approval workflow", () => {
         return { count: 0, limit: 100, offset: 0, recruitments: [] };
       },
     };
-    const workflow = new WorkflowService(db, config, ninehire);
+    const workflow = new WorkflowService(
+      db,
+      { ...config, slack: { requestChannelId: "C1" } },
+      ninehire,
+    );
     const caseId = createAwaitingCandidateConfirmationCase(db, "테스트1");
 
     const processed = await workflow.ingestSlackNotification({
@@ -286,6 +290,9 @@ describe("evaluation approval workflow", () => {
       caseId,
     });
     expect(db.getCase(caseId)?.status).toBe("CONFIRMED");
+    expect(workflow.createScheduleConfirmationDraft(caseId).previewText).toBe(
+      "테스트1 지원자 인터뷰 일정 확정 안내",
+    );
   });
 
   it("requires review when a confirmed Slack schedule differs from the internal schedule", async () => {

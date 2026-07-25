@@ -460,7 +460,12 @@ export class WorkflowService {
     }
     const bundle = this.db.getCaseBundle(caseId);
     if (!bundle) throw new Error(`Case not found: ${caseId}`);
-    if (bundle.interviewCase.status !== "AWAITING_CANDIDATE_CONFIRMATION") {
+    if (
+      ![
+        "AWAITING_CANDIDATE_CONFIRMATION",
+        "CONFIRMED",
+      ].includes(bundle.interviewCase.status)
+    ) {
       throw new Error(
         "Confirm the internal schedule before creating a schedule confirmation draft.",
       );
