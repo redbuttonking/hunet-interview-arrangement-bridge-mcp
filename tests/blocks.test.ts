@@ -21,6 +21,11 @@ const interviewCase: InterviewCaseRow = {
     "2026-08-05",
     "2026-08-06",
   ],
+  scheduledRoomAllocationId: null,
+  scheduledDate: null,
+  scheduledStartTime: null,
+  scheduledEndTime: null,
+  internalScheduleConfirmedAt: null,
   createdAt: "2026-07-24T00:00:00.000Z",
   updatedAt: "2026-07-24T00:00:00.000Z",
 };

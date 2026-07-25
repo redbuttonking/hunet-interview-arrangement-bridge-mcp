@@ -142,4 +142,71 @@ describe("evaluation approval workflow", () => {
     await workflow.syncCaseInterviewers(interviewCase.id);
     expect(db.listOpenReviews()).toHaveLength(1);
   });
+
+  it("creates an internal schedule confirmation draft without sending Slack", () => {
+    db = new BridgeDatabase(":memory:");
+    const ninehire: NinehireWorkflowAdapter = {
+      async lookupCompletedEvaluation() {
+        return { reason: "테스트에서는 사용하지 않습니다." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    };
+    const workflow = new WorkflowService(
+      db,
+      { ...config, slack: { requestChannelId: "C1" } },
+      ninehire,
+    );
+    const interviewCase = db.createInterviewCase({
+      candidateName: "지원자 1",
+      recruitmentName: "테스트 채용",
+      proposalDates: ["2026-07-30"],
+    });
+    db.addOrUpdateInterviewer({
+      caseId: interviewCase.id,
+      displayName: "면접관 1",
+      slackUserId: "U1",
+      source: "MANUAL",
+    });
+    const [block] = db.syncMeetingRoomBlocks(
+      ["2026-07-30"],
+      [
+        {
+          sourceKey: "DAOU:workflow",
+          roomId: "103",
+          roomName: "[818호] 행복룸",
+          reservedBy: "강해빈",
+          purpose: "면접",
+          date: "2026-07-30",
+          startTime: "15:00",
+          endTime: "18:00",
+          sourcePayloadHash: "workflow-hash",
+        },
+      ],
+    );
+    db.allocateRoomBlock({
+      caseId: interviewCase.id,
+      roomBlockId: block!.id,
+      startTime: "15:00",
+      endTime: "16:00",
+    });
+    db.setCaseStatus(interviewCase.id, "READY_TO_SCHEDULE");
+    workflow.confirmInternalSchedule(interviewCase.id);
+
+    const draft = workflow.createScheduleConfirmationDraft(interviewCase.id);
+
+    expect(draft).toMatchObject({
+      channelId: "C1",
+      messageType: "SCHEDULE_CONFIRMATION",
+      status: "DRAFT",
+    });
+    expect(draft.previewText).toContain("내부 일정 확정 안내");
+    expect(db.getCase(interviewCase.id)?.status).toBe(
+      "AWAITING_CANDIDATE_CONFIRMATION",
+    );
+  });
 });

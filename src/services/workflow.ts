@@ -15,6 +15,7 @@ import type {
 import type { NinehireWorkflowAdapter } from "../ninehire/adapter.js";
 import {
   buildRequestMessage,
+  buildScheduleConfirmationMessage,
 } from "../slack/blocks.js";
 import type { ParsedSlackNotification } from "../slack/parser.js";
 
@@ -295,21 +296,79 @@ export class WorkflowService {
       previewText: payload.text,
       blocksJson: JSON.stringify(payload.blocks),
       payloadHash: hashPayload(payload.text, payload.blocks),
+      messageType: "INTERVIEWER_REQUEST",
     });
   }
 
-  async approveAndSendDraft(
+  confirmInternalSchedule(caseId: string) {
+    return this.db.confirmInternalSchedule(caseId);
+  }
+
+  createScheduleConfirmationDraft(caseId: string): DraftRow {
+    if (!this.config.slack.requestChannelId) {
+      throw new Error("SLACK_REQUEST_CHANNEL_ID is not configured.");
+    }
+    const bundle = this.db.getCaseBundle(caseId);
+    if (!bundle) throw new Error(`Case not found: ${caseId}`);
+    if (bundle.interviewCase.status !== "AWAITING_CANDIDATE_CONFIRMATION") {
+      throw new Error(
+        "Confirm the internal schedule before creating a schedule confirmation draft.",
+      );
+    }
+    const schedule = this.db.getConfirmedInterviewSchedule(caseId);
+    if (!schedule) throw new Error("The confirmed schedule record is missing.");
+    const payload = buildScheduleConfirmationMessage(bundle, schedule);
+    return this.db.createDraft({
+      caseId,
+      channelId: this.config.slack.requestChannelId,
+      previewText: payload.text,
+      blocksJson: JSON.stringify(payload.blocks),
+      payloadHash: hashPayload(payload.text, payload.blocks),
+      messageType: "SCHEDULE_CONFIRMATION",
+    });
+  }
+
+  async approveAndSendInterviewerRequest(
     draftId: string,
+    client: WebClient,
+  ): Promise<DraftRow> {
+    return this.approveAndSendDraft(draftId, "INTERVIEWER_REQUEST", client);
+  }
+
+  async approveAndSendScheduleConfirmation(
+    draftId: string,
+    client: WebClient,
+  ): Promise<DraftRow> {
+    return this.approveAndSendDraft(draftId, "SCHEDULE_CONFIRMATION", client);
+  }
+
+  private async approveAndSendDraft(
+    draftId: string,
+    messageType: DraftRow["messageType"],
     client: WebClient,
   ): Promise<DraftRow> {
     const existing = this.db.getDraft(draftId);
     if (!existing) throw new Error(`Draft not found: ${draftId}`);
+    if (existing.messageType !== messageType) {
+      throw new Error(`This draft is not a ${messageType} draft.`);
+    }
     if (existing.status === "SENT") return existing;
 
-    await this.syncCaseInterviewers(existing.caseId);
-    const bundle = this.db.getCaseBundle(existing.caseId);
-    if (!bundle) throw new Error(`Case not found: ${existing.caseId}`);
-    const current = buildRequestMessage(bundle);
+    if (messageType === "INTERVIEWER_REQUEST") {
+      await this.syncCaseInterviewers(existing.caseId);
+    }
+    const currentBundle = this.db.getCaseBundle(existing.caseId);
+    if (!currentBundle) throw new Error(`Case not found: ${existing.caseId}`);
+    const current =
+      messageType === "INTERVIEWER_REQUEST"
+        ? buildRequestMessage(currentBundle)
+        : (() => {
+            const schedule = this.db.getConfirmedInterviewSchedule(existing.caseId);
+            if (!schedule) {
+              throw new Error("The confirmed schedule record is missing.");
+            }
+            return buildScheduleConfirmationMessage(currentBundle, schedule);
+          })();
     const currentHash = hashPayload(current.text, current.blocks);
     if (currentHash !== existing.payloadHash) {
       this.db.cancelDraft(
@@ -325,6 +384,9 @@ export class WorkflowService {
     const previouslySentTs = await this.findSlackMessageForDraft(
       approved,
       client,
+      messageType === "INTERVIEWER_REQUEST"
+        ? "interview_bridge_request"
+        : "interview_bridge_schedule_confirmation",
     );
     if (previouslySentTs) {
       return this.db.markDraftSent(approved.id, previouslySentTs);
@@ -334,7 +396,10 @@ export class WorkflowService {
       text: approved.previewText,
       blocks: JSON.parse(approved.blocksJson) as never,
       metadata: {
-        event_type: "interview_bridge_request",
+        event_type:
+          messageType === "INTERVIEWER_REQUEST"
+            ? "interview_bridge_request"
+            : "interview_bridge_schedule_confirmation",
         event_payload: { draft_id: approved.id },
       },
     });
@@ -347,6 +412,7 @@ export class WorkflowService {
   private async findSlackMessageForDraft(
     draft: DraftRow,
     client: WebClient,
+    eventType: string,
   ): Promise<string | undefined> {
     let cursor: string | undefined;
     const oldest = String(new Date(draft.createdAt).getTime() / 1_000);
@@ -365,7 +431,7 @@ export class WorkflowService {
           | Record<string, unknown>
           | undefined;
         return (
-          metadata?.event_type === "interview_bridge_request" &&
+          metadata?.event_type === eventType &&
           eventPayload?.draft_id === draft.id
         );
       });

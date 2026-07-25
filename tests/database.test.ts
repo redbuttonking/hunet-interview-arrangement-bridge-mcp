@@ -99,4 +99,52 @@ describe("BridgeDatabase", () => {
       }),
     ).toMatchObject({ status: "ACTIVE", startTime: "16:00" });
   });
+
+  it("confirms an allocated room slot while preserving the candidate confirmation boundary", () => {
+    db = new BridgeDatabase(":memory:");
+    const interviewCase = db.createInterviewCase({
+      candidateName: "지원자 1",
+      proposalDates: ["2026-07-30"],
+    });
+    const [block] = db.syncMeetingRoomBlocks(
+      ["2026-07-30"],
+      [
+        {
+          sourceKey: "DAOU:confirmed",
+          roomId: "103",
+          roomName: "[818호] 행복룸",
+          reservedBy: "강해빈",
+          purpose: "면접",
+          date: "2026-07-30",
+          startTime: "15:00",
+          endTime: "18:00",
+          sourcePayloadHash: "confirmed-hash",
+        },
+      ],
+    );
+    const allocation = db.allocateRoomBlock({
+      caseId: interviewCase.id,
+      roomBlockId: block!.id,
+      startTime: "15:00",
+      endTime: "16:00",
+    });
+    db!.setCaseStatus(interviewCase.id, "READY_TO_SCHEDULE");
+
+    const confirmed = db!.confirmInternalSchedule(interviewCase.id);
+
+    expect(confirmed).toMatchObject({
+      roomAllocationId: allocation.id,
+      date: "2026-07-30",
+      startTime: "15:00",
+      endTime: "16:00",
+      roomName: "[818호] 행복룸",
+    });
+    expect(db!.getCase(interviewCase.id)).toMatchObject({
+      status: "AWAITING_CANDIDATE_CONFIRMATION",
+      scheduledRoomAllocationId: allocation.id,
+    });
+    expect(() =>
+      db!.cancelRoomAllocation(interviewCase.id, allocation.id),
+    ).toThrow("internally confirmed schedule");
+  });
 });

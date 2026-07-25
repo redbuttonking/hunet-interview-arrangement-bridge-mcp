@@ -21,6 +21,11 @@ export interface InterviewCaseRow {
   status: InterviewCaseStatus;
   durationMinutes: number;
   proposalDates: string[];
+  scheduledRoomAllocationId: string | null;
+  scheduledDate: string | null;
+  scheduledStartTime: string | null;
+  scheduledEndTime: string | null;
+  internalScheduleConfirmedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -48,6 +53,7 @@ export interface DraftRow {
   previewText: string;
   blocksJson: string;
   payloadHash: string;
+  messageType: "INTERVIEWER_REQUEST" | "SCHEDULE_CONFIRMATION";
   status: "DRAFT" | "APPROVED" | "SENT" | "CANCELLED";
   approvedAt: string | null;
   sentAt: string | null;
@@ -86,6 +92,16 @@ export interface RoomAllocationRow {
   status: "ACTIVE" | "CANCELLED";
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ConfirmedInterviewScheduleRow {
+  caseId: string;
+  roomAllocationId: string;
+  date: string;
+  startTime: string;
+  endTime: string;
+  roomName: string;
+  confirmedAt: string;
 }
 
 export interface CaseBundle {
@@ -127,6 +143,13 @@ function toCase(row: SqlRow): InterviewCaseRow {
     status: asString(row.status) as InterviewCaseStatus,
     durationMinutes: Number(row.duration_minutes),
     proposalDates: JSON.parse(asString(row.proposal_dates_json)) as string[],
+    scheduledRoomAllocationId: nullableString(row.scheduled_room_allocation_id),
+    scheduledDate: nullableString(row.scheduled_date),
+    scheduledStartTime: nullableString(row.scheduled_start_time),
+    scheduledEndTime: nullableString(row.scheduled_end_time),
+    internalScheduleConfirmedAt: nullableString(
+      row.internal_schedule_confirmed_at,
+    ),
     createdAt: asString(row.created_at),
     updatedAt: asString(row.updated_at),
   };
@@ -158,6 +181,7 @@ function toDraft(row: SqlRow): DraftRow {
     previewText: asString(row.preview_text),
     blocksJson: asString(row.blocks_json),
     payloadHash: asString(row.payload_hash),
+    messageType: asString(row.message_type) as DraftRow["messageType"],
     status: asString(row.status) as DraftRow["status"],
     approvedAt: nullableString(row.approved_at),
     sentAt: nullableString(row.sent_at),
@@ -432,6 +456,28 @@ export class BridgeDatabase {
       this.connection
         .prepare(
           "INSERT INTO schema_migrations(version, applied_at) VALUES (2, datetime('now'))",
+        )
+        .run();
+    }
+
+    const versionThree = this.connection
+      .prepare("SELECT version FROM schema_migrations WHERE version = 3")
+      .get() as SqlRow | undefined;
+    if (!versionThree) {
+      this.connection.exec(`
+        ALTER TABLE interview_cases
+          ADD COLUMN scheduled_room_allocation_id TEXT;
+        ALTER TABLE interview_cases ADD COLUMN scheduled_date TEXT;
+        ALTER TABLE interview_cases ADD COLUMN scheduled_start_time TEXT;
+        ALTER TABLE interview_cases ADD COLUMN scheduled_end_time TEXT;
+        ALTER TABLE interview_cases
+          ADD COLUMN internal_schedule_confirmed_at TEXT;
+        ALTER TABLE message_drafts
+          ADD COLUMN message_type TEXT NOT NULL DEFAULT 'INTERVIEWER_REQUEST';
+      `);
+      this.connection
+        .prepare(
+          "INSERT INTO schema_migrations(version, applied_at) VALUES (3, datetime('now'))",
         )
         .run();
     }
@@ -959,6 +1005,94 @@ export class BridgeDatabase {
     return this.listRoomAllocations(input.caseId).find((row) => row.id === id)!;
   }
 
+  confirmInternalSchedule(caseId: string): ConfirmedInterviewScheduleRow {
+    const interviewCase = this.getCase(caseId);
+    if (!interviewCase) throw new Error(`Case not found: ${caseId}`);
+    if (interviewCase.status === "AWAITING_CANDIDATE_CONFIRMATION") {
+      const confirmed = this.getConfirmedInterviewSchedule(caseId);
+      if (confirmed) return confirmed;
+      throw new Error("The confirmed schedule record is missing.");
+    }
+    if (interviewCase.status !== "READY_TO_SCHEDULE") {
+      throw new Error(
+        "Only a case with all required interviewer responses can be internally scheduled.",
+      );
+    }
+
+    const allocationRow = this.connection
+      .prepare(`
+        SELECT * FROM room_allocations
+        WHERE case_id = ? AND status = 'ACTIVE'
+        ORDER BY created_at ASC LIMIT 1
+      `)
+      .get(caseId) as SqlRow | undefined;
+    if (!allocationRow) {
+      throw new Error("An active room allocation is required before confirming a schedule.");
+    }
+    const allocation = toRoomAllocation(allocationRow);
+    const now = new Date().toISOString();
+    this.transaction(() => {
+      this.connection
+        .prepare(`
+          UPDATE interview_cases
+          SET status = ?, scheduled_room_allocation_id = ?, scheduled_date = ?,
+              scheduled_start_time = ?, scheduled_end_time = ?,
+              internal_schedule_confirmed_at = ?, updated_at = ?
+          WHERE id = ?
+        `)
+        .run(
+          "AWAITING_CANDIDATE_CONFIRMATION",
+          allocation.id,
+          allocation.date,
+          allocation.startTime,
+          allocation.endTime,
+          now,
+          now,
+          caseId,
+        );
+      this.addEvent(caseId, "INTERNAL_SCHEDULE_CONFIRMED", "USER", {
+        allocationId: allocation.id,
+        date: allocation.date,
+        startTime: allocation.startTime,
+        endTime: allocation.endTime,
+      });
+    });
+    return this.getConfirmedInterviewSchedule(caseId)!;
+  }
+
+  getConfirmedInterviewSchedule(
+    caseId: string,
+  ): ConfirmedInterviewScheduleRow | undefined {
+    const row = this.connection
+      .prepare(`
+        SELECT
+          interview_cases.id AS case_id,
+          interview_cases.scheduled_room_allocation_id,
+          interview_cases.scheduled_date,
+          interview_cases.scheduled_start_time,
+          interview_cases.scheduled_end_time,
+          interview_cases.internal_schedule_confirmed_at,
+          meeting_room_blocks.room_name
+        FROM interview_cases
+        JOIN room_allocations
+          ON room_allocations.id = interview_cases.scheduled_room_allocation_id
+        JOIN meeting_room_blocks
+          ON meeting_room_blocks.id = room_allocations.room_block_id
+        WHERE interview_cases.id = ?
+      `)
+      .get(caseId) as SqlRow | undefined;
+    if (!row) return undefined;
+    return {
+      caseId: asString(row.case_id),
+      roomAllocationId: asString(row.scheduled_room_allocation_id),
+      date: asString(row.scheduled_date),
+      startTime: asString(row.scheduled_start_time),
+      endTime: asString(row.scheduled_end_time),
+      roomName: asString(row.room_name),
+      confirmedAt: asString(row.internal_schedule_confirmed_at),
+    };
+  }
+
   cancelRoomAllocation(caseId: string, allocationId: string): RoomAllocationRow {
     const row = this.connection
       .prepare("SELECT * FROM room_allocations WHERE id = ? AND case_id = ?")
@@ -966,6 +1100,12 @@ export class BridgeDatabase {
     if (!row) throw new Error("Room allocation not found for this case.");
     const allocation = toRoomAllocation(row);
     if (allocation.status === "CANCELLED") return allocation;
+    const interviewCase = this.getCase(caseId);
+    if (interviewCase?.scheduledRoomAllocationId === allocationId) {
+      throw new Error(
+        "The room allocation is part of an internally confirmed schedule. Reopen the schedule before cancelling it.",
+      );
+    }
     const now = new Date().toISOString();
     this.connection
       .prepare(`
@@ -1408,15 +1548,16 @@ export class BridgeDatabase {
     previewText: string;
     blocksJson: string;
     payloadHash: string;
+    messageType: DraftRow["messageType"];
   }): DraftRow {
     const existing = this.connection
       .prepare(`
         SELECT * FROM message_drafts
-        WHERE case_id = ? AND payload_hash = ?
+        WHERE case_id = ? AND payload_hash = ? AND message_type = ?
           AND status IN ('DRAFT', 'APPROVED', 'SENT')
         ORDER BY created_at DESC LIMIT 1
       `)
-      .get(input.caseId, input.payloadHash) as SqlRow | undefined;
+      .get(input.caseId, input.payloadHash, input.messageType) as SqlRow | undefined;
     if (existing) return toDraft(existing);
 
     const id = randomUUID();
@@ -1424,8 +1565,8 @@ export class BridgeDatabase {
       .prepare(`
         INSERT INTO message_drafts(
           id, case_id, channel_id, preview_text, blocks_json, payload_hash,
-          status, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, 'DRAFT', ?)
+          message_type, status, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?)
       `)
       .run(
         id,
@@ -1434,10 +1575,16 @@ export class BridgeDatabase {
         input.previewText,
         input.blocksJson,
         input.payloadHash,
+        input.messageType,
         new Date().toISOString(),
       );
-    this.setCaseStatus(input.caseId, "DRAFT_CREATED");
-    this.addEvent(input.caseId, "DRAFT_CREATED", "USER", { draftId: id });
+    if (input.messageType === "INTERVIEWER_REQUEST") {
+      this.setCaseStatus(input.caseId, "DRAFT_CREATED");
+    }
+    this.addEvent(input.caseId, "DRAFT_CREATED", "USER", {
+      draftId: id,
+      messageType: input.messageType,
+    });
     return this.getDraft(id)!;
   }
 
@@ -1508,12 +1655,19 @@ export class BridgeDatabase {
           WHERE id = ?
         `)
         .run(sentAt.toISOString(), slackMessageTs, id);
-      this.setCaseStatus(draft.caseId, "COLLECTING_AVAILABILITY");
-      this.scheduleReminders(draft.caseId, sentAt);
-      this.addEvent(draft.caseId, "REQUEST_SENT", "USER", {
-        draftId: id,
-        slackMessageTs,
-      });
+      if (draft.messageType === "INTERVIEWER_REQUEST") {
+        this.setCaseStatus(draft.caseId, "COLLECTING_AVAILABILITY");
+        this.scheduleReminders(draft.caseId, sentAt);
+        this.addEvent(draft.caseId, "REQUEST_SENT", "USER", {
+          draftId: id,
+          slackMessageTs,
+        });
+      } else {
+        this.addEvent(draft.caseId, "SCHEDULE_CONFIRMATION_SENT", "USER", {
+          draftId: id,
+          slackMessageTs,
+        });
+      }
     });
     return this.getDraft(id)!;
   }

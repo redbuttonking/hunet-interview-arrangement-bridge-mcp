@@ -58,6 +58,9 @@ function caseSummary(interviewCase: InterviewCaseRow) {
     status: interviewCase.status,
     durationMinutes: interviewCase.durationMinutes,
     proposalDates: interviewCase.proposalDates,
+    scheduledDate: interviewCase.scheduledDate,
+    scheduledStartTime: interviewCase.scheduledStartTime,
+    scheduledEndTime: interviewCase.scheduledEndTime,
     createdAt: interviewCase.createdAt,
   };
 }
@@ -275,6 +278,23 @@ export function createBridgeMcpServer(
   );
 
   server.registerTool(
+    "confirm_internal_interview_schedule",
+    {
+      title: "인터뷰 내부 일정 확정",
+      description:
+        "활성 면접실 배정을 내부 확정 일정으로 기록하고 후보자 확인 대기 상태로 변경합니다. Slack이나 나인하이어에는 전송하지 않습니다.",
+      inputSchema: { caseId: z.string().uuid() },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ caseId }) => result(workflow.confirmInternalSchedule(caseId)),
+  );
+
+  server.registerTool(
     "cancel_interview_room_allocation",
     {
       title: "면접실 내부 배정 취소",
@@ -308,6 +328,7 @@ export function createBridgeMcpServer(
             "REQUEST_SENT",
             "COLLECTING_AVAILABILITY",
             "READY_TO_SCHEDULE",
+            "AWAITING_CANDIDATE_CONFIRMATION",
             "REVIEW_REQUIRED",
             "CLOSED",
           ])
@@ -720,6 +741,24 @@ export function createBridgeMcpServer(
   );
 
   server.registerTool(
+    "create_interviewer_schedule_confirmation_draft",
+    {
+      title: "면접관 최종 일정 안내 초안 생성",
+      description:
+        "내부 확정된 면접 시간·회의실·면접관을 기존 테스트 채널에 안내하는 Slack 초안을 생성합니다. 발송하지 않습니다.",
+      inputSchema: { caseId: z.string().uuid() },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ caseId }) =>
+      result(workflow.createScheduleConfirmationDraft(caseId)),
+  );
+
+  server.registerTool(
     "list_pending_message_drafts",
     {
       title: "발송 승인 대기 초안",
@@ -750,7 +789,31 @@ export function createBridgeMcpServer(
     },
     async ({ draftId }) => {
       if (!slackClient) throw new Error("SLACK_BOT_TOKEN is not configured.");
-      return result(await workflow.approveAndSendDraft(draftId, slackClient));
+      return result(
+        await workflow.approveAndSendInterviewerRequest(draftId, slackClient),
+      );
+    },
+  );
+
+  server.registerTool(
+    "approve_and_send_interviewer_schedule_confirmation",
+    {
+      title: "면접관 최종 일정 안내 승인·발송",
+      description:
+        "사용자가 검토한 최종 일정 안내 초안을 명시적으로 승인하고 Slack 테스트 채널에 발송합니다.",
+      inputSchema: { draftId: z.string().uuid() },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ draftId }) => {
+      if (!slackClient) throw new Error("SLACK_BOT_TOKEN is not configured.");
+      return result(
+        await workflow.approveAndSendScheduleConfirmation(draftId, slackClient),
+      );
     },
   );
 

@@ -15,14 +15,17 @@
 1. `sync_daou_meeting_room_blocks`로 면접 건의 제안 날짜에 예약 블록을 읽는다.
 2. `suggest_interview_slots_with_rooms`로 면접관 가능 시간과 회의실을 함께 추천받는다.
 3. 사용자가 날짜·시간·회의실을 확인한 뒤에만 `allocate_interview_room_slot`으로 로컬 내부 배정을 확정한다.
+4. `confirm_internal_interview_schedule`로 내부 일정 확정을 기록한다. 이때 상태는 `AWAITING_CANDIDATE_CONFIRMATION`이며 후보자에게 확정 안내를 보낸 상태는 아니다.
+5. `create_interviewer_schedule_confirmation_draft`로 면접관 안내 초안을 만들고, 검토 후 `approve_and_send_interviewer_schedule_confirmation`으로만 Slack에 발송한다.
 
 내부 배정은 다우오피스의 기존 3시간 예약 블록을 수정하지 않는다. 같은 블록 안에서 1시간 면접 세 건 또는 30분 면접 여섯 건처럼 겹치지 않는 시간만 로컬 DB에 기록한다.
+다우오피스 예약과 나인하이어의 후보자 메시지는 이 과정에서 생성·변경하지 않는다.
 
 나인하이어의 평가 완료 알림을 감지하고, 완료된 평가표 요약을 사용자에게 보여준 뒤 승인된 지원자의 면접관 가용시간을 Slack에서 수집하는 **로컬 업무형 브릿지 MCP 서버**입니다.
 
 Codex는 이 서버의 MCP 도구를 호출하고, 로컬 백그라운드 워커는 Slack Socket Mode 연결·5분 주기 동기화·리마인드를 담당합니다. 상태와 이력은 별도 클라우드 DB 없이 이 PC의 SQLite 파일에 저장됩니다.
 
-> 현재 단계는 **MCP 서버 + Slack 테스트 앱 + 로컬 워커**입니다. 다우오피스 회의실 조회와 대시보드는 의도적으로 다음 단계로 미뤘습니다.
+> 현재 단계는 **MCP 서버 + Slack 테스트 앱 + 로컬 워커 + 다우오피스 회의실 조회**입니다. 대시보드와 후보자 확정 안내 자동화는 다음 단계입니다.
 
 ## 현재 구현 범위
 
@@ -262,8 +265,11 @@ tool_timeout_sec = 60.0
 | `set_case_schedule_rules` | 소요시간·제안 날짜 변경 | 로컬 상태 갱신 |
 | `record_manual_availability` | 예외 시간 직접 기록 | 로컬 상태 갱신 |
 | `create_interviewer_request_draft` | Slack 메시지 초안 생성 | 발송 없음 |
+| `confirm_internal_interview_schedule` | 회의실 배정 기반 내부 일정 확정 | 로컬 상태·이벤트 갱신 |
+| `create_interviewer_schedule_confirmation_draft` | 면접관 최종 일정 안내 초안 생성 | 발송 없음 |
 | `list_pending_message_drafts` | 승인 대기 초안 조회 | 없음 |
 | `approve_and_send_interviewer_request` | 초안 승인 후 Slack 발송 | **Slack 메시지 발송** |
+| `approve_and_send_interviewer_schedule_confirmation` | 최종 일정 안내 승인 후 Slack 발송 | **Slack 메시지 발송** |
 
 ## 날짜와 리마인드 규칙
 
@@ -335,6 +341,10 @@ Slack 평가 완료 알림
                         COLLECTING_AVAILABILITY
                             ├─ 면접관 불참/미응답 → REVIEW_REQUIRED
                             └─ 필수 면접관 모두 제출 → READY_TO_SCHEDULE
+                                                            ↓ 회의실 내부 배정·일정 확정
+                                       AWAITING_CANDIDATE_CONFIRMATION
+                                                            ↓ 면접관 안내 초안 검토·승인
+                                       Slack 내부 일정 안내 발송
 ```
 
 면접관이 “이번 인터뷰 참여 어려움”을 누르면 자동 제외하지 않습니다. `DECLINED_PENDING_REVIEW`로 저장하고 담당자가 대체 면접관 추가, 선택 참여 전환, 제외 중 하나를 결정합니다.
@@ -378,8 +388,8 @@ npm run build
 
 ## 알려진 제한과 다음 단계
 
-- 다우오피스 회의실 확인은 `src/domain/daou-office.ts`의 어댑터 경계만 있고 실제 연동은 아직 없습니다.
-- 면접관 캘린더와 회의실의 교집합 계산은 다우오피스 단계에서 추가해야 합니다.
+- 다우오피스는 지정 면접실·예약자·이용 목적이 일치하는 예약 블록만 읽습니다. 예약 생성·수정·취소는 지원하지 않습니다.
+- 후보자에게 면접 일정을 생성하거나 메시지를 발송하는 나인하이어 MCP 도구는 현재 확인되지 않았습니다. 후보자 확인은 나인하이어에서 수동으로 처리하고 후속 단계에서 결과를 기록해야 합니다.
 - 대시보드는 아직 없습니다. SQLite의 구조화 상태를 그대로 읽는 방식으로 후속 구현할 수 있습니다.
 - 나인하이어가 실제 제공하는 도구 스키마를 키 없이 확인할 수 없으므로 최초 매핑은 필요합니다.
 - Slack 알림 Block Kit 원본 형식이 바뀌면 파서 fixture를 추가하고 `src/slack/parser.ts`를 조정해야 합니다.

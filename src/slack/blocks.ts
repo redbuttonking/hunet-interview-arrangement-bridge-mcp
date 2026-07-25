@@ -2,6 +2,7 @@ import type { KnownBlock, ModalView } from "@slack/types";
 import { defaultHourlySlots, normalizeSlots } from "../domain/calendar.js";
 import type {
   CaseBundle,
+  ConfirmedInterviewScheduleRow,
   InterviewCaseRow,
   InterviewerRow,
 } from "../db/database.js";
@@ -98,6 +99,49 @@ export function buildRequestMessage(bundle: CaseBundle): {
         {
           type: "mrkdwn",
           text: "기본 시간대 09:00–18:00 · 버튼 응답은 면접 건별로 저장됩니다.",
+        },
+      ],
+    },
+  ];
+  return { text, blocks };
+}
+
+export function buildScheduleConfirmationMessage(
+  bundle: CaseBundle,
+  schedule: ConfirmedInterviewScheduleRow,
+): { text: string; blocks: KnownBlock[] } {
+  const { interviewCase } = bundle;
+  const mentions = bundle.interviewers
+    .filter((item) => item.active)
+    .map((item) =>
+      item.slackUserId ? `<@${item.slackUserId}>` : item.displayName,
+    )
+    .join(", ");
+  const text = `${candidateLabel(interviewCase)} 지원자 인터뷰 내부 일정 확정 안내`;
+  const blocks: KnownBlock[] = [
+    {
+      type: "header",
+      text: { type: "plain_text", text: "인터뷰 내부 일정 확정 안내" },
+    },
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: [
+          `*지원자:* ${candidateLabel(interviewCase)}`,
+          `*채용:* ${interviewCase.recruitmentName ?? "채용 정보 미확인"}`,
+          `*일시:* ${dateLabel(schedule.date)} ${schedule.startTime}~${schedule.endTime}`,
+          `*회의실:* ${schedule.roomName}`,
+          `*면접관:* ${mentions || "면접관 매핑 필요"}`,
+        ].join("\n"),
+      },
+    },
+    {
+      type: "context",
+      elements: [
+        {
+          type: "mrkdwn",
+          text: "후보자 최종 확인 전인 내부 확정 일정입니다. 변동 시 별도로 안내합니다.",
         },
       ],
     },
