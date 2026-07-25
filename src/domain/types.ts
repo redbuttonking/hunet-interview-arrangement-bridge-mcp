@@ -6,8 +6,11 @@ export type InterviewCaseStatus =
   | "READY_TO_SCHEDULE"
   | "AWAITING_CANDIDATE_CONFIRMATION"
   | "CONFIRMED"
+  | "CANCELLED"
   | "REVIEW_REQUIRED"
   | "CLOSED";
+
+export type RescheduleAvailabilityPolicy = "REUSE" | "RECOLLECT";
 
 export type InterviewerStatus =
   | "PENDING"

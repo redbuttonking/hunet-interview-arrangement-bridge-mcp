@@ -56,10 +56,42 @@ const workflow = new WorkflowService(
 );
 const reconciler = new SlackReconciler(db, config, app.client, workflow);
 
-function actionValue(body: unknown): string | undefined {
-  if (!body || typeof body !== "object") return undefined;
+function actionContext(body: unknown): {
+  caseId?: string;
+  scheduleRound?: number;
+} {
+  if (!body || typeof body !== "object") return {};
   const actions = (body as { actions?: Array<{ value?: string }> }).actions;
-  return actions?.[0]?.value;
+  const value = actions?.[0]?.value;
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value) as {
+      caseId?: unknown;
+      scheduleRound?: unknown;
+    };
+    return {
+      ...(typeof parsed.caseId === "string" ? { caseId: parsed.caseId } : {}),
+      ...(typeof parsed.scheduleRound === "number"
+        ? { scheduleRound: parsed.scheduleRound }
+        : {}),
+    };
+  } catch {
+    return { caseId: value };
+  }
+}
+
+function acceptsAvailabilityResponse(
+  interviewCase: { status: string; scheduleRound: number },
+  scheduleRound: number | undefined,
+): boolean {
+  const legacyFirstRound = scheduleRound === undefined && interviewCase.scheduleRound === 1;
+  const matchingRound = scheduleRound === interviewCase.scheduleRound || legacyFirstRound;
+  return (
+    matchingRound &&
+    ["REQUEST_SENT", "COLLECTING_AVAILABILITY", "READY_TO_SCHEDULE"].includes(
+      interviewCase.status,
+    )
+  );
 }
 
 app.message(async ({ message, context, logger }) => {
@@ -83,7 +115,7 @@ app.message(async ({ message, context, logger }) => {
 
 app.action(OPEN_AVAILABILITY_ACTION, async ({ ack, body, client, respond }) => {
   await ack();
-  const caseId = actionValue(body);
+  const { caseId, scheduleRound } = actionContext(body);
   const slackUserId =
     "user" in body && body.user && "id" in body.user
       ? String(body.user.id)
@@ -97,11 +129,15 @@ app.action(OPEN_AVAILABILITY_ACTION, async ({ ack, body, client, respond }) => {
     caseId,
     slackUserId,
   );
-  if (!interviewCase || !interviewer) {
+  if (
+    !interviewCase ||
+    !interviewer ||
+    !acceptsAvailabilityResponse(interviewCase, scheduleRound)
+  ) {
     await respond({
       response_type: "ephemeral",
       text:
-        "이 면접 건의 면접관으로 연결되어 있지 않습니다. 채용 담당자에게 Slack 사용자 매핑을 요청해 주세요.",
+        "이전 일정 요청이거나 현재 면접관 정보와 일치하지 않습니다. 최신 일정 요청을 확인해 주세요.",
     });
     return;
   }
@@ -113,13 +149,21 @@ app.action(OPEN_AVAILABILITY_ACTION, async ({ ack, body, client, respond }) => {
 
 app.action(DECLINE_INTERVIEW_ACTION, async ({ ack, body, respond }) => {
   await ack();
-  const caseId = actionValue(body);
+  const { caseId, scheduleRound } = actionContext(body);
   const slackUserId =
     "user" in body && body.user && "id" in body.user
       ? String(body.user.id)
       : undefined;
   if (!caseId || !slackUserId) return;
   try {
+    const interviewCase = db.getCase(caseId);
+    if (!interviewCase || !acceptsAvailabilityResponse(interviewCase, scheduleRound)) {
+      await respond({
+        response_type: "ephemeral",
+        text: "이전 일정 요청에는 응답할 수 없습니다. 최신 일정 요청을 확인해 주세요.",
+      });
+      return;
+    }
     db.markInterviewerDeclined(caseId, slackUserId);
     await respond({
       response_type: "ephemeral",
@@ -135,11 +179,16 @@ app.action(DECLINE_INTERVIEW_ACTION, async ({ ack, body, respond }) => {
 });
 
 app.view(AVAILABILITY_VIEW_CALLBACK, async ({ ack, body, view }) => {
-  let metadata: { caseId?: string; slackUserId?: string };
+  let metadata: {
+    caseId?: string;
+    slackUserId?: string;
+    scheduleRound?: number;
+  };
   try {
     metadata = JSON.parse(view.private_metadata) as {
       caseId?: string;
       slackUserId?: string;
+      scheduleRound?: number;
     };
   } catch {
     await ack({
@@ -151,10 +200,15 @@ app.view(AVAILABILITY_VIEW_CALLBACK, async ({ ack, body, view }) => {
   const caseId = metadata.caseId;
   const slackUserId = body.user.id;
   const interviewCase = caseId ? db.getCase(caseId) : undefined;
-  if (!caseId || !interviewCase || metadata.slackUserId !== slackUserId) {
+  if (
+    !caseId ||
+    !interviewCase ||
+    metadata.slackUserId !== slackUserId ||
+    !acceptsAvailabilityResponse(interviewCase, metadata.scheduleRound)
+  ) {
     await ack({
       response_action: "errors",
-      errors: { global_all: "면접관 또는 면접 건 정보가 일치하지 않습니다." },
+      errors: { global_all: "이전 일정 요청이거나 면접관 정보가 일치하지 않습니다." },
     });
     return;
   }

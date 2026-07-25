@@ -3,19 +3,24 @@ import type { WebClient } from "@slack/web-api";
 import type { AppConfig } from "../config.js";
 import {
   BridgeDatabase,
+  type CaseBundle,
+  type ConfirmedInterviewScheduleRow,
   type DraftRow,
   type InterviewCaseRow,
+  type ScheduleTransitionResult,
 } from "../db/database.js";
 import { proposalDates } from "../domain/calendar.js";
 import type {
   CandidateContext,
   EvaluationSummary,
+  RescheduleAvailabilityPolicy,
   SlackNotificationInput,
 } from "../domain/types.js";
 import type { NinehireWorkflowAdapter } from "../ninehire/adapter.js";
 import {
   buildRequestMessage,
   buildScheduleConfirmationMessage,
+  buildScheduleUpdateMessage,
 } from "../slack/blocks.js";
 import {
   parseConfirmedScheduleDateTime,
@@ -38,6 +43,16 @@ function hashPayload(text: string, blocks: unknown): string {
   return createHash("sha256")
     .update(JSON.stringify({ text, blocks }))
     .digest("hex");
+}
+
+function slackMetadataEventType(messageType: DraftRow["messageType"]): string {
+  if (messageType === "INTERVIEWER_REQUEST") {
+    return "interview_bridge_request";
+  }
+  if (messageType === "SCHEDULE_CONFIRMATION") {
+    return "interview_bridge_schedule_confirmation";
+  }
+  return "interview_bridge_schedule_update";
 }
 
 export interface SlackIdentityResolver {
@@ -454,6 +469,48 @@ export class WorkflowService {
     return this.db.confirmInternalSchedule(caseId);
   }
 
+  reopenInterviewSchedule(input: {
+    caseId: string;
+    availabilityPolicy: RescheduleAvailabilityPolicy;
+    reason: string;
+  }): ScheduleTransitionResult & { scheduleUpdateDraft: DraftRow | null } {
+    if (!this.config.slack.requestChannelId) {
+      throw new Error("SLACK_REQUEST_CHANNEL_ID is not configured.");
+    }
+    const transition = this.db.reopenScheduleForReschedule(input);
+    const bundle = this.db.getCaseBundle(input.caseId);
+    if (!bundle) throw new Error(`Case not found: ${input.caseId}`);
+    const scheduleUpdateDraft = transition.hadSentScheduleConfirmation
+      ? this.createScheduleUpdateDraft(
+          bundle,
+          transition.previousSchedule!,
+          "SCHEDULE_CHANGE",
+        )
+      : null;
+    return { ...transition, scheduleUpdateDraft };
+  }
+
+  cancelInterviewArrangement(input: {
+    caseId: string;
+    reason: string;
+  }): ScheduleTransitionResult & { scheduleUpdateDraft: DraftRow | null } {
+    if (!this.config.slack.requestChannelId) {
+      throw new Error("SLACK_REQUEST_CHANNEL_ID is not configured.");
+    }
+    const transition = this.db.cancelInterviewArrangement(input);
+    const bundle = this.db.getCaseBundle(input.caseId);
+    if (!bundle) throw new Error(`Case not found: ${input.caseId}`);
+    const scheduleUpdateDraft =
+      transition.hadSentScheduleConfirmation && transition.previousSchedule
+        ? this.createScheduleUpdateDraft(
+            bundle,
+            transition.previousSchedule,
+            "SCHEDULE_CANCELLATION",
+          )
+        : null;
+    return { ...transition, scheduleUpdateDraft };
+  }
+
   createScheduleConfirmationDraft(caseId: string): DraftRow {
     if (!this.config.slack.requestChannelId) {
       throw new Error("SLACK_REQUEST_CHANNEL_ID is not configured.");
@@ -497,6 +554,22 @@ export class WorkflowService {
     return this.approveAndSendDraft(draftId, "SCHEDULE_CONFIRMATION", client);
   }
 
+  async approveAndSendScheduleUpdate(
+    draftId: string,
+    client: WebClient,
+  ): Promise<DraftRow> {
+    const draft = this.db.getDraft(draftId);
+    if (
+      !draft ||
+      !["SCHEDULE_CHANGE", "SCHEDULE_CANCELLATION"].includes(
+        draft.messageType,
+      )
+    ) {
+      throw new Error("This draft is not a schedule change or cancellation draft.");
+    }
+    return this.approveAndSendDraft(draftId, draft.messageType, client);
+  }
+
   private async approveAndSendDraft(
     draftId: string,
     messageType: DraftRow["messageType"],
@@ -517,13 +590,18 @@ export class WorkflowService {
     const current =
       messageType === "INTERVIEWER_REQUEST"
         ? buildRequestMessage(currentBundle)
-        : (() => {
+        : messageType === "SCHEDULE_CONFIRMATION"
+          ? (() => {
             const schedule = this.db.getConfirmedInterviewSchedule(existing.caseId);
             if (!schedule) {
               throw new Error("The confirmed schedule record is missing.");
             }
             return buildScheduleConfirmationMessage(currentBundle, schedule);
-          })();
+          })()
+          : {
+              text: existing.previewText,
+              blocks: JSON.parse(existing.blocksJson) as unknown,
+            };
     const currentHash = hashPayload(current.text, current.blocks);
     if (currentHash !== existing.payloadHash) {
       this.db.cancelDraft(
@@ -539,9 +617,7 @@ export class WorkflowService {
     const previouslySentTs = await this.findSlackMessageForDraft(
       approved,
       client,
-      messageType === "INTERVIEWER_REQUEST"
-        ? "interview_bridge_request"
-        : "interview_bridge_schedule_confirmation",
+      slackMetadataEventType(messageType),
     );
     if (previouslySentTs) {
       return this.db.markDraftSent(approved.id, previouslySentTs);
@@ -551,10 +627,7 @@ export class WorkflowService {
       text: approved.previewText,
       blocks: JSON.parse(approved.blocksJson) as never,
       metadata: {
-        event_type:
-          messageType === "INTERVIEWER_REQUEST"
-            ? "interview_bridge_request"
-            : "interview_bridge_schedule_confirmation",
+        event_type: slackMetadataEventType(messageType),
         event_payload: { draft_id: approved.id },
       },
     });
@@ -562,6 +635,26 @@ export class WorkflowService {
       throw new Error("Slack accepted the request but did not return a message ts.");
     }
     return this.db.markDraftSent(approved.id, response.ts);
+  }
+
+  private createScheduleUpdateDraft(
+    bundle: CaseBundle,
+    schedule: ConfirmedInterviewScheduleRow,
+    messageType: "SCHEDULE_CHANGE" | "SCHEDULE_CANCELLATION",
+  ): DraftRow {
+    const payload = buildScheduleUpdateMessage(
+      bundle,
+      schedule,
+      messageType === "SCHEDULE_CANCELLATION" ? "CANCELLATION" : "CHANGE",
+    );
+    return this.db.createDraft({
+      caseId: bundle.interviewCase.id,
+      channelId: this.config.slack.requestChannelId!,
+      previewText: payload.text,
+      blocksJson: JSON.stringify(payload.blocks),
+      payloadHash: hashPayload(payload.text, payload.blocks),
+      messageType,
+    });
   }
 
   private async findSlackMessageForDraft(

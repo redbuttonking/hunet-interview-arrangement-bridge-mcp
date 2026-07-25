@@ -147,4 +147,124 @@ describe("BridgeDatabase", () => {
       db!.cancelRoomAllocation(interviewCase.id, allocation.id),
     ).toThrow("internally confirmed schedule");
   });
+
+  it("reopens a confirmed schedule without reusing stale availability", () => {
+    db = new BridgeDatabase(":memory:");
+    const interviewCase = db.createInterviewCase({
+      candidateName: "지원자 1",
+      proposalDates: ["2026-07-30"],
+    });
+    const interviewer = db.addOrUpdateInterviewer({
+      caseId: interviewCase.id,
+      displayName: "면접관 1",
+      slackUserId: "U1",
+      source: "MANUAL",
+    });
+    db.setCaseStatus(interviewCase.id, "READY_TO_SCHEDULE");
+    db.replaceAvailabilityForInterviewer(interviewCase.id, interviewer.id, [
+      { date: "2026-07-30", start: "15:00", end: "16:00" },
+    ]);
+    const [block] = db.syncMeetingRoomBlocks(
+      ["2026-07-30"],
+      [
+        {
+          sourceKey: "DAOU:reschedule",
+          roomId: "103",
+          roomName: "[818호] 행복룸",
+          reservedBy: "강해빈",
+          purpose: "면접",
+          date: "2026-07-30",
+          startTime: "15:00",
+          endTime: "18:00",
+          sourcePayloadHash: "reschedule-hash",
+        },
+      ],
+    );
+    const allocation = db.allocateRoomBlock({
+      caseId: interviewCase.id,
+      roomBlockId: block!.id,
+      startTime: "15:00",
+      endTime: "16:00",
+    });
+    db.confirmInternalSchedule(interviewCase.id);
+    const sentDraft = db.createDraft({
+      caseId: interviewCase.id,
+      channelId: "C1",
+      previewText: "기존 일정 안내",
+      blocksJson: "[]",
+      payloadHash: "sent-schedule-confirmation",
+      messageType: "SCHEDULE_CONFIRMATION",
+    });
+    db.approveDraft(sentDraft.id);
+    db.markDraftSent(sentDraft.id, "100.0");
+
+    const reopened = db.reopenScheduleForReschedule({
+      caseId: interviewCase.id,
+      availabilityPolicy: "RECOLLECT",
+      reason: "후보자가 일정 변경을 요청했습니다.",
+    });
+
+    expect(reopened).toMatchObject({
+      previousSchedule: { roomAllocationId: allocation.id },
+      hadSentScheduleConfirmation: true,
+      interviewCase: { status: "READY_FOR_DRAFT", scheduleRound: 2 },
+    });
+    expect(db.listRoomAllocations(interviewCase.id)).toMatchObject([
+      { id: allocation.id, status: "CANCELLED" },
+    ]);
+    expect(db.getCaseBundle(interviewCase.id)?.availability).toEqual([]);
+    expect(db.listInterviewers(interviewCase.id)[0]?.status).toBe("PENDING");
+
+    const cancelled = db.cancelInterviewArrangement({
+      caseId: interviewCase.id,
+      reason: "재조율 중 후보자가 인터뷰를 취소했습니다.",
+    });
+    expect(cancelled).toMatchObject({
+      previousSchedule: { roomAllocationId: allocation.id },
+      interviewCase: { status: "CANCELLED" },
+    });
+  });
+
+  it("cancels an arrangement and releases its local room allocation", () => {
+    db = new BridgeDatabase(":memory:");
+    const interviewCase = db.createInterviewCase({
+      candidateName: "지원자 2",
+      proposalDates: ["2026-07-30"],
+    });
+    const [block] = db.syncMeetingRoomBlocks(
+      ["2026-07-30"],
+      [
+        {
+          sourceKey: "DAOU:cancel",
+          roomId: "103",
+          roomName: "[818호] 행복룸",
+          reservedBy: "강해빈",
+          purpose: "면접",
+          date: "2026-07-30",
+          startTime: "15:00",
+          endTime: "18:00",
+          sourcePayloadHash: "cancel-hash",
+        },
+      ],
+    );
+    const allocation = db.allocateRoomBlock({
+      caseId: interviewCase.id,
+      roomBlockId: block!.id,
+      startTime: "15:00",
+      endTime: "16:00",
+    });
+    db.setCaseStatus(interviewCase.id, "READY_TO_SCHEDULE");
+    db.confirmInternalSchedule(interviewCase.id);
+
+    const cancelled = db.cancelInterviewArrangement({
+      caseId: interviewCase.id,
+      reason: "후보자가 인터뷰를 취소했습니다.",
+    });
+
+    expect(cancelled.interviewCase.status).toBe("CANCELLED");
+    expect(db.listRoomAllocations(interviewCase.id)).toMatchObject([
+      { id: allocation.id, status: "CANCELLED" },
+    ]);
+    expect(db.getStatus()).toMatchObject({ activeCases: 0 });
+  });
 });

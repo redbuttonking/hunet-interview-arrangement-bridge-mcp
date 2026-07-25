@@ -1,5 +1,28 @@
 # Interview Arrangement Bridge MCP
 
+## 일정 변경과 취소
+
+확정된 면접의 변경과 취소는 나인하이어나 Slack에 자동으로 전송하지 않습니다. 담당자가 MCP에서 전환하고, 생성된 Slack 안내 초안을 검토·승인한 경우에만 발송합니다.
+
+### 일정 재조율
+
+`reopen_interview_schedule_for_reschedule`를 사용합니다.
+
+- `availabilityPolicy: REUSE`는 기존 면접관 가능 시간을 그대로 사용해 새 시간과 회의실을 다시 추천합니다.
+- `availabilityPolicy: RECOLLECT`는 기존 가능 시간을 비우고 면접관에게 새 일정 입력 요청을 보냅니다. 이전 Slack 버튼과 모달 응답은 재조율 회차가 달라져 반영되지 않습니다.
+- 기존 로컬 면접실 배정과 미발송 안내 초안은 취소합니다. 다우오피스에 미리 잡아 둔 예약 블록은 변경하지 않습니다.
+- 이전 최종 일정 안내가 발송된 건이면 `SCHEDULE_CHANGE` 초안이 함께 생성됩니다. `approve_and_send_interviewer_schedule_update`로만 발송합니다.
+
+### 인터뷰 취소
+
+`cancel_interview_arrangement`를 사용합니다.
+
+- 로컬 면접실 배정, 미발송 초안, 미발송 리마인더를 정리하고 건 상태를 `CANCELLED`로 기록합니다.
+- 이전 최종 일정 안내가 발송된 건이면 `SCHEDULE_CANCELLATION` 초안이 생성됩니다. 검토 후 `approve_and_send_interviewer_schedule_update`로 발송합니다.
+- 두 도구 모두 다우오피스 예약이나 나인하이어의 후보자 일정은 변경하지 않습니다.
+
+나인하이어의 일정 변경·취소 Slack 알림 형식은 아직 실제 사례로 확인되지 않았습니다. 해당 알림을 받으면 현재는 검토 후 위 도구로 처리하며, 실제 알림 예시를 확보한 뒤 자동 감지 규칙을 추가합니다.
+
 ## 다우오피스 전용 브라우저 프로필
 
 다우오피스는 예약을 생성하거나 수정하지 않고, 면접실 예약 블록을 읽는 용도로만 연결한다. 개인 브라우저와 분리된 Microsoft Edge 프로필을 사용한다.

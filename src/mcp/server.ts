@@ -58,6 +58,7 @@ function caseSummary(interviewCase: InterviewCaseRow) {
     status: interviewCase.status,
     durationMinutes: interviewCase.durationMinutes,
     proposalDates: interviewCase.proposalDates,
+    scheduleRound: interviewCase.scheduleRound,
     scheduledDate: interviewCase.scheduledDate,
     scheduledStartTime: interviewCase.scheduledStartTime,
     scheduledEndTime: interviewCase.scheduledEndTime,
@@ -316,6 +317,47 @@ export function createBridgeMcpServer(
   );
 
   server.registerTool(
+    "reopen_interview_schedule_for_reschedule",
+    {
+      title: "인터뷰 일정 재조율 시작",
+      description:
+        "확정 또는 후보자 확인 대기 중인 기존 일정을 로컬에서 해제하고 재조율 상태로 전환합니다. 기존 안내가 발송된 경우 Slack 변경 안내 초안도 생성하지만 자동 발송하지 않습니다. 다우오피스 예약은 변경하지 않습니다.",
+      inputSchema: {
+        caseId: z.string().uuid(),
+        availabilityPolicy: z.enum(["REUSE", "RECOLLECT"]),
+        reason: z.string().min(1).max(500),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    async (input) => result(workflow.reopenInterviewSchedule(input)),
+  );
+
+  server.registerTool(
+    "cancel_interview_arrangement",
+    {
+      title: "인터뷰 조율 취소",
+      description:
+        "면접 건을 취소하고 로컬 면접실 배정, 미발송 초안, 미발송 리마인더를 정리합니다. 기존 일정 안내가 발송된 경우 Slack 취소 안내 초안도 생성하지만 자동 발송하지 않습니다. 다우오피스 예약은 변경하지 않습니다.",
+      inputSchema: {
+        caseId: z.string().uuid(),
+        reason: z.string().min(1).max(500),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (input) => result(workflow.cancelInterviewArrangement(input)),
+  );
+
+  server.registerTool(
     "list_interview_cases",
     {
       title: "인터뷰 건 목록",
@@ -330,6 +372,7 @@ export function createBridgeMcpServer(
             "READY_TO_SCHEDULE",
             "AWAITING_CANDIDATE_CONFIRMATION",
             "CONFIRMED",
+            "CANCELLED",
             "REVIEW_REQUIRED",
             "CLOSED",
           ])
@@ -831,6 +874,26 @@ export function createBridgeMcpServer(
       return result(
         await workflow.approveAndSendScheduleConfirmation(draftId, slackClient),
       );
+    },
+  );
+
+  server.registerTool(
+    "approve_and_send_interviewer_schedule_update",
+    {
+      title: "면접관 일정 변경·취소 안내 승인·발송",
+      description:
+        "사용자가 검토한 면접 일정 변경 또는 취소 안내 초안을 명시적으로 승인하고 Slack 테스트 채널에 발송합니다.",
+      inputSchema: { draftId: z.string().uuid() },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ draftId }) => {
+      if (!slackClient) throw new Error("SLACK_BOT_TOKEN is not configured.");
+      return result(await workflow.approveAndSendScheduleUpdate(draftId, slackClient));
     },
   );
 

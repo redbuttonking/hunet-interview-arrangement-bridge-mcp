@@ -3,6 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import type {
   InterviewCaseStatus,
   InterviewerStatus,
+  RescheduleAvailabilityPolicy,
   SlackNotificationInput,
   TimeSlot,
 } from "../domain/types.js";
@@ -21,6 +22,7 @@ export interface InterviewCaseRow {
   status: InterviewCaseStatus;
   durationMinutes: number;
   proposalDates: string[];
+  scheduleRound: number;
   scheduledRoomAllocationId: string | null;
   scheduledDate: string | null;
   scheduledStartTime: string | null;
@@ -53,7 +55,11 @@ export interface DraftRow {
   previewText: string;
   blocksJson: string;
   payloadHash: string;
-  messageType: "INTERVIEWER_REQUEST" | "SCHEDULE_CONFIRMATION";
+  messageType:
+    | "INTERVIEWER_REQUEST"
+    | "SCHEDULE_CONFIRMATION"
+    | "SCHEDULE_CHANGE"
+    | "SCHEDULE_CANCELLATION";
   status: "DRAFT" | "APPROVED" | "SENT" | "CANCELLED";
   approvedAt: string | null;
   sentAt: string | null;
@@ -115,6 +121,13 @@ export interface ConfirmedInterviewScheduleRow {
   confirmedAt: string;
 }
 
+export interface ScheduleTransitionResult {
+  interviewCase: InterviewCaseRow;
+  previousSchedule: ConfirmedInterviewScheduleRow | undefined;
+  hadSentScheduleConfirmation: boolean;
+  cancelledDraftIds: string[];
+}
+
 export interface CaseBundle {
   interviewCase: InterviewCaseRow;
   interviewers: InterviewerRow[];
@@ -154,6 +167,7 @@ function toCase(row: SqlRow): InterviewCaseRow {
     status: asString(row.status) as InterviewCaseStatus,
     durationMinutes: Number(row.duration_minutes),
     proposalDates: JSON.parse(asString(row.proposal_dates_json)) as string[],
+    scheduleRound: Number(row.schedule_round ?? 1),
     scheduledRoomAllocationId: nullableString(row.scheduled_room_allocation_id),
     scheduledDate: nullableString(row.scheduled_date),
     scheduledStartTime: nullableString(row.scheduled_start_time),
@@ -326,6 +340,12 @@ export class BridgeDatabase {
         status TEXT NOT NULL,
         duration_minutes INTEGER NOT NULL DEFAULT 60,
         proposal_dates_json TEXT NOT NULL,
+        schedule_round INTEGER NOT NULL DEFAULT 1,
+        last_scheduled_room_allocation_id TEXT,
+        last_scheduled_date TEXT,
+        last_scheduled_start_time TEXT,
+        last_scheduled_end_time TEXT,
+        last_internal_schedule_confirmed_at TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -505,6 +525,55 @@ export class BridgeDatabase {
         )
         .run();
     }
+
+    const versionFour = this.connection
+      .prepare("SELECT version FROM schema_migrations WHERE version = 4")
+      .get() as SqlRow | undefined;
+    if (!versionFour) {
+      const columns = this.connection
+        .prepare("PRAGMA table_info(interview_cases)")
+        .all() as SqlRow[];
+      const hasScheduleRound = columns.some(
+        (column) => asString(column.name) === "schedule_round",
+      );
+      if (!hasScheduleRound) {
+        this.connection.exec(
+          "ALTER TABLE interview_cases ADD COLUMN schedule_round INTEGER NOT NULL DEFAULT 1",
+        );
+      }
+      this.connection
+        .prepare(
+          "INSERT INTO schema_migrations(version, applied_at) VALUES (4, datetime('now'))",
+        )
+        .run();
+    }
+
+    const versionFive = this.connection
+      .prepare("SELECT version FROM schema_migrations WHERE version = 5")
+      .get() as SqlRow | undefined;
+    if (!versionFive) {
+      const columns = this.connection
+        .prepare("PRAGMA table_info(interview_cases)")
+        .all() as SqlRow[];
+      const existingColumns = new Set(columns.map((column) => asString(column.name)));
+      const additions = [
+        ["last_scheduled_room_allocation_id", "TEXT"],
+        ["last_scheduled_date", "TEXT"],
+        ["last_scheduled_start_time", "TEXT"],
+        ["last_scheduled_end_time", "TEXT"],
+        ["last_internal_schedule_confirmed_at", "TEXT"],
+      ] as const;
+      for (const [name, definition] of additions) {
+        if (!existingColumns.has(name)) {
+          this.connection.exec(`ALTER TABLE interview_cases ADD COLUMN ${name} ${definition}`);
+        }
+      }
+      this.connection
+        .prepare(
+          "INSERT INTO schema_migrations(version, applied_at) VALUES (5, datetime('now'))",
+        )
+        .run();
+    }
   }
 
   transaction<T>(operation: () => T): T {
@@ -528,7 +597,7 @@ export class BridgeDatabase {
         "SELECT COUNT(*) AS count FROM workflow_reviews WHERE status = 'OPEN'",
       ),
       activeCases: scalar(
-        "SELECT COUNT(*) AS count FROM interview_cases WHERE status != 'CLOSED'",
+        "SELECT COUNT(*) AS count FROM interview_cases WHERE status NOT IN ('CLOSED', 'CANCELLED')",
       ),
       pendingDrafts: scalar(
         "SELECT COUNT(*) AS count FROM message_drafts WHERE status = 'DRAFT'",
@@ -1176,6 +1245,279 @@ export class BridgeDatabase {
     };
   }
 
+  getLastScheduledInterviewSchedule(
+    caseId: string,
+  ): ConfirmedInterviewScheduleRow | undefined {
+    const row = this.connection
+      .prepare(
+        `
+          SELECT
+            interview_cases.id AS case_id,
+            interview_cases.last_scheduled_room_allocation_id,
+            interview_cases.last_scheduled_date,
+            interview_cases.last_scheduled_start_time,
+            interview_cases.last_scheduled_end_time,
+            interview_cases.last_internal_schedule_confirmed_at,
+            meeting_room_blocks.room_name
+          FROM interview_cases
+          JOIN room_allocations
+            ON room_allocations.id = interview_cases.last_scheduled_room_allocation_id
+          JOIN meeting_room_blocks
+            ON meeting_room_blocks.id = room_allocations.room_block_id
+          WHERE interview_cases.id = ?
+        `,
+      )
+      .get(caseId) as SqlRow | undefined;
+    if (!row) return undefined;
+    return {
+      caseId: asString(row.case_id),
+      roomAllocationId: asString(row.last_scheduled_room_allocation_id),
+      date: asString(row.last_scheduled_date),
+      startTime: asString(row.last_scheduled_start_time),
+      endTime: asString(row.last_scheduled_end_time),
+      roomName: asString(row.room_name),
+      confirmedAt: asString(row.last_internal_schedule_confirmed_at),
+    };
+  }
+
+  reopenScheduleForReschedule(input: {
+    caseId: string;
+    availabilityPolicy: RescheduleAvailabilityPolicy;
+    reason: string;
+  }): ScheduleTransitionResult {
+    const interviewCase = this.getCase(input.caseId);
+    if (!interviewCase) throw new Error(`Case not found: ${input.caseId}`);
+    if (
+      ![
+        "AWAITING_CANDIDATE_CONFIRMATION",
+        "CONFIRMED",
+        "REVIEW_REQUIRED",
+      ].includes(interviewCase.status)
+    ) {
+      throw new Error(
+        "Only an internally scheduled or review-required case can be reopened for rescheduling.",
+      );
+    }
+    const previousSchedule = this.getConfirmedInterviewSchedule(input.caseId);
+    if (!previousSchedule) {
+      throw new Error("The previous confirmed schedule record is missing.");
+    }
+    const hadSentScheduleConfirmation = this.hasSentScheduleConfirmation(
+      input.caseId,
+    );
+    let cancelledDraftIds: string[] = [];
+
+    this.transaction(() => {
+      const now = new Date().toISOString();
+      const allocationResult = this.connection
+        .prepare(
+          `
+            UPDATE room_allocations
+            SET status = 'CANCELLED', updated_at = ?
+            WHERE id = ? AND case_id = ? AND status = 'ACTIVE'
+          `,
+        )
+        .run(now, previousSchedule.roomAllocationId, input.caseId);
+      if (Number(allocationResult.changes) === 1) {
+        this.addEvent(input.caseId, "ROOM_ALLOCATION_CANCELLED", "USER", {
+          allocationId: previousSchedule.roomAllocationId,
+          reason: "SCHEDULE_REOPENED",
+        });
+      }
+
+      cancelledDraftIds = this.cancelUnsentDrafts(
+        input.caseId,
+        "The interview schedule was reopened for rescheduling.",
+      );
+
+      let clearedAvailabilityCount = 0;
+      if (input.availabilityPolicy === "RECOLLECT") {
+        clearedAvailabilityCount = Number(
+          (
+            this.connection
+              .prepare(
+                "SELECT COUNT(*) AS count FROM availability_slots WHERE case_id = ?",
+              )
+              .get(input.caseId) as SqlRow
+          ).count,
+        );
+        this.connection
+          .prepare("DELETE FROM availability_slots WHERE case_id = ?")
+          .run(input.caseId);
+        this.connection
+          .prepare(
+            `
+              UPDATE case_interviewers
+              SET status = 'PENDING', responded_at = NULL, updated_at = ?
+              WHERE case_id = ? AND active = 1
+            `,
+          )
+          .run(now, input.caseId);
+        this.connection
+          .prepare("DELETE FROM reminders WHERE case_id = ?")
+          .run(input.caseId);
+      } else {
+        this.connection
+          .prepare("DELETE FROM reminders WHERE case_id = ? AND sent_at IS NULL")
+          .run(input.caseId);
+      }
+
+      this.connection
+        .prepare(
+          `
+            UPDATE interview_cases
+            SET status = ?, schedule_round = schedule_round + 1,
+                last_scheduled_room_allocation_id = scheduled_room_allocation_id,
+                last_scheduled_date = scheduled_date,
+                last_scheduled_start_time = scheduled_start_time,
+                last_scheduled_end_time = scheduled_end_time,
+                last_internal_schedule_confirmed_at = internal_schedule_confirmed_at,
+                scheduled_room_allocation_id = NULL, scheduled_date = NULL,
+                scheduled_start_time = NULL, scheduled_end_time = NULL,
+                internal_schedule_confirmed_at = NULL, updated_at = ?
+            WHERE id = ?
+          `,
+        )
+        .run(
+          input.availabilityPolicy === "RECOLLECT"
+            ? "READY_FOR_DRAFT"
+            : "READY_TO_SCHEDULE",
+          now,
+          input.caseId,
+        );
+      this.addEvent(input.caseId, "SCHEDULE_REOPENED", "USER", {
+        reason: input.reason,
+        availabilityPolicy: input.availabilityPolicy,
+        previousSchedule: {
+          date: previousSchedule.date,
+          startTime: previousSchedule.startTime,
+          endTime: previousSchedule.endTime,
+          roomName: previousSchedule.roomName,
+        },
+        clearedAvailabilityCount,
+        cancelledDraftIds,
+      });
+    });
+
+    return {
+      interviewCase: this.getCase(input.caseId)!,
+      previousSchedule,
+      hadSentScheduleConfirmation,
+      cancelledDraftIds,
+    };
+  }
+
+  cancelInterviewArrangement(input: {
+    caseId: string;
+    reason: string;
+  }): ScheduleTransitionResult {
+    const interviewCase = this.getCase(input.caseId);
+    if (!interviewCase) throw new Error(`Case not found: ${input.caseId}`);
+    if (interviewCase.status === "CLOSED") {
+      throw new Error("A closed interview case cannot be cancelled.");
+    }
+    const previousSchedule =
+      this.getConfirmedInterviewSchedule(input.caseId) ??
+      this.getLastScheduledInterviewSchedule(input.caseId);
+    const hadSentScheduleConfirmation = this.hasSentScheduleConfirmation(
+      input.caseId,
+    );
+    if (interviewCase.status === "CANCELLED") {
+      return {
+        interviewCase,
+        previousSchedule,
+        hadSentScheduleConfirmation,
+        cancelledDraftIds: [],
+      };
+    }
+    let cancelledDraftIds: string[] = [];
+
+    this.transaction(() => {
+      const now = new Date().toISOString();
+      const activeAllocations = this.connection
+        .prepare(
+          "SELECT id FROM room_allocations WHERE case_id = ? AND status = 'ACTIVE'",
+        )
+        .all(input.caseId) as SqlRow[];
+      for (const allocation of activeAllocations) {
+        const allocationId = asString(allocation.id);
+        this.connection
+          .prepare(
+            "UPDATE room_allocations SET status = 'CANCELLED', updated_at = ? WHERE id = ?",
+          )
+          .run(now, allocationId);
+        this.addEvent(input.caseId, "ROOM_ALLOCATION_CANCELLED", "USER", {
+          allocationId,
+          reason: "INTERVIEW_CANCELLED",
+        });
+      }
+      cancelledDraftIds = this.cancelUnsentDrafts(
+        input.caseId,
+        "The interview arrangement was cancelled.",
+      );
+      this.connection
+        .prepare("DELETE FROM reminders WHERE case_id = ? AND sent_at IS NULL")
+        .run(input.caseId);
+      this.setCaseStatus(input.caseId, "CANCELLED");
+      this.addEvent(input.caseId, "INTERVIEW_CANCELLED", "USER", {
+        reason: input.reason,
+        previousSchedule: previousSchedule
+          ? {
+              date: previousSchedule.date,
+              startTime: previousSchedule.startTime,
+              endTime: previousSchedule.endTime,
+              roomName: previousSchedule.roomName,
+            }
+          : null,
+        cancelledDraftIds,
+      });
+    });
+
+    return {
+      interviewCase: this.getCase(input.caseId)!,
+      previousSchedule,
+      hadSentScheduleConfirmation,
+      cancelledDraftIds,
+    };
+  }
+
+  private hasSentScheduleConfirmation(caseId: string): boolean {
+    const row = this.connection
+      .prepare(
+        `
+          SELECT 1 AS found FROM message_drafts
+          WHERE case_id = ? AND message_type = 'SCHEDULE_CONFIRMATION'
+            AND status = 'SENT'
+          LIMIT 1
+        `,
+      )
+      .get(caseId) as SqlRow | undefined;
+    return Boolean(row);
+  }
+
+  private cancelUnsentDrafts(caseId: string, reason: string): string[] {
+    const drafts = this.connection
+      .prepare(
+        `
+          SELECT id FROM message_drafts
+          WHERE case_id = ? AND status IN ('DRAFT', 'APPROVED')
+          ORDER BY created_at ASC
+        `,
+      )
+      .all(caseId) as SqlRow[];
+    for (const draft of drafts) {
+      const draftId = asString(draft.id);
+      this.connection
+        .prepare("UPDATE message_drafts SET status = 'CANCELLED' WHERE id = ?")
+        .run(draftId);
+      this.addEvent(caseId, "DRAFT_CANCELLED", "SYSTEM", {
+        draftId,
+        reason,
+      });
+    }
+    return drafts.map((draft) => asString(draft.id));
+  }
+
   cancelRoomAllocation(caseId: string, allocationId: string): RoomAllocationRow {
     const row = this.connection
       .prepare("SELECT * FROM room_allocations WHERE id = ? AND case_id = ?")
@@ -1745,10 +2087,16 @@ export class BridgeDatabase {
           draftId: id,
           slackMessageTs,
         });
-      } else {
+      } else if (draft.messageType === "SCHEDULE_CONFIRMATION") {
         this.addEvent(draft.caseId, "SCHEDULE_CONFIRMATION_SENT", "USER", {
           draftId: id,
           slackMessageTs,
+        });
+      } else {
+        this.addEvent(draft.caseId, "SCHEDULE_UPDATE_SENT", "USER", {
+          draftId: id,
+          slackMessageTs,
+          messageType: draft.messageType,
         });
       }
     });
@@ -1796,11 +2144,13 @@ export class BridgeDatabase {
         SELECT r.*, i.slack_user_id, i.display_name
         FROM reminders r
         JOIN case_interviewers i ON i.id = r.interviewer_id
+        JOIN interview_cases c ON c.id = r.case_id
         WHERE r.sent_at IS NULL
           AND r.due_at <= ?
           AND i.active = 1
           AND i.status = 'PENDING'
           AND i.slack_user_id IS NOT NULL
+          AND c.status IN ('REQUEST_SENT', 'COLLECTING_AVAILABILITY')
         ORDER BY r.due_at ASC
       `)
       .all(now.toISOString()) as SqlRow[];

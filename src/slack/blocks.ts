@@ -30,6 +30,13 @@ export function buildRequestMessage(bundle: CaseBundle): {
   blocks: KnownBlock[];
 } {
   const { interviewCase } = bundle;
+  const isRescheduleRound = interviewCase.scheduleRound > 1;
+  const requestTitle = isRescheduleRound
+    ? "인터뷰 가능 일정 재입력 요청"
+    : "인터뷰 가능 일정 입력 요청";
+  const requestText = isRescheduleRound
+    ? "일정 변경 조율을 위해 가능한 시간을 다시 선택해 주세요. 이번 제출 내용만 새 일정 검토에 반영됩니다."
+    : "가능한 시간을 선택해 주세요. 현재 참여가 어려운 경우 별도로 알려주시면 담당자가 면접관 구성을 검토합니다.";
   const active = bundle.interviewers.filter((item) => item.active);
   const mentions = active
     .map((item) =>
@@ -37,11 +44,11 @@ export function buildRequestMessage(bundle: CaseBundle): {
     )
     .join(", ");
   const dates = interviewCase.proposalDates.map(dateLabel).join(", ");
-  const text = `${candidateLabel(interviewCase)} 지원자 인터뷰 가능 일정 입력 요청`;
+  const text = `${candidateLabel(interviewCase)} 지원자 ${requestTitle}`;
   const blocks: KnownBlock[] = [
     {
       type: "header",
-      text: { type: "plain_text", text: "인터뷰 가능 일정 입력 요청" },
+      text: { type: "plain_text", text: requestTitle },
     },
     {
       type: "section",
@@ -60,8 +67,7 @@ export function buildRequestMessage(bundle: CaseBundle): {
       type: "section",
       text: {
         type: "mrkdwn",
-        text:
-          "가능한 시간을 선택해 주세요. 현재 참여가 어려운 경우 별도로 알려주시면 담당자가 면접관 구성을 검토합니다.",
+        text: requestText,
       },
     },
     {
@@ -73,14 +79,20 @@ export function buildRequestMessage(bundle: CaseBundle): {
           action_id: OPEN_AVAILABILITY_ACTION,
           text: { type: "plain_text", text: "가능 일정 입력" },
           style: "primary",
-          value: interviewCase.id,
+          value: JSON.stringify({
+            caseId: interviewCase.id,
+            scheduleRound: interviewCase.scheduleRound,
+          }),
         },
         {
           type: "button",
           action_id: DECLINE_INTERVIEW_ACTION,
           text: { type: "plain_text", text: "이번 인터뷰 참여 어려움" },
           style: "danger",
-          value: interviewCase.id,
+          value: JSON.stringify({
+            caseId: interviewCase.id,
+            scheduleRound: interviewCase.scheduleRound,
+          }),
           confirm: {
             title: { type: "plain_text", text: "참여 어려움 확인" },
             text: {
@@ -159,6 +171,50 @@ export function buildScheduleConfirmationMessage(
   return { text, blocks };
 }
 
+export function buildScheduleUpdateMessage(
+  bundle: CaseBundle,
+  schedule: ConfirmedInterviewScheduleRow,
+  updateType: "CHANGE" | "CANCELLATION",
+): { text: string; blocks: KnownBlock[] } {
+  const { interviewCase } = bundle;
+  const mentions = bundle.interviewers
+    .filter((item) => item.active)
+    .map((item) =>
+      item.slackUserId ? `<@${item.slackUserId}>` : item.displayName,
+    )
+    .join(", ");
+  const isCancellation = updateType === "CANCELLATION";
+  const title = isCancellation ? "인터뷰 일정 취소 안내" : "인터뷰 일정 변경 안내";
+  const context = isCancellation
+    ? "인터뷰가 취소되었습니다. 기존 일정에 참석하지 않아도 됩니다."
+    : "기존 확정 일정은 취소되었습니다. 새 일정은 최종 확정 후 다시 안내합니다.";
+  const text = `${candidateLabel(interviewCase)} 지원자 ${title}`;
+  const blocks: KnownBlock[] = [
+    {
+      type: "header",
+      text: { type: "plain_text", text: title },
+    },
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: [
+          `*지원자:* ${candidateLabel(interviewCase)}`,
+          `*채용:* ${interviewCase.recruitmentName ?? "채용 정보 미확인"}`,
+          `*기존 일시:* ${dateLabel(schedule.date)} ${schedule.startTime}~${schedule.endTime}`,
+          `*기존 회의실:* ${schedule.roomName}`,
+          `*면접관:* ${mentions || "면접관 매핑 필요"}`,
+        ].join("\n"),
+      },
+    },
+    {
+      type: "context",
+      elements: [{ type: "mrkdwn", text: context }],
+    },
+  ];
+  return { text, blocks };
+}
+
 export function buildAvailabilityModal(
   interviewCase: InterviewCaseRow,
   interviewer: InterviewerRow,
@@ -232,6 +288,7 @@ export function buildAvailabilityModal(
     private_metadata: JSON.stringify({
       caseId: interviewCase.id,
       slackUserId: interviewer.slackUserId,
+      scheduleRound: interviewCase.scheduleRound,
     }),
     title: { type: "plain_text", text: "가능 일정 입력" },
     submit: { type: "plain_text", text: "제출" },

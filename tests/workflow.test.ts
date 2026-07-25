@@ -244,6 +244,21 @@ describe("evaluation approval workflow", () => {
     expect(db.getCase(interviewCase.id)?.status).toBe(
       "AWAITING_CANDIDATE_CONFIRMATION",
     );
+
+    db.approveDraft(draft.id);
+    db.markDraftSent(draft.id, "20.0");
+    const reopened = workflow.reopenInterviewSchedule({
+      caseId: interviewCase.id,
+      availabilityPolicy: "RECOLLECT",
+      reason: "후보자 일정 변경 요청",
+    });
+    expect(reopened).toMatchObject({
+      interviewCase: { status: "READY_FOR_DRAFT", scheduleRound: 2 },
+      scheduleUpdateDraft: {
+        messageType: "SCHEDULE_CHANGE",
+        status: "DRAFT",
+      },
+    });
   });
 
   it("confirms an internally scheduled case from a matching NineHire Slack notification", async () => {

@@ -95,6 +95,15 @@ describe("bridge MCP server", () => {
       "approve_and_send_interviewer_schedule_confirmation",
     );
     expect(tools.tools.map((tool) => tool.name)).toContain(
+      "reopen_interview_schedule_for_reschedule",
+    );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
+      "cancel_interview_arrangement",
+    );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
+      "approve_and_send_interviewer_schedule_update",
+    );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
       "reprocess_schedule_confirmation_notifications",
     );
 
