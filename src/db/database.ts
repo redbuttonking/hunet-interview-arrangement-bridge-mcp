@@ -74,6 +74,17 @@ export interface ReviewRow {
   resolvedAt: string | null;
 }
 
+export interface StoredSlackNotificationRow {
+  id: string;
+  eventType: string;
+  candidateRef: string | null;
+  candidateName: string | null;
+  recruitmentRef: string | null;
+  recruitmentName: string | null;
+  payloadJson: string;
+  processingStatus: string;
+}
+
 export interface MeetingRoomBlockRow extends MeetingRoomBlockInput {
   id: string;
   active: boolean;
@@ -214,6 +225,19 @@ function toReview(row: SqlRow): ReviewRow {
     resolution: nullableString(row.resolution),
     createdAt: asString(row.created_at),
     resolvedAt: nullableString(row.resolved_at),
+  };
+}
+
+function toStoredSlackNotification(row: SqlRow): StoredSlackNotificationRow {
+  return {
+    id: asString(row.id),
+    eventType: asString(row.event_type),
+    candidateRef: nullableString(row.candidate_ref),
+    candidateName: nullableString(row.candidate_name),
+    recruitmentRef: nullableString(row.recruitment_ref),
+    recruitmentName: nullableString(row.recruitment_name),
+    payloadJson: asString(row.payload_json),
+    processingStatus: asString(row.processing_status),
   };
 }
 
@@ -582,6 +606,25 @@ export class BridgeDatabase {
       .run(status, errorMessage ?? null, new Date().toISOString(), id);
   }
 
+  updateNotificationEventType(id: string, eventType: string): void {
+    this.connection
+      .prepare("UPDATE slack_notifications SET event_type = ? WHERE id = ?")
+      .run(eventType, id);
+  }
+
+  listIgnoredScheduleConfirmationNotifications(): StoredSlackNotificationRow[] {
+    const rows = this.connection
+      .prepare(`
+        SELECT * FROM slack_notifications
+        WHERE event_type = 'OTHER'
+          AND processing_status = 'IGNORED'
+          AND payload_json LIKE '%일정이 확정되었습니다%'
+        ORDER BY created_at ASC
+      `)
+      .all() as SqlRow[];
+    return rows.map(toStoredSlackNotification);
+  }
+
   createReview(input: {
     notificationId?: string;
     caseId?: string;
@@ -729,6 +772,46 @@ export class BridgeDatabase {
       .prepare("SELECT * FROM interview_cases WHERE id = ?")
       .get(id) as SqlRow | undefined;
     return row ? toCase(row) : undefined;
+  }
+
+  findAwaitingCandidateConfirmationCases(
+    candidateName: string,
+    recruitmentName: string,
+  ): InterviewCaseRow[] {
+    const rows = this.connection
+      .prepare(`
+        SELECT * FROM interview_cases
+        WHERE status = 'AWAITING_CANDIDATE_CONFIRMATION'
+          AND candidate_name = ?
+          AND recruitment_name = ?
+        ORDER BY created_at ASC
+      `)
+      .all(candidateName, recruitmentName) as SqlRow[];
+    return rows.map(toCase);
+  }
+
+  confirmCandidateSchedule(input: {
+    caseId: string;
+    notificationId: string;
+    sourceLocation?: string;
+  }): InterviewCaseRow {
+    const interviewCase = this.getCase(input.caseId);
+    if (!interviewCase) throw new Error(`Case not found: ${input.caseId}`);
+    if (interviewCase.status === "CONFIRMED") return interviewCase;
+    if (interviewCase.status !== "AWAITING_CANDIDATE_CONFIRMATION") {
+      throw new Error("The case is not waiting for candidate confirmation.");
+    }
+    this.transaction(() => {
+      this.setCaseStatus(input.caseId, "CONFIRMED");
+      this.addEvent(input.caseId, "CANDIDATE_SCHEDULE_CONFIRMED", "NINEHIRE_SLACK", {
+        notificationId: input.notificationId,
+        date: interviewCase.scheduledDate,
+        startTime: interviewCase.scheduledStartTime,
+        endTime: interviewCase.scheduledEndTime,
+        sourceLocation: input.sourceLocation ?? null,
+      });
+    });
+    return this.getCase(input.caseId)!;
   }
 
   getCaseBundle(id: string): CaseBundle | undefined {

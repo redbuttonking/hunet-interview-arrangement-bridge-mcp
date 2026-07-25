@@ -94,6 +94,9 @@ describe("bridge MCP server", () => {
     expect(tools.tools.map((tool) => tool.name)).toContain(
       "approve_and_send_interviewer_schedule_confirmation",
     );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
+      "reprocess_schedule_confirmation_notifications",
+    );
 
     const status = await client.callTool({ name: "bridge_status" });
     expect(status.isError).not.toBe(true);

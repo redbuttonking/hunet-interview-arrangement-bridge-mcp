@@ -27,6 +27,42 @@ const config: AppConfig = {
   },
 };
 
+function createAwaitingCandidateConfirmationCase(
+  database: BridgeDatabase,
+  candidateName: string,
+): string {
+  const interviewCase = database.createInterviewCase({
+    candidateName,
+    recruitmentName: "인터뷰 어레인지 자동화 테스트 채용",
+    proposalDates: ["2026-07-27"],
+  });
+  const [block] = database.syncMeetingRoomBlocks(
+    ["2026-07-27"],
+    [
+      {
+        sourceKey: `DAOU:${candidateName}`,
+        roomId: "103",
+        roomName: "[818호] 행복룸",
+        reservedBy: "강해빈",
+        purpose: "면접",
+        date: "2026-07-27",
+        startTime: "15:00",
+        endTime: "18:00",
+        sourcePayloadHash: `hash:${candidateName}`,
+      },
+    ],
+  );
+  database.allocateRoomBlock({
+    caseId: interviewCase.id,
+    roomBlockId: block!.id,
+    startTime: "15:00",
+    endTime: "16:00",
+  });
+  database.setCaseStatus(interviewCase.id, "READY_TO_SCHEDULE");
+  database.confirmInternalSchedule(interviewCase.id);
+  return interviewCase.id;
+}
+
 describe("evaluation approval workflow", () => {
   it("waits for user approval before creating an interview case", async () => {
     db = new BridgeDatabase(":memory:");
@@ -208,5 +244,128 @@ describe("evaluation approval workflow", () => {
     expect(db.getCase(interviewCase.id)?.status).toBe(
       "AWAITING_CANDIDATE_CONFIRMATION",
     );
+  });
+
+  it("confirms an internally scheduled case from a matching NineHire Slack notification", async () => {
+    db = new BridgeDatabase(":memory:");
+    const ninehire: NinehireWorkflowAdapter = {
+      async lookupCompletedEvaluation() {
+        return { reason: "테스트에서는 사용하지 않습니다." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    };
+    const workflow = new WorkflowService(db, config, ninehire);
+    const caseId = createAwaitingCandidateConfirmationCase(db, "테스트1");
+
+    const processed = await workflow.ingestSlackNotification({
+      channelId: "C1",
+      messageTs: "10.0",
+      parsed: {
+        eventType: "SCHEDULE_CONFIRMED",
+        title: "일정이 확정되었습니다",
+        text: "일정이 확정되었습니다",
+        links: [],
+        payloadHash: "schedule-confirmed",
+        payloadJson: "{}",
+        candidateName: "테스트1",
+        recruitmentName: "인터뷰 어레인지 자동화 테스트 채용",
+        scheduledDate: "2026-07-27",
+        scheduledStartTime: "15:00",
+        scheduledEndTime: "16:00",
+        location: "회사 주소",
+      },
+    });
+
+    expect(processed).toMatchObject({
+      result: "INTERVIEW_CONFIRMED",
+      caseId,
+    });
+    expect(db.getCase(caseId)?.status).toBe("CONFIRMED");
+  });
+
+  it("requires review when a confirmed Slack schedule differs from the internal schedule", async () => {
+    db = new BridgeDatabase(":memory:");
+    const ninehire: NinehireWorkflowAdapter = {
+      async lookupCompletedEvaluation() {
+        return { reason: "테스트에서는 사용하지 않습니다." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    };
+    const workflow = new WorkflowService(db, config, ninehire);
+    const caseId = createAwaitingCandidateConfirmationCase(db, "테스트2");
+
+    const processed = await workflow.ingestSlackNotification({
+      channelId: "C1",
+      messageTs: "11.0",
+      parsed: {
+        eventType: "SCHEDULE_CONFIRMED",
+        title: "일정이 확정되었습니다",
+        text: "일정이 확정되었습니다",
+        links: [],
+        payloadHash: "schedule-mismatch",
+        payloadJson: "{}",
+        candidateName: "테스트2",
+        recruitmentName: "인터뷰 어레인지 자동화 테스트 채용",
+        scheduledDate: "2026-07-27",
+        scheduledStartTime: "16:00",
+        scheduledEndTime: "17:00",
+      },
+    });
+
+    expect(processed).toMatchObject({ result: "REVIEW_REQUIRED", caseId });
+    expect(db.getCase(caseId)?.status).toBe("REVIEW_REQUIRED");
+    expect(db.listOpenReviews()).toMatchObject([
+      { reviewType: "SCHEDULE_CONFIRMATION_MISMATCH" },
+    ]);
+  });
+
+  it("reprocesses a stored schedule confirmation after adding the detection rule", async () => {
+    db = new BridgeDatabase(":memory:");
+    const ninehire: NinehireWorkflowAdapter = {
+      async lookupCompletedEvaluation() {
+        return { reason: "테스트에서는 사용하지 않습니다." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    };
+    const workflow = new WorkflowService(db, config, ninehire);
+    const caseId = createAwaitingCandidateConfirmationCase(db, "테스트3");
+    const text = "일정이 확정되었습니다\n2026. 07. 27. 월요일 15:00 - 16:00";
+
+    await workflow.ingestSlackNotification({
+      channelId: "C1",
+      messageTs: "12.0",
+      parsed: {
+        eventType: "OTHER",
+        title: "OTHER",
+        text,
+        links: [],
+        payloadHash: "stored-schedule-confirmed",
+        payloadJson: JSON.stringify({ text }),
+        candidateName: "테스트3",
+        recruitmentName: "인터뷰 어레인지 자동화 테스트 채용",
+      },
+    });
+
+    expect(workflow.reprocessScheduleConfirmationNotifications()).toEqual({
+      scanned: 1,
+      confirmed: 1,
+      reviewRequired: 0,
+    });
+    expect(db.getCase(caseId)?.status).toBe("CONFIRMED");
   });
 });

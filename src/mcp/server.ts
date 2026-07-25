@@ -329,6 +329,7 @@ export function createBridgeMcpServer(
             "COLLECTING_AVAILABILITY",
             "READY_TO_SCHEDULE",
             "AWAITING_CANDIDATE_CONFIRMATION",
+            "CONFIRMED",
             "REVIEW_REQUIRED",
             "CLOSED",
           ])
@@ -469,6 +470,22 @@ export function createBridgeMcpServer(
       );
       return result(await reconciler.reconcile());
     },
+  );
+
+  server.registerTool(
+    "reprocess_schedule_confirmation_notifications",
+    {
+      title: "기존 일정 확정 알림 재처리",
+      description:
+        "새 감지 규칙이 적용되기 전에 저장된 나인하이어 일정 확정 Slack 알림을 다시 처리합니다. 외부 메시지나 나인하이어 일정은 변경하지 않습니다.",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () => result(workflow.reprocessScheduleConfirmationNotifications()),
   );
 
   server.registerTool(

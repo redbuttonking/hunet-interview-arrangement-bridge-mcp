@@ -63,4 +63,41 @@ describe("NineHire Slack parser", () => {
     });
     expect(parsed.eventType).toBe("EVALUATION_DEADLINE_EXPIRED");
   });
+
+  it("recognizes a confirmed schedule and extracts its date and time", () => {
+    const parsed = parseNinehireSlackMessage({
+      attachments: [
+        {
+          fallback: "일정이 확정되었습니다",
+          fields: [
+            {
+              title: "지원자:",
+              value: "<https://app.ninehire.com/applicants/A123|테스트1>",
+            },
+            {
+              title: "채용:",
+              value: "인터뷰 어레인지 자동화 테스트 채용",
+            },
+            {
+              title: "날짜:",
+              value: "2026. 07. 27. 월요일 15:00 - 16:00",
+            },
+            {
+              title: "장소:",
+              value: "서울시 구로구 디지털로 26길 5 에이스하이엔드타워 1차 8층 816호",
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(parsed).toMatchObject({
+      eventType: "SCHEDULE_CONFIRMED",
+      candidateName: "테스트1",
+      recruitmentName: "인터뷰 어레인지 자동화 테스트 채용",
+      scheduledDate: "2026-07-27",
+      scheduledStartTime: "15:00",
+      scheduledEndTime: "16:00",
+    });
+  });
 });

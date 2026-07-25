@@ -7,6 +7,7 @@ export interface ParsedSlackNotification extends CandidateContext {
     | "APPLICATION_CREATED"
     | "CANDIDATE_REJECTED"
     | "CANDIDATE_MESSAGE"
+    | "SCHEDULE_CONFIRMED"
     | "REPLY_DEADLINE_EXPIRED"
     | "EVALUATION_DEADLINE_EXPIRED"
     | "OTHER";
@@ -15,6 +16,10 @@ export interface ParsedSlackNotification extends CandidateContext {
   links: Array<{ url: string; label?: string }>;
   payloadHash: string;
   payloadJson: string;
+  scheduledDate?: string;
+  scheduledStartTime?: string;
+  scheduledEndTime?: string;
+  location?: string;
 }
 
 function collectText(value: unknown, output: Set<string>): void {
@@ -103,6 +108,9 @@ function attachmentField(value: unknown, label: string): string | undefined {
 }
 
 function classify(text: string): ParsedSlackNotification["eventType"] {
+  if (text.includes("일정이 확정되었습니다")) {
+    return "SCHEDULE_CONFIRMED";
+  }
   if (
     text.includes("서류 평가가 완료되었습니다.") ||
     text.includes("평가가 완료되었습니다.") ||
@@ -128,6 +136,22 @@ function classify(text: string): ParsedSlackNotification["eventType"] {
   return "OTHER";
 }
 
+export function parseConfirmedScheduleDateTime(text: string):
+  | { date: string; startTime: string; endTime: string }
+  | undefined {
+  const match = text.match(
+    /(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})\.\s*(?:[가-힣]+\s*)?(\d{1,2}:\d{2})\s*[-~]\s*(\d{1,2}:\d{2})/,
+  );
+  if (!match) return undefined;
+  const [, year, month, day, startTime, endTime] = match;
+  if (!year || !month || !day || !startTime || !endTime) return undefined;
+  return {
+    date: `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`,
+    startTime,
+    endTime,
+  };
+}
+
 export function parseNinehireSlackMessage(
   payload: unknown,
 ): ParsedSlackNotification {
@@ -144,6 +168,14 @@ export function parseNinehireSlackMessage(
     (link) => recruitmentName && link.label?.trim() === recruitmentName,
   );
   const eventType = classify(text);
+  const schedule =
+    eventType === "SCHEDULE_CONFIRMED"
+      ? parseConfirmedScheduleDateTime(text)
+      : undefined;
+  const location =
+    eventType === "SCHEDULE_CONFIRMED"
+      ? attachmentField(payload, "장소") ?? field(text, "장소")
+      : undefined;
   const title =
     text
       .split("\n")
@@ -174,5 +206,13 @@ export function parseNinehireSlackMessage(
     ...(recruitmentName ? { recruitmentName } : {}),
     ...(candidateLink ? { candidateRef: candidateLink.url } : {}),
     ...(recruitmentLink ? { recruitmentRef: recruitmentLink.url } : {}),
+    ...(schedule
+      ? {
+          scheduledDate: schedule.date,
+          scheduledStartTime: schedule.startTime,
+          scheduledEndTime: schedule.endTime,
+        }
+      : {}),
+    ...(location ? { location } : {}),
   };
 }

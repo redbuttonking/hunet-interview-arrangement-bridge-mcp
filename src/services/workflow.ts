@@ -17,7 +17,10 @@ import {
   buildRequestMessage,
   buildScheduleConfirmationMessage,
 } from "../slack/blocks.js";
-import type { ParsedSlackNotification } from "../slack/parser.js";
+import {
+  parseConfirmedScheduleDateTime,
+  type ParsedSlackNotification,
+} from "../slack/parser.js";
 
 function todayInKorea(now = new Date()): string {
   const parts = new Intl.DateTimeFormat("en-CA", {
@@ -105,12 +108,17 @@ export class WorkflowService {
       notification,
       input.parsed.eventType === "EVALUATION_COMPLETED"
         ? "EVALUATION_LOOKUP_PENDING"
+        : input.parsed.eventType === "SCHEDULE_CONFIRMED"
+          ? "SCHEDULE_CONFIRMATION_PENDING"
         : "IGNORED",
     );
     if (!stored.inserted) {
       return { notificationId: stored.id, result: "DUPLICATE" };
     }
     if (input.parsed.eventType !== "EVALUATION_COMPLETED") {
+      if (input.parsed.eventType === "SCHEDULE_CONFIRMED") {
+        return this.processScheduleConfirmation(stored.id, input.parsed);
+      }
       return { notificationId: stored.id, result: "IGNORED" };
     }
 
@@ -151,6 +159,148 @@ export class WorkflowService {
       });
       return { notificationId: stored.id, result: "ERROR" };
     }
+  }
+
+  reprocessScheduleConfirmationNotifications(): {
+    scanned: number;
+    confirmed: number;
+    reviewRequired: number;
+  } {
+    const notifications = this.db.listIgnoredScheduleConfirmationNotifications();
+    let confirmed = 0;
+    let reviewRequired = 0;
+    for (const notification of notifications) {
+      let text = "";
+      try {
+        const payload = JSON.parse(notification.payloadJson) as { text?: unknown };
+        text = typeof payload.text === "string" ? payload.text : "";
+      } catch {
+        text = "";
+      }
+      const schedule = parseConfirmedScheduleDateTime(text);
+      this.db.updateNotificationEventType(notification.id, "SCHEDULE_CONFIRMED");
+      const processed = this.processScheduleConfirmation(notification.id, {
+        eventType: "SCHEDULE_CONFIRMED",
+        title: "일정이 확정되었습니다",
+        text,
+        links: [],
+        payloadHash: "",
+        payloadJson: notification.payloadJson,
+        ...(notification.candidateRef
+          ? { candidateRef: notification.candidateRef }
+          : {}),
+        ...(notification.candidateName
+          ? { candidateName: notification.candidateName }
+          : {}),
+        ...(notification.recruitmentRef
+          ? { recruitmentRef: notification.recruitmentRef }
+          : {}),
+        ...(notification.recruitmentName
+          ? { recruitmentName: notification.recruitmentName }
+          : {}),
+        ...(schedule
+          ? {
+              scheduledDate: schedule.date,
+              scheduledStartTime: schedule.startTime,
+              scheduledEndTime: schedule.endTime,
+            }
+          : {}),
+      });
+      if (processed.result === "INTERVIEW_CONFIRMED") confirmed += 1;
+      if (processed.result === "REVIEW_REQUIRED") reviewRequired += 1;
+    }
+    return { scanned: notifications.length, confirmed, reviewRequired };
+  }
+
+  private processScheduleConfirmation(
+    notificationId: string,
+    parsed: ParsedSlackNotification,
+  ): { notificationId: string; result: string; caseId?: string } {
+    if (
+      !parsed.candidateName ||
+      !parsed.recruitmentName ||
+      !parsed.scheduledDate ||
+      !parsed.scheduledStartTime ||
+      !parsed.scheduledEndTime
+    ) {
+      this.db.updateNotificationStatus(notificationId, "REVIEW_REQUIRED");
+      this.db.createReview({
+        notificationId,
+        reviewType: "SCHEDULE_CONFIRMATION_MATCH_REQUIRED",
+        reason:
+          "The confirmed-schedule notification is missing candidate, recruitment, or date/time information.",
+      });
+      return { notificationId, result: "REVIEW_REQUIRED" };
+    }
+
+    const matches = this.db.findAwaitingCandidateConfirmationCases(
+      parsed.candidateName,
+      parsed.recruitmentName,
+    );
+    if (matches.length !== 1) {
+      this.db.updateNotificationStatus(notificationId, "REVIEW_REQUIRED");
+      this.db.createReview({
+        notificationId,
+        reviewType: "SCHEDULE_CONFIRMATION_MATCH_REQUIRED",
+        reason:
+          "The confirmed-schedule notification did not match exactly one candidate-confirmation case.",
+        summary: {
+          candidateName: parsed.candidateName,
+          recruitmentName: parsed.recruitmentName,
+          matchedCaseCount: matches.length,
+        },
+      });
+      return { notificationId, result: "REVIEW_REQUIRED" };
+    }
+
+    const interviewCase = matches[0]!;
+    const isSameSchedule =
+      interviewCase.scheduledDate === parsed.scheduledDate &&
+      interviewCase.scheduledStartTime === parsed.scheduledStartTime &&
+      interviewCase.scheduledEndTime === parsed.scheduledEndTime;
+    if (!isSameSchedule) {
+      this.db.transaction(() => {
+        this.db.setCaseStatus(interviewCase.id, "REVIEW_REQUIRED");
+        this.db.createReview({
+          notificationId,
+          caseId: interviewCase.id,
+          reviewType: "SCHEDULE_CONFIRMATION_MISMATCH",
+          reason:
+            "The confirmed NineHire schedule differs from the internally scheduled date or time.",
+          summary: {
+            expected: {
+              date: interviewCase.scheduledDate,
+              startTime: interviewCase.scheduledStartTime,
+              endTime: interviewCase.scheduledEndTime,
+            },
+            received: {
+              date: parsed.scheduledDate,
+              startTime: parsed.scheduledStartTime,
+              endTime: parsed.scheduledEndTime,
+              location: parsed.location ?? null,
+            },
+          },
+        });
+        this.db.updateNotificationStatus(notificationId, "REVIEW_REQUIRED");
+      });
+      return {
+        notificationId,
+        result: "REVIEW_REQUIRED",
+        caseId: interviewCase.id,
+      };
+    }
+
+    this.db.confirmCandidateSchedule({
+      caseId: interviewCase.id,
+      notificationId,
+      sourceLocation: parsed.location,
+    });
+    this.db.updateNotificationStatus(notificationId, "PROCESSED");
+    return {
+      notificationId,
+      result: "INTERVIEW_CONFIRMED",
+      caseId: interviewCase.id,
+    };
   }
 
   async approveInterviewArrangement(
