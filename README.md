@@ -31,10 +31,10 @@
 
 ## 취소 후 외부 반영 확인
 
-인터뷰를 취소하면 로컬 서버가 나인하이어 후보자 일정과 다우오피스 회의실 예약을 자동으로 변경하지 않습니다. 대신 두 확인 항목을 생성해 실제 운영 반영 여부를 기록합니다.
+인터뷰를 취소하면 로컬 서버가 나인하이어 후보자 일정을 자동으로 변경하지 않습니다. 대신 나인하이어 처리 확인 항목을 생성해 실제 운영 반영 여부를 기록합니다. 다우오피스 회의실 예약은 인터뷰 취소 후에도 항상 유지합니다.
 
-- `list_cancellation_external_follow_ups`로 나인하이어 일정과 다우오피스 예약 확인 대상을 조회합니다.
-- `resolve_cancellation_external_follow_up`에서 수동 처리 완료는 `CONFIRMED`, 공용 예약 유지처럼 조치가 필요 없으면 `NOT_REQUIRED`로 기록합니다.
+- `list_cancellation_external_follow_ups`로 나인하이어 일정 확인 대상을 조회합니다.
+- `resolve_cancellation_external_follow_up`에서 수동 처리 완료는 `CONFIRMED`, 이미 처리돼 별도 조치가 필요 없으면 `NOT_REQUIRED`로 기록합니다.
 - 기존 취소 건은 `backfill_cancellation_external_follow_ups`로 확인 항목을 한 번 생성할 수 있습니다.
 
 ## 운영 현황 데이터

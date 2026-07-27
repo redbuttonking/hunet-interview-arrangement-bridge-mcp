@@ -283,35 +283,33 @@ describe("BridgeDatabase", () => {
     const followUps = db.createCancellationExternalFollowUps(interviewCase.id);
     expect(followUps).toMatchObject([
       { followUpType: "NINEHIRE_CANDIDATE_SCHEDULE", status: "PENDING" },
-      { followUpType: "DAOU_ROOM_RESERVATION", status: "PENDING" },
     ]);
     expect(db.backfillCancellationExternalFollowUps()).toEqual({
       cancelledCases: 1,
       followUpsCreated: 0,
     });
 
-    const daouFollowUp = followUps.find(
-      (item) => item.followUpType === "DAOU_ROOM_RESERVATION",
+    const ninehireFollowUp = followUps.find(
+      (item) => item.followUpType === "NINEHIRE_CANDIDATE_SCHEDULE",
     )!;
     expect(
       db.resolveCancellationExternalFollowUp({
-        followUpId: daouFollowUp.id,
-        status: "NOT_REQUIRED",
-        resolutionNote: "공용 3시간 회의실 예약은 유지합니다.",
+        followUpId: ninehireFollowUp.id,
+        status: "CONFIRMED",
+        resolutionNote: "나인하이어 후보자 일정을 취소했습니다.",
       }),
-    ).toMatchObject({ status: "NOT_REQUIRED" });
+    ).toMatchObject({ status: "CONFIRMED" });
     expect(db.getOperationsDashboard()).toMatchObject({
       summary: {
         caseCountsByStatus: { CANCELLED: 1 },
-        pendingCancellationExternalFollowUps: 1,
+        pendingCancellationExternalFollowUps: 0,
       },
       cases: [
         {
           candidateName: "테스트1",
           status: "CANCELLED",
           cancellationExternalFollowUps: [
-            { status: "PENDING" },
-            { status: "NOT_REQUIRED" },
+            { status: "CONFIRMED" },
           ],
         },
       ],

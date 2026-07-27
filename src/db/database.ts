@@ -648,6 +648,29 @@ export class BridgeDatabase {
         )
         .run();
     }
+
+    const versionSeven = this.connection
+      .prepare("SELECT version FROM schema_migrations WHERE version = 7")
+      .get() as SqlRow | undefined;
+    if (!versionSeven) {
+      this.connection
+        .prepare(`
+          UPDATE cancellation_external_follow_ups
+          SET status = 'NOT_REQUIRED',
+              resolution_note = COALESCE(
+                resolution_note,
+                '다우오피스 회의실 예약은 인터뷰 취소 후에도 유지합니다.'
+              ),
+              resolved_at = COALESCE(resolved_at, datetime('now'))
+          WHERE follow_up_type = 'DAOU_ROOM_RESERVATION' AND status = 'PENDING'
+        `)
+        .run();
+      this.connection
+        .prepare(
+          "INSERT INTO schema_migrations(version, applied_at) VALUES (7, datetime('now'))",
+        )
+        .run();
+    }
   }
 
   transaction<T>(operation: () => T): T {
@@ -969,7 +992,6 @@ export class BridgeDatabase {
     }
     const types: CancellationExternalFollowUpType[] = [
       "NINEHIRE_CANDIDATE_SCHEDULE",
-      "DAOU_ROOM_RESERVATION",
     ];
     let created = 0;
     this.transaction(() => {

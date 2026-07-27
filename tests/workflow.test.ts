@@ -544,7 +544,6 @@ describe("evaluation approval workflow", () => {
       interviewCase: { status: "CANCELLED" },
       cancellationExternalFollowUps: [
         { followUpType: "NINEHIRE_CANDIDATE_SCHEDULE", status: "PENDING" },
-        { followUpType: "DAOU_ROOM_RESERVATION", status: "PENDING" },
       ],
     });
   });
