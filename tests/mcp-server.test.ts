@@ -107,6 +107,9 @@ describe("bridge MCP server", () => {
       "reprocess_schedule_confirmation_notifications",
     );
     expect(tools.tools.map((tool) => tool.name)).toContain(
+      "reprocess_interview_arrangement_eligibility_reviews",
+    );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
       "reprocess_candidate_interview_absence_notifications",
     );
     expect(tools.tools.map((tool) => tool.name)).toContain(

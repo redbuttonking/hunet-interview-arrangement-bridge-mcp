@@ -604,6 +604,22 @@ export function createBridgeMcpServer(
   );
 
   server.registerTool(
+    "reprocess_interview_arrangement_eligibility_reviews",
+    {
+      title: "기존 면접 조율 대상 재판정",
+      description:
+        "기존 면접 조율 시작 검토 건을 최종 평가 항목 기준으로 다시 판정합니다. 합격이 하나라도 있으면 유지하고, 합격 없이 불합격·보류만 있으면 제외합니다. 외부 메시지나 나인하이어 데이터는 변경하지 않습니다.",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () => result(workflow.reprocessInterviewArrangementEligibilityReviews()),
+  );
+
+  server.registerTool(
     "reprocess_schedule_confirmation_notifications",
     {
       title: "기존 일정 확정 알림 재처리",

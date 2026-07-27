@@ -92,6 +92,11 @@ interface EvaluationApprovalPayload {
   evaluation: EvaluationSummary;
 }
 
+type InterviewArrangementEligibility =
+  | "ELIGIBLE"
+  | "NOT_ELIGIBLE"
+  | "REVIEW_REQUIRED";
+
 function evaluationApprovalPayload(
   value: Record<string, unknown> | null,
 ): EvaluationApprovalPayload | undefined {
@@ -118,6 +123,30 @@ function evaluationApprovalPayload(
     return undefined;
   }
   return { context: candidateContext, evaluation: evaluationSummary };
+}
+
+function classifyInterviewArrangementEligibility(
+  evaluation: EvaluationSummary,
+): InterviewArrangementEligibility {
+  const finalDecisionTitles = evaluation.scoreSheets.flatMap((scoreSheet) =>
+    scoreSheet.evaluators.flatMap((evaluator) =>
+      evaluator.items
+        .filter((item) => item.finalEvaluation)
+        .flatMap((item) => item.selectedOptions.map((option) => option.title.trim())),
+    ),
+  );
+
+  if (finalDecisionTitles.length === 0) return "REVIEW_REQUIRED";
+
+  const hasPass = finalDecisionTitles.some(
+    (title) => title.includes("합격") && !title.includes("불합격"),
+  );
+  if (hasPass) return "ELIGIBLE";
+
+  const hasOnlyRejectOrHold = finalDecisionTitles.every(
+    (title) => title.includes("불합격") || title.includes("보류"),
+  );
+  return hasOnlyRejectOrHold ? "NOT_ELIGIBLE" : "REVIEW_REQUIRED";
 }
 
 export class WorkflowService {
@@ -188,6 +217,35 @@ export class WorkflowService {
         });
         return { notificationId: stored.id, result: "REVIEW_REQUIRED" };
       }
+      const eligibility = classifyInterviewArrangementEligibility(
+        evaluation.summary,
+      );
+      if (eligibility === "NOT_ELIGIBLE") {
+        this.db.updateNotificationStatus(stored.id, "NOT_ELIGIBLE");
+        return {
+          notificationId: stored.id,
+          result: "EVALUATION_NOT_ELIGIBLE",
+        };
+      }
+
+      if (eligibility === "REVIEW_REQUIRED") {
+        this.db.updateNotificationStatus(stored.id, "REVIEW_REQUIRED");
+        this.db.createReview({
+          notificationId: stored.id,
+          reviewType: "EVALUATION_DECISION_REQUIRED",
+          reason:
+            "최종 평가 항목에서 합격·불합격·보류를 판단할 수 없습니다. 평가표를 확인하세요.",
+          summary: {
+            context: evaluation.context,
+            evaluation: evaluation.summary,
+          },
+        });
+        return {
+          notificationId: stored.id,
+          result: "EVALUATION_DECISION_REQUIRED",
+        };
+      }
+
       this.db.updateNotificationStatus(stored.id, "AWAITING_START_APPROVAL");
       this.db.createReview({
         notificationId: stored.id,
@@ -210,6 +268,73 @@ export class WorkflowService {
       });
       return { notificationId: stored.id, result: "ERROR" };
     }
+  }
+
+  reprocessInterviewArrangementEligibilityReviews(): {
+    scanned: number;
+    eligible: number;
+    excluded: number;
+    decisionRequired: number;
+  } {
+    const reviews = this.db
+      .listOpenReviews(1_000)
+      .filter(
+        (review) =>
+          review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED",
+      );
+    let eligible = 0;
+    let excluded = 0;
+    let decisionRequired = 0;
+
+    for (const review of reviews) {
+      const approval = evaluationApprovalPayload(review.summary);
+      if (!approval) {
+        decisionRequired += 1;
+        continue;
+      }
+
+      const eligibility = classifyInterviewArrangementEligibility(
+        approval.evaluation,
+      );
+      if (eligibility === "ELIGIBLE") {
+        eligible += 1;
+        continue;
+      }
+
+      this.db.transaction(() => {
+        if (review.notificationId) {
+          this.db.updateNotificationStatus(
+            review.notificationId,
+            eligibility === "NOT_ELIGIBLE" ? "NOT_ELIGIBLE" : "REVIEW_REQUIRED",
+          );
+        }
+        this.db.resolveReview(
+          review.id,
+          eligibility === "NOT_ELIGIBLE"
+            ? "AUTO_EXCLUDED_NO_PASS"
+            : "SUPERSEDED_BY_EVALUATION_DECISION_REVIEW",
+        );
+        if (eligibility === "REVIEW_REQUIRED") {
+          this.db.createReview({
+            notificationId: review.notificationId ?? undefined,
+            reviewType: "EVALUATION_DECISION_REQUIRED",
+            reason:
+              "최종 평가 항목에서 합격·불합격·보류를 판단할 수 없습니다. 평가표를 확인하세요.",
+            summary: review.summary ?? undefined,
+          });
+        }
+      });
+
+      if (eligibility === "NOT_ELIGIBLE") excluded += 1;
+      else decisionRequired += 1;
+    }
+
+    return {
+      scanned: reviews.length,
+      eligible,
+      excluded,
+      decisionRequired,
+    };
   }
 
   reprocessScheduleConfirmationNotifications(): {

@@ -72,7 +72,7 @@ Codex는 이 서버의 MCP 도구를 호출하고, 로컬 백그라운드 워커
 
 - Slack 비공개 나인하이어 알림 채널을 실시간 수신하고 5분마다 누락 메시지를 재확인
 - `서류 평가가 완료되었습니다.`, `평가가 완료되었습니다.`, `평가표 제출이 완료되었습니다.` 알림만 조율 시작 후보로 분류하고, 나인하이어의 실제 평가표 완료 상태를 다시 확인
-- 나인하이어 MCP에서 완료된 평가표·평가자·의견·선택 점수를 조회해 검토 대기 건 생성
+- 나인하이어 MCP에서 완료된 평가표·평가자·의견·선택 점수를 조회. 최종 평가에 합격이 하나라도 있으면 검토 대기 건 생성하고, 합격 없이 불합격·보류만 있으면 조율 대상에서 제외
 - 사용자가 MCP에서 `면접 조율 시작`을 승인한 경우에만 인터뷰 조율 건 생성
 - 사용자가 나인하이어에서 후보자 일정 제안을 수동 발송한 뒤, Slack의 `일정이 확정되었습니다` 알림에서 후보자·채용·날짜·시간이 내부 일정과 일치하면 최종 확정 처리
 - Slack 알림의 장소는 회사 주소로 보존하며 회의실 일치 조건에는 사용하지 않음. 후보자·채용 식별 또는 날짜·시간이 다르면 자동 확정하지 않고 검토 대기 처리
@@ -284,7 +284,7 @@ tool_timeout_sec = 60.0
 9. 면접관은 Slack 버튼과 모달로 가용시간을 제출합니다.
 10. Codex에서 인터뷰 건 상세를 조회해 공통 가능시간을 검토합니다.
 
-완료된 평가표가 있어도 자동으로 합격 또는 면접 진행으로 추측하지 않습니다. `list_workflow_reviews`에서 평가 요약을 확인한 뒤에만 `approve_interview_arrangement`로 면접 조율을 시작할 수 있습니다.
+완료된 평가표의 최종 평가 항목에 합격이 하나라도 있으면 검토 대기 건을 만듭니다. 합격 없이 불합격·보류만 있으면 조율 대상에서 제외합니다. 그 밖의 표현이거나 최종 평가를 찾지 못하면 자동으로 제외하지 않고 `EVALUATION_DECISION_REQUIRED` 검토 건으로 남깁니다. 조율 대상은 `list_workflow_reviews`에서 평가 요약을 확인한 뒤에만 `approve_interview_arrangement`로 면접 조율을 시작할 수 있습니다.
 
 ## 제공 MCP 도구
 
@@ -298,6 +298,7 @@ tool_timeout_sec = 60.0
 | `list_in_progress_recruitments` | 진행 중인 나인하이어 채용 목록과 마감 정보 조회 | 외부 읽기 |
 | `inspect_ninehire_tools` | 나인하이어 도구 스키마 조회 | 읽기 |
 | `sync_slack_notifications` | Slack 원본 채널 즉시 재확인 | 외부 읽기, 로컬 상태 갱신 |
+| `reprocess_interview_arrangement_eligibility_reviews` | 기존 평가 검토 건을 합격 기준으로 재판정 | 로컬 상태 갱신 |
 | `reprocess_schedule_confirmation_notifications` | 기존 일정 확정 Slack 알림 재처리 | 로컬 상태·이벤트 갱신 |
 | `approve_interview_arrangement` | 평가표 검토 후 면접 조율 시작 승인 | 로컬 상태 갱신 |
 | `resolve_interviewer_review` | 면접관 교체·제외 등 조치 후 검토 완료 | 로컬 상태 갱신 |
@@ -376,15 +377,18 @@ data/bridge.db
 ```text
 Slack 평가 완료 알림
   ├─ 지원자·채용·완료 평가표 확인 불가 → REVIEW_REQUIRED
-  └─ 평가표 요약 저장 → START_APPROVAL_REQUIRED
-                               ↓ 사용자 승인
-                           READY_FOR_DRAFT
-                               ↓ 초안 생성
-                           DRAFT_CREATED
-                               ↓ 사용자 승인·발송
-                        COLLECTING_AVAILABILITY
-                            ├─ 면접관 불참/미응답 → REVIEW_REQUIRED
-                            └─ 필수 면접관 모두 제출 → READY_TO_SCHEDULE
+  └─ 최종 평가 확인
+       ├─ 합격 1명 이상 → START_APPROVAL_REQUIRED
+       │                      ↓ 사용자 승인
+       │                  READY_FOR_DRAFT
+       │                      ↓ 초안 생성
+       │                  DRAFT_CREATED
+       │                      ↓ 사용자 승인·발송
+       │            COLLECTING_AVAILABILITY
+       ├─ 합격 없이 불합격·보류만 → 조율 대상 제외
+       └─ 결과 판단 불가 → EVALUATION_DECISION_REQUIRED
+       │            ├─ 면접관 불참/미응답 → REVIEW_REQUIRED
+       │            └─ 필수 면접관 모두 제출 → READY_TO_SCHEDULE
                                                             ↓ 회의실 내부 배정·일정 확정
                                        AWAITING_CANDIDATE_CONFIRMATION
                                                             ↓ 면접관 안내 초안 검토·승인

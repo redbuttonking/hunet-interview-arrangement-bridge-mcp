@@ -83,7 +83,18 @@ describe("evaluation approval workflow", () => {
                 scoreSheetId: "S1",
                 title: "서류 평가표",
                 participants: ["평가자"],
-                evaluators: [],
+                evaluators: [
+                  {
+                    name: "평가자",
+                    items: [
+                      {
+                        title: "최종 평가",
+                        finalEvaluation: true,
+                        selectedOptions: [{ title: "⭕ 합격" }],
+                      },
+                    ],
+                  },
+                ],
               },
             ],
           },
@@ -129,6 +140,219 @@ describe("evaluation approval workflow", () => {
       recruitmentRef: "J456",
       status: "READY_FOR_DRAFT",
     });
+  });
+
+  it("excludes a completed evaluation with only reject and hold decisions", async () => {
+    db = new BridgeDatabase(":memory:");
+    const ninehire: NinehireWorkflowAdapter = {
+      async lookupCompletedEvaluation() {
+        return {
+          context: {
+            candidateRef: "A124",
+            candidateName: "이보류",
+            recruitmentRef: "J456",
+            recruitmentName: "백엔드 엔지니어",
+          },
+          summary: {
+            applicantProgressId: "A124",
+            recruitmentId: "J456",
+            scoreSheets: [
+              {
+                scoreSheetId: "S2",
+                title: "서류 평가표",
+                participants: ["평가자 1", "평가자 2"],
+                evaluators: [
+                  {
+                    name: "평가자 1",
+                    items: [
+                      {
+                        title: "최종 평가",
+                        finalEvaluation: true,
+                        selectedOptions: [{ title: "❌ 불합격" }],
+                      },
+                    ],
+                  },
+                  {
+                    name: "평가자 2",
+                    items: [
+                      {
+                        title: "최종 평가",
+                        finalEvaluation: true,
+                        selectedOptions: [{ title: "🚫 보류" }],
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    };
+    const workflow = new WorkflowService(db, config, ninehire);
+
+    const ingested = await workflow.ingestSlackNotification({
+      channelId: "C1",
+      messageTs: "1.1",
+      parsed: {
+        eventType: "EVALUATION_COMPLETED",
+        title: "서류 평가가 완료되었습니다.",
+        text: "서류 평가가 완료되었습니다.",
+        links: [],
+        payloadHash: "reject-hold-hash",
+        payloadJson: "{}",
+        candidateName: "이보류",
+        recruitmentName: "백엔드 엔지니어",
+      },
+    });
+
+    expect(ingested.result).toBe("EVALUATION_NOT_ELIGIBLE");
+    expect(db.listOpenReviews()).toHaveLength(0);
+    expect(db.listCases()).toHaveLength(0);
+  });
+
+  it("keeps an unrecognized final decision for manual review", async () => {
+    db = new BridgeDatabase(":memory:");
+    const ninehire: NinehireWorkflowAdapter = {
+      async lookupCompletedEvaluation() {
+        return {
+          context: {
+            candidateRef: "A126",
+            candidateName: "판단필요",
+            recruitmentRef: "J456",
+            recruitmentName: "백엔드 엔지니어",
+          },
+          summary: {
+            applicantProgressId: "A126",
+            recruitmentId: "J456",
+            scoreSheets: [
+              {
+                scoreSheetId: "S3",
+                title: "서류 평가표",
+                participants: ["평가자"],
+                evaluators: [
+                  {
+                    name: "평가자",
+                    items: [
+                      {
+                        title: "최종 평가",
+                        finalEvaluation: true,
+                        selectedOptions: [{ title: "추가 논의 필요" }],
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    };
+    const workflow = new WorkflowService(db, config, ninehire);
+
+    const ingested = await workflow.ingestSlackNotification({
+      channelId: "C1",
+      messageTs: "1.15",
+      parsed: {
+        eventType: "EVALUATION_COMPLETED",
+        title: "서류 평가가 완료되었습니다.",
+        text: "서류 평가가 완료되었습니다.",
+        links: [],
+        payloadHash: "unknown-decision-hash",
+        payloadJson: "{}",
+        candidateName: "판단필요",
+        recruitmentName: "백엔드 엔지니어",
+      },
+    });
+
+    expect(ingested.result).toBe("EVALUATION_DECISION_REQUIRED");
+    expect(db.listOpenReviews()).toMatchObject([
+      { reviewType: "EVALUATION_DECISION_REQUIRED" },
+    ]);
+  });
+
+  it("reprocesses existing reviews using the final evaluation decision", () => {
+    db = new BridgeDatabase(":memory:");
+    const ninehire: NinehireWorkflowAdapter = {
+      async lookupCompletedEvaluation() {
+        return { reason: "이 테스트에서는 사용하지 않습니다." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    };
+    const workflow = new WorkflowService(db, config, ninehire);
+    const notification = db.insertNotification({
+      channelId: "C1",
+      messageTs: "1.2",
+      eventType: "EVALUATION_COMPLETED",
+      title: "서류 평가가 완료되었습니다.",
+      payloadHash: "existing-reject-hold-hash",
+      payloadJson: "{}",
+    }, "AWAITING_START_APPROVAL");
+    const reviewId = db.createReview({
+      notificationId: notification.id,
+      reviewType: "INTERVIEW_ARRANGEMENT_START_REQUIRED",
+      reason: "기존 검토 건",
+      summary: {
+        context: {
+          candidateRef: "A125",
+          candidateName: "기존보류",
+          recruitmentRef: "J456",
+          recruitmentName: "백엔드 엔지니어",
+        },
+        evaluation: {
+          applicantProgressId: "A125",
+          recruitmentId: "J456",
+          scoreSheets: [
+            {
+              scoreSheetId: "S3",
+              title: "서류 평가표",
+              participants: ["평가자"],
+              evaluators: [
+                {
+                  name: "평가자",
+                  items: [
+                    {
+                      title: "최종 평가",
+                      finalEvaluation: true,
+                      selectedOptions: [{ title: "❌ 불합격" }],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      },
+    });
+
+    expect(workflow.reprocessInterviewArrangementEligibilityReviews()).toEqual({
+      scanned: 1,
+      eligible: 0,
+      excluded: 1,
+      decisionRequired: 0,
+    });
+    expect(db.getReview(reviewId)).toMatchObject({
+      status: "RESOLVED",
+      resolution: "AUTO_EXCLUDED_NO_PASS",
+    });
+    expect(db.listOpenReviews()).toHaveLength(0);
   });
 
   it("adds direct recruitment participants and flags unresolved user groups", async () => {
