@@ -94,6 +94,7 @@ Codex는 이 서버의 MCP 도구를 호출하고, 로컬 백그라운드 워커
 - 나인하이어 MCP에서 완료된 평가표·평가자·의견·선택 점수를 조회. 최종 평가에 합격이 하나라도 있으면 검토 대기 건 생성하고, 합격 없이 불합격·보류만 있으면 조율 대상에서 제외
 - 사용자가 MCP에서 `면접 조율 시작`을 승인한 경우에만 인터뷰 조율 건 생성
 - 사용자가 나인하이어에서 후보자 일정 제안을 수동 발송한 뒤, Slack의 `일정이 확정되었습니다` 알림에서 후보자·채용·날짜·시간이 내부 일정과 일치하면 최종 확정 처리
+- 서버 밖에서 조율되고 후보자 수락까지 끝난 일정은 `record_manual_confirmed_interview`로 수동 최종 확정 이력에 기록. Slack·나인하이어·다우오피스에는 변경을 전송하지 않음
 - Slack 알림의 장소는 회사 주소로 보존하며 회의실 일치 조건에는 사용하지 않음. 후보자·채용 식별 또는 날짜·시간이 다르면 자동 확정하지 않고 검토 대기 처리
 - 나인하이어 채용 참여자 중 개별 사용자를 면접관 후보로 동기화하고, 건별로 추가·제외·필수/선택 변경
 - 후보는 기본적으로 필수 면접관으로 표시하며, Slack 요청 초안 전 사용자가 필요한 경우 선택 참여 또는 제외로 조정
@@ -322,6 +323,7 @@ tool_timeout_sec = 60.0
 | `reprocess_interview_arrangement_eligibility_reviews` | 기존 평가 검토 건을 합격 기준으로 재판정 | 로컬 상태 갱신 |
 | `reprocess_schedule_confirmation_notifications` | 기존 일정 확정 Slack 알림 재처리 | 로컬 상태·이벤트 갱신 |
 | `approve_interview_arrangement` | 평가표 검토 후 면접 조율 시작 승인 | 로컬 상태 갱신 |
+| `record_manual_confirmed_interview` | 서버 밖에서 최종 확정된 면접 일정 기록 | 로컬 상태·이력 갱신 |
 | `resolve_interviewer_review` | 면접관 교체·제외 등 조치 후 검토 완료 | 로컬 상태 갱신 |
 | `sync_case_interviewers` | 나인하이어 채용 참여자를 면접관 후보로 반영 | 외부 읽기, 로컬 상태 갱신 |
 | `map_interviewer_to_slack` | 나인하이어–Slack ID 매핑 | 로컬 상태 갱신 |

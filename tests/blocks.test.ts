@@ -23,6 +23,7 @@ const interviewCase: InterviewCaseRow = {
   ],
   scheduleRound: 1,
   scheduledRoomAllocationId: null,
+  scheduledRoomName: null,
   scheduledDate: null,
   scheduledStartTime: null,
   scheduledEndTime: null,

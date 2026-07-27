@@ -143,6 +143,93 @@ describe("evaluation approval workflow", () => {
     });
   });
 
+  it("records a manually confirmed interview without external messages", () => {
+    db = new BridgeDatabase(":memory:");
+    const notification = db.insertNotification(
+      {
+        channelId: "C1",
+        messageTs: "1.01",
+        eventType: "EVALUATION_COMPLETED",
+        title: "평가가 완료되었습니다.",
+        payloadHash: "manual-confirmed-hash",
+        payloadJson: "{}",
+        candidateRef: "A126",
+        candidateName: "수동 확정 지원자",
+        recruitmentRef: "R126",
+        recruitmentName: "수동 확정 채용",
+      },
+      "EVALUATION_READY_FOR_APPROVAL",
+    );
+    const reviewId = db.createReview({
+      notificationId: notification.id,
+      reviewType: "INTERVIEW_ARRANGEMENT_START_REQUIRED",
+      reason: "평가표를 검토하세요.",
+      summary: {
+        context: {
+          candidateRef: "A126",
+          candidateName: "수동 확정 지원자",
+          recruitmentRef: "R126",
+          recruitmentName: "수동 확정 채용",
+        },
+        evaluation: {
+          applicantProgressId: "A126",
+          recruitmentId: "R126",
+          scoreSheets: [],
+        },
+      },
+    });
+    const ninehire: NinehireWorkflowAdapter = {
+      async lookupCompletedEvaluation() {
+        throw new Error("이 테스트에서는 나인하이어를 호출하지 않습니다.");
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    };
+    const workflow = new WorkflowService(db, config, ninehire);
+
+    const recorded = workflow.recordManualConfirmedInterview({
+      reviewId,
+      date: "2026-08-04",
+      startTime: "16:00",
+      endTime: "17:00",
+      roomName: "[818호] 행복룸",
+      note: "담당자가 수동 조율하고 후보자 수락까지 확인했습니다.",
+    });
+
+    expect(recorded).toMatchObject({
+      case: {
+        candidateName: "수동 확정 지원자",
+        status: "CONFIRMED",
+        durationMinutes: 60,
+        scheduledRoomName: "[818호] 행복룸",
+        scheduledDate: "2026-08-04",
+      },
+      schedule: {
+        roomAllocationId: null,
+        roomName: "[818호] 행복룸",
+        startTime: "16:00",
+        endTime: "17:00",
+      },
+    });
+    expect(db.getReview(reviewId)).toMatchObject({
+      status: "RESOLVED",
+      resolution: "MANUAL_INTERVIEW_CONFIRMED",
+    });
+    expect(db.getOperationsDashboard()).toMatchObject({
+      cases: [
+        {
+          candidateName: "수동 확정 지원자",
+          status: "CONFIRMED",
+          scheduledRoomName: "[818호] 행복룸",
+        },
+      ],
+    });
+  });
+
   it("retries a temporary NineHire evaluation lookup failure from the local queue", async () => {
     db = new BridgeDatabase(":memory:");
     let attempts = 0;

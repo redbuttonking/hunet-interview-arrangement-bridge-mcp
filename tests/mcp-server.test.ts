@@ -80,6 +80,9 @@ describe("bridge MCP server", () => {
       "approve_interview_arrangement",
     );
     expect(tools.tools.map((tool) => tool.name)).toContain(
+      "record_manual_confirmed_interview",
+    );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
       "list_in_progress_recruitments",
     );
     expect(tools.tools.map((tool) => tool.name)).toContain(

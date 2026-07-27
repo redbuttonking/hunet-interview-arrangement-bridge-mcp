@@ -43,6 +43,28 @@ function todayInKorea(now = new Date()): string {
   return `${value("year")}-${value("month")}-${value("day")}`;
 }
 
+function scheduleDurationMinutes(startTime: string, endTime: string): number {
+  const start = startTime.match(/^(\d{2}):(\d{2})$/);
+  const end = endTime.match(/^(\d{2}):(\d{2})$/);
+  if (!start || !end) {
+    throw new Error("A valid interview start and end time are required.");
+  }
+  if (
+    Number(start[1]) > 23 ||
+    Number(start[2]) > 59 ||
+    Number(end[1]) > 23 ||
+    Number(end[2]) > 59
+  ) {
+    throw new Error("A valid interview start and end time are required.");
+  }
+  const startMinutes = Number(start[1]) * 60 + Number(start[2]);
+  const endMinutes = Number(end[1]) * 60 + Number(end[2]);
+  if (startMinutes >= endMinutes) {
+    throw new Error("The interview end time must be later than the start time.");
+  }
+  return endMinutes - startMinutes;
+}
+
 function hashPayload(text: string, blocks: unknown): string {
   return createHash("sha256")
     .update(JSON.stringify({ text, blocks }))
@@ -785,6 +807,69 @@ export class WorkflowService {
       notificationId: review.notificationId,
       result: "INTERVIEW_CASE_CREATED",
       caseId: interviewCase.id,
+    };
+  }
+
+  recordManualConfirmedInterview(input: {
+    reviewId: string;
+    date: string;
+    startTime: string;
+    endTime: string;
+    roomName: string;
+    note?: string;
+  }): {
+    case: InterviewCaseRow;
+    schedule: ConfirmedInterviewScheduleRow;
+  } {
+    const review = this.db.getReview(input.reviewId);
+    if (
+      !review ||
+      review.status !== "OPEN" ||
+      !review.notificationId ||
+      review.reviewType !== "INTERVIEW_ARRANGEMENT_START_REQUIRED"
+    ) {
+      throw new Error(`Open interview-arrangement approval not found: ${input.reviewId}`);
+    }
+    const approval = evaluationApprovalPayload(review.summary);
+    if (!approval) {
+      throw new Error("Evaluation approval summary is missing or invalid.");
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(input.date)) {
+      throw new Error("A valid interview date is required.");
+    }
+    const durationMinutes = scheduleDurationMinutes(input.startTime, input.endTime);
+    const roomName = input.roomName.trim();
+    if (!roomName) {
+      throw new Error("An interview room name is required.");
+    }
+    this.db.assertNoScheduledRoomConflict({
+      date: input.date,
+      startTime: input.startTime,
+      endTime: input.endTime,
+      roomName,
+    });
+    const interviewCase = this.db.createInterviewCase({
+      notificationId: review.notificationId,
+      candidateRef: approval.context.candidateRef,
+      candidateName: approval.context.candidateName,
+      recruitmentRef: approval.context.recruitmentRef,
+      recruitmentName: approval.context.recruitmentName,
+      durationMinutes,
+      proposalDates: [input.date],
+    });
+    const schedule = this.db.recordManualConfirmedSchedule({
+      caseId: interviewCase.id,
+      date: input.date,
+      startTime: input.startTime,
+      endTime: input.endTime,
+      roomName,
+      note: input.note,
+    });
+    this.db.updateNotificationStatus(review.notificationId, "PROCESSED");
+    this.db.resolveReview(review.id, "MANUAL_INTERVIEW_CONFIRMED");
+    return {
+      case: this.db.getCase(interviewCase.id)!,
+      schedule,
     };
   }
 

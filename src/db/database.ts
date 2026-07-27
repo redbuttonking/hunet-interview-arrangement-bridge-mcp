@@ -33,6 +33,7 @@ export interface InterviewCaseRow {
   proposalDates: string[];
   scheduleRound: number;
   scheduledRoomAllocationId: string | null;
+  scheduledRoomName: string | null;
   scheduledDate: string | null;
   scheduledStartTime: string | null;
   scheduledEndTime: string | null;
@@ -158,7 +159,7 @@ export interface RoomAllocationRow {
 
 export interface ConfirmedInterviewScheduleRow {
   caseId: string;
-  roomAllocationId: string;
+  roomAllocationId: string | null;
   date: string;
   startTime: string;
   endTime: string;
@@ -233,6 +234,7 @@ function toCase(row: SqlRow): InterviewCaseRow {
     proposalDates: JSON.parse(asString(row.proposal_dates_json)) as string[],
     scheduleRound: Number(row.schedule_round ?? 1),
     scheduledRoomAllocationId: nullableString(row.scheduled_room_allocation_id),
+    scheduledRoomName: nullableString(row.scheduled_room_name),
     scheduledDate: nullableString(row.scheduled_date),
     scheduledStartTime: nullableString(row.scheduled_start_time),
     scheduledEndTime: nullableString(row.scheduled_end_time),
@@ -850,6 +852,30 @@ export class BridgeDatabase {
       this.connection
         .prepare(
           "INSERT INTO schema_migrations(version, applied_at) VALUES (9, datetime('now'))",
+        )
+        .run();
+    }
+
+    const versionTen = this.connection
+      .prepare("SELECT version FROM schema_migrations WHERE version = 10")
+      .get() as SqlRow | undefined;
+    if (!versionTen) {
+      const columns = this.connection
+        .prepare("PRAGMA table_info(interview_cases)")
+        .all() as SqlRow[];
+      const existingColumns = new Set(columns.map((column) => asString(column.name)));
+      const additions = [
+        ["scheduled_room_name", "TEXT"],
+        ["last_scheduled_room_name", "TEXT"],
+      ] as const;
+      for (const [name, definition] of additions) {
+        if (!existingColumns.has(name)) {
+          this.connection.exec(`ALTER TABLE interview_cases ADD COLUMN ${name} ${definition}`);
+        }
+      }
+      this.connection
+        .prepare(
+          "INSERT INTO schema_migrations(version, applied_at) VALUES (10, datetime('now'))",
         )
         .run();
     }
@@ -1646,6 +1672,7 @@ export class BridgeDatabase {
           recruitmentName: interviewCase.recruitmentName,
           status: interviewCase.status,
           isReschedule: interviewCase.scheduleRound > 1,
+          scheduledRoomName: interviewCase.scheduledRoomName,
           scheduledDate: interviewCase.scheduledDate,
           scheduledStartTime: interviewCase.scheduledStartTime,
           scheduledEndTime: interviewCase.scheduledEndTime,
@@ -1731,6 +1758,116 @@ export class BridgeDatabase {
       });
     });
     return this.getCase(input.caseId)!;
+  }
+
+  recordManualConfirmedSchedule(input: {
+    caseId: string;
+    date: string;
+    startTime: string;
+    endTime: string;
+    roomName: string;
+    note?: string;
+  }): ConfirmedInterviewScheduleRow {
+    const interviewCase = this.getCase(input.caseId);
+    if (!interviewCase) throw new Error(`Case not found: ${input.caseId}`);
+    if (
+      !isDate(input.date) ||
+      timeMinutes(input.startTime) >= timeMinutes(input.endTime) ||
+      !input.roomName.trim()
+    ) {
+      throw new Error("A valid manual interview schedule is required.");
+    }
+    if (interviewCase.status === "CONFIRMED") {
+      const confirmed = this.getConfirmedInterviewSchedule(input.caseId);
+      if (
+        confirmed &&
+        confirmed.date === input.date &&
+        confirmed.startTime === input.startTime &&
+        confirmed.endTime === input.endTime &&
+        confirmed.roomName === input.roomName
+      ) {
+        return confirmed;
+      }
+      throw new Error("A different confirmed schedule already exists for this case.");
+    }
+    if (interviewCase.status !== "READY_FOR_DRAFT") {
+      throw new Error("Only a new interview case can be manually confirmed.");
+    }
+
+    this.assertNoScheduledRoomConflict({
+      caseId: input.caseId,
+      date: input.date,
+      startTime: input.startTime,
+      endTime: input.endTime,
+      roomName: input.roomName,
+    });
+
+    const now = new Date().toISOString();
+    this.transaction(() => {
+      this.connection
+        .prepare(`
+          UPDATE interview_cases
+          SET status = 'CONFIRMED', scheduled_room_allocation_id = NULL,
+              scheduled_room_name = ?, scheduled_date = ?,
+              scheduled_start_time = ?, scheduled_end_time = ?,
+              internal_schedule_confirmed_at = ?, updated_at = ?
+          WHERE id = ?
+        `)
+        .run(
+          input.roomName,
+          input.date,
+          input.startTime,
+          input.endTime,
+          now,
+          now,
+          input.caseId,
+        );
+      this.addEvent(input.caseId, "MANUAL_INTERVIEW_CONFIRMED", "USER", {
+        source: "MANUAL",
+        date: input.date,
+        startTime: input.startTime,
+        endTime: input.endTime,
+        roomName: input.roomName,
+        note: input.note ?? null,
+      });
+    });
+    return this.getConfirmedInterviewSchedule(input.caseId)!;
+  }
+
+  assertNoScheduledRoomConflict(input: {
+    caseId?: string;
+    date: string;
+    startTime: string;
+    endTime: string;
+    roomName: string;
+  }): void {
+    const conflict = this.connection
+      .prepare(`
+        SELECT interview_cases.id
+        FROM interview_cases
+        LEFT JOIN room_allocations
+          ON room_allocations.id = interview_cases.scheduled_room_allocation_id
+        LEFT JOIN meeting_room_blocks
+          ON meeting_room_blocks.id = room_allocations.room_block_id
+        WHERE (? IS NULL OR interview_cases.id != ?)
+          AND interview_cases.status IN ('AWAITING_CANDIDATE_CONFIRMATION', 'CONFIRMED')
+          AND interview_cases.scheduled_date = ?
+          AND COALESCE(interview_cases.scheduled_room_name, meeting_room_blocks.room_name) = ?
+          AND interview_cases.scheduled_start_time < ?
+          AND interview_cases.scheduled_end_time > ?
+        LIMIT 1
+      `)
+      .get(
+        input.caseId ?? null,
+        input.caseId ?? null,
+        input.date,
+        input.roomName,
+        input.endTime,
+        input.startTime,
+      ) as SqlRow | undefined;
+    if (conflict) {
+      throw new Error("Another scheduled interview already uses this room and time.");
+    }
   }
 
   getCaseBundle(id: string): CaseBundle | undefined {
@@ -2038,7 +2175,7 @@ export class BridgeDatabase {
         .prepare(`
           UPDATE interview_cases
           SET status = ?, scheduled_room_allocation_id = ?, scheduled_date = ?,
-              scheduled_start_time = ?, scheduled_end_time = ?,
+              scheduled_room_name = NULL, scheduled_start_time = ?, scheduled_end_time = ?,
               internal_schedule_confirmed_at = ?, updated_at = ?
           WHERE id = ?
         `)
@@ -2067,26 +2204,30 @@ export class BridgeDatabase {
   ): ConfirmedInterviewScheduleRow | undefined {
     const row = this.connection
       .prepare(`
-        SELECT
+      SELECT
           interview_cases.id AS case_id,
           interview_cases.scheduled_room_allocation_id,
           interview_cases.scheduled_date,
           interview_cases.scheduled_start_time,
           interview_cases.scheduled_end_time,
           interview_cases.internal_schedule_confirmed_at,
-          meeting_room_blocks.room_name
+          COALESCE(interview_cases.scheduled_room_name, meeting_room_blocks.room_name) AS room_name
         FROM interview_cases
-        JOIN room_allocations
+        LEFT JOIN room_allocations
           ON room_allocations.id = interview_cases.scheduled_room_allocation_id
-        JOIN meeting_room_blocks
+        LEFT JOIN meeting_room_blocks
           ON meeting_room_blocks.id = room_allocations.room_block_id
         WHERE interview_cases.id = ?
+          AND (
+            interview_cases.scheduled_room_allocation_id IS NOT NULL
+            OR interview_cases.scheduled_room_name IS NOT NULL
+          )
       `)
       .get(caseId) as SqlRow | undefined;
     if (!row) return undefined;
     return {
       caseId: asString(row.case_id),
-      roomAllocationId: asString(row.scheduled_room_allocation_id),
+      roomAllocationId: nullableString(row.scheduled_room_allocation_id),
       date: asString(row.scheduled_date),
       startTime: asString(row.scheduled_start_time),
       endTime: asString(row.scheduled_end_time),
@@ -2105,23 +2246,27 @@ export class BridgeDatabase {
             interview_cases.id AS case_id,
             interview_cases.last_scheduled_room_allocation_id,
             interview_cases.last_scheduled_date,
-            interview_cases.last_scheduled_start_time,
-            interview_cases.last_scheduled_end_time,
-            interview_cases.last_internal_schedule_confirmed_at,
-            meeting_room_blocks.room_name
-          FROM interview_cases
-          JOIN room_allocations
-            ON room_allocations.id = interview_cases.last_scheduled_room_allocation_id
-          JOIN meeting_room_blocks
-            ON meeting_room_blocks.id = room_allocations.room_block_id
-          WHERE interview_cases.id = ?
+          interview_cases.last_scheduled_start_time,
+          interview_cases.last_scheduled_end_time,
+          interview_cases.last_internal_schedule_confirmed_at,
+          COALESCE(interview_cases.last_scheduled_room_name, meeting_room_blocks.room_name) AS room_name
+        FROM interview_cases
+        LEFT JOIN room_allocations
+          ON room_allocations.id = interview_cases.last_scheduled_room_allocation_id
+        LEFT JOIN meeting_room_blocks
+          ON meeting_room_blocks.id = room_allocations.room_block_id
+        WHERE interview_cases.id = ?
+          AND (
+            interview_cases.last_scheduled_room_allocation_id IS NOT NULL
+            OR interview_cases.last_scheduled_room_name IS NOT NULL
+          )
         `,
       )
       .get(caseId) as SqlRow | undefined;
     if (!row) return undefined;
     return {
       caseId: asString(row.case_id),
-      roomAllocationId: asString(row.last_scheduled_room_allocation_id),
+      roomAllocationId: nullableString(row.last_scheduled_room_allocation_id),
       date: asString(row.last_scheduled_date),
       startTime: asString(row.last_scheduled_start_time),
       endTime: asString(row.last_scheduled_end_time),
@@ -2159,20 +2304,22 @@ export class BridgeDatabase {
 
     this.transaction(() => {
       const now = new Date().toISOString();
-      const allocationResult = this.connection
-        .prepare(
-          `
-            UPDATE room_allocations
-            SET status = 'CANCELLED', updated_at = ?
-            WHERE id = ? AND case_id = ? AND status = 'ACTIVE'
-          `,
-        )
-        .run(now, previousSchedule.roomAllocationId, input.caseId);
-      if (Number(allocationResult.changes) === 1) {
-        this.addEvent(input.caseId, "ROOM_ALLOCATION_CANCELLED", "USER", {
-          allocationId: previousSchedule.roomAllocationId,
-          reason: "SCHEDULE_REOPENED",
-        });
+      if (previousSchedule.roomAllocationId) {
+        const allocationResult = this.connection
+          .prepare(
+            `
+              UPDATE room_allocations
+              SET status = 'CANCELLED', updated_at = ?
+              WHERE id = ? AND case_id = ? AND status = 'ACTIVE'
+            `,
+          )
+          .run(now, previousSchedule.roomAllocationId, input.caseId);
+        if (Number(allocationResult.changes) === 1) {
+          this.addEvent(input.caseId, "ROOM_ALLOCATION_CANCELLED", "USER", {
+            allocationId: previousSchedule.roomAllocationId,
+            reason: "SCHEDULE_REOPENED",
+          });
+        }
       }
 
       cancelledDraftIds = this.cancelUnsentDrafts(
@@ -2218,11 +2365,13 @@ export class BridgeDatabase {
             UPDATE interview_cases
             SET status = ?, schedule_round = schedule_round + 1,
                 last_scheduled_room_allocation_id = scheduled_room_allocation_id,
+                last_scheduled_room_name = scheduled_room_name,
                 last_scheduled_date = scheduled_date,
                 last_scheduled_start_time = scheduled_start_time,
                 last_scheduled_end_time = scheduled_end_time,
                 last_internal_schedule_confirmed_at = internal_schedule_confirmed_at,
                 scheduled_room_allocation_id = NULL, scheduled_date = NULL,
+                scheduled_room_name = NULL,
                 scheduled_start_time = NULL, scheduled_end_time = NULL,
                 internal_schedule_confirmed_at = NULL, updated_at = ?
             WHERE id = ?

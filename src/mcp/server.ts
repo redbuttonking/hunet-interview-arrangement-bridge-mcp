@@ -59,6 +59,7 @@ function caseSummary(interviewCase: InterviewCaseRow) {
     durationMinutes: interviewCase.durationMinutes,
     proposalDates: interviewCase.proposalDates,
     scheduleRound: interviewCase.scheduleRound,
+    scheduledRoomName: interviewCase.scheduledRoomName,
     scheduledDate: interviewCase.scheduledDate,
     scheduledStartTime: interviewCase.scheduledStartTime,
     scheduledEndTime: interviewCase.scheduledEndTime,
@@ -689,6 +690,30 @@ export function createBridgeMcpServer(
     },
     async ({ reviewId }) =>
       result(await workflow.approveInterviewArrangement(reviewId)),
+  );
+
+  server.registerTool(
+    "record_manual_confirmed_interview",
+    {
+      title: "수동 최종 확정 면접 기록",
+      description:
+        "서버 밖에서 조율되고 후보자 수락까지 끝난 면접을 최종 확정 이력으로 기록합니다. Slack, 나인하이어, 다우오피스에는 변경을 전송하지 않습니다.",
+      inputSchema: {
+        reviewId: z.string().uuid(),
+        date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+        startTime: z.string().regex(/^\d{2}:\d{2}$/),
+        endTime: z.string().regex(/^\d{2}:\d{2}$/),
+        roomName: z.string().min(1).max(100),
+        note: z.string().min(1).max(500).optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    async (input) => result(workflow.recordManualConfirmedInterview(input)),
   );
 
   server.registerTool(
