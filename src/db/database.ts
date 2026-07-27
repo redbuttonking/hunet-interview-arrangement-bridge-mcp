@@ -2049,6 +2049,33 @@ export class BridgeDatabase {
     return row ? toDraft(row) : undefined;
   }
 
+  replacePendingDraftText(input: {
+    draftId: string;
+    blocksJson: string;
+    payloadHash: string;
+  }): DraftRow {
+    const draft = this.getDraft(input.draftId);
+    if (!draft || draft.status !== "DRAFT") {
+      throw new Error(`Draft is not editable: ${input.draftId}`);
+    }
+    const updated = this.connection
+      .prepare(
+        `
+          UPDATE message_drafts
+          SET blocks_json = ?, payload_hash = ?
+          WHERE id = ? AND status = 'DRAFT'
+        `,
+      )
+      .run(input.blocksJson, input.payloadHash, input.draftId);
+    if (Number(updated.changes) !== 1) {
+      throw new Error(`Draft is not editable: ${input.draftId}`);
+    }
+    this.addEvent(draft.caseId, "DRAFT_TEXT_REVISED", "USER", {
+      draftId: draft.id,
+    });
+    return this.getDraft(input.draftId)!;
+  }
+
   listDrafts(status: DraftRow["status"] = "DRAFT"): DraftRow[] {
     return (
       this.connection

@@ -876,6 +876,27 @@ export function createBridgeMcpServer(
   );
 
   server.registerTool(
+    "replace_pending_message_draft_text",
+    {
+      title: "발송 대기 Slack 초안 문구 수정",
+      description:
+        "발송 전 Slack 초안에서 지정한 문구 하나를 정확히 찾아 새 문구로 바꿉니다. 초안은 발송하지 않습니다.",
+      inputSchema: {
+        draftId: z.string().uuid(),
+        textToReplace: z.string().trim().min(1).max(1_000),
+        replacementText: z.string().trim().min(1).max(1_000),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    async (input) => result(workflow.replacePendingDraftText(input)),
+  );
+
+  server.registerTool(
     "approve_and_send_interviewer_request",
     {
       title: "면접관 일정 요청 승인·발송",

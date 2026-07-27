@@ -46,6 +46,33 @@ function hashPayload(text: string, blocks: unknown): string {
     .digest("hex");
 }
 
+function replaceExactText(
+  value: unknown,
+  textToReplace: string,
+  replacementText: string,
+): number {
+  if (Array.isArray(value)) {
+    return value.reduce(
+      (count, item) =>
+        count + replaceExactText(item, textToReplace, replacementText),
+      0,
+    );
+  }
+  if (!value || typeof value !== "object") return 0;
+
+  let replaced = 0;
+  const record = value as Record<string, unknown>;
+  for (const [key, child] of Object.entries(record)) {
+    if (key === "text" && child === textToReplace) {
+      record[key] = replacementText;
+      replaced += 1;
+      continue;
+    }
+    replaced += replaceExactText(child, textToReplace, replacementText);
+  }
+  return replaced;
+}
+
 function slackMetadataEventType(messageType: DraftRow["messageType"]): string {
   if (messageType === "INTERVIEWER_REQUEST") {
     return "interview_bridge_request";
@@ -715,6 +742,38 @@ export class WorkflowService {
       blocksJson: JSON.stringify(payload.blocks),
       payloadHash: hashPayload(payload.text, payload.blocks),
       messageType: "SCHEDULE_CONFIRMATION",
+    });
+  }
+
+  replacePendingDraftText(input: {
+    draftId: string;
+    textToReplace: string;
+    replacementText: string;
+  }): DraftRow {
+    const draft = this.db.getDraft(input.draftId);
+    if (!draft || draft.status !== "DRAFT") {
+      throw new Error(`Draft is not editable: ${input.draftId}`);
+    }
+    let blocks: unknown;
+    try {
+      blocks = JSON.parse(draft.blocksJson) as unknown;
+    } catch {
+      throw new Error(`Draft blocks are invalid: ${input.draftId}`);
+    }
+    const replaced = replaceExactText(
+      blocks,
+      input.textToReplace,
+      input.replacementText,
+    );
+    if (replaced !== 1) {
+      throw new Error(
+        `Expected one matching draft text, but found ${replaced}: ${input.draftId}`,
+      );
+    }
+    return this.db.replacePendingDraftText({
+      draftId: draft.id,
+      blocksJson: JSON.stringify(blocks),
+      payloadHash: hashPayload(draft.previewText, blocks),
     });
   }
 

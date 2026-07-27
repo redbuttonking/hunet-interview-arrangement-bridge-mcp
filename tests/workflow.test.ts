@@ -461,4 +461,53 @@ describe("evaluation approval workflow", () => {
     });
     expect(db.getCase(caseId)?.status).toBe("REVIEW_REQUIRED");
   });
+
+  it("replaces one text field in a pending Slack draft without sending it", () => {
+    db = new BridgeDatabase(":memory:");
+    const ninehire: NinehireWorkflowAdapter = {
+      async lookupCompletedEvaluation() {
+        return { reason: "Not used in this test." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    };
+    const workflow = new WorkflowService(db, config, ninehire);
+    const interviewCase = db.createInterviewCase({
+      candidateName: "테스트1",
+      recruitmentName: "인터뷰 어레인지 자동화 테스트 채용",
+      proposalDates: ["2026-07-27"],
+    });
+    const draft = db.createDraft({
+      caseId: interviewCase.id,
+      channelId: "C1",
+      previewText: "테스트1 지원자 인터뷰 일정 취소 안내",
+      blocksJson: JSON.stringify([
+        {
+          type: "context",
+          elements: [
+            {
+              type: "mrkdwn",
+              text: "인터뷰가 취소되었습니다. 기존 일정에 참석하지 않아도 됩니다.",
+            },
+          ],
+        },
+      ]),
+      payloadHash: "before-revision",
+      messageType: "SCHEDULE_CANCELLATION",
+    });
+
+    const revised = workflow.replacePendingDraftText({
+      draftId: draft.id,
+      textToReplace: "인터뷰가 취소되었습니다. 기존 일정에 참석하지 않아도 됩니다.",
+      replacementText: "인터뷰가 취소되었습니다. 일정에 참조 부탁드립니다.",
+    });
+
+    expect(revised.status).toBe("DRAFT");
+    expect(revised.payloadHash).not.toBe("before-revision");
+    expect(revised.blocksJson).toContain("일정에 참조 부탁드립니다.");
+  });
 });

@@ -112,6 +112,9 @@ describe("bridge MCP server", () => {
     expect(tools.tools.map((tool) => tool.name)).toContain(
       "resolve_candidate_interview_absence_review",
     );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
+      "replace_pending_message_draft_text",
+    );
 
     const status = await client.callTool({ name: "bridge_status" });
     expect(status.isError).not.toBe(true);

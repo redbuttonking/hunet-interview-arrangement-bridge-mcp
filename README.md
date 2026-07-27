@@ -25,6 +25,7 @@
 
 - `resolve_candidate_interview_absence_review`에서 기존 가능 시간으로 재조율, 면접관 일정 재수집 후 재조율, 취소, 보류를 명시적으로 선택합니다.
 - 재조율과 취소는 기존과 같이 Slack 안내 초안만 생성하며, 승인 전에는 발송하지 않습니다.
+- `replace_pending_message_draft_text`로 발송 대기 중인 Slack 초안의 문구 하나를 수정할 수 있으며, 수정만으로는 발송되지 않습니다.
 - 새 규칙 적용 전의 후보자 메시지는 `reprocess_candidate_interview_absence_notifications`로 다시 처리할 수 있습니다.
 - 다른 일정 변경·취소 알림 형식은 실제 사례를 확인한 뒤 별도 감지 규칙을 추가합니다.
 

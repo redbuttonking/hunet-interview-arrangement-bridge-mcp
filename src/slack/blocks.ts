@@ -186,7 +186,7 @@ export function buildScheduleUpdateMessage(
   const isCancellation = updateType === "CANCELLATION";
   const title = isCancellation ? "인터뷰 일정 취소 안내" : "인터뷰 일정 변경 안내";
   const context = isCancellation
-    ? "인터뷰가 취소되었습니다. 기존 일정에 참석하지 않아도 됩니다."
+    ? "인터뷰가 취소되었습니다. 일정에 참조 부탁드립니다."
     : "기존 확정 일정은 취소되었습니다. 새 일정은 최종 확정 후 다시 안내합니다.";
   const text = `${candidateLabel(interviewCase)} 지원자 ${title}`;
   const blocks: KnownBlock[] = [
