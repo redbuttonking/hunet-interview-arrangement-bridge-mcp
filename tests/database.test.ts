@@ -48,6 +48,60 @@ describe("BridgeDatabase", () => {
     );
   });
 
+  it("persists integration retries with exponential backoff", () => {
+    db = new BridgeDatabase(":memory:");
+    const startedAt = new Date("2026-07-30T00:00:00.000Z");
+    const queued = db.enqueueIntegrationRetry({
+      jobType: "NINEHIRE_EVALUATION_LOOKUP",
+      dedupeKey: "notification-1",
+      payload: { notificationId: "notification-1" },
+      now: startedAt,
+    });
+    const duplicate = db.enqueueIntegrationRetry({
+      jobType: "NINEHIRE_EVALUATION_LOOKUP",
+      dedupeKey: "notification-1",
+      payload: { notificationId: "notification-1" },
+      now: startedAt,
+    });
+
+    expect(duplicate.id).toBe(queued.id);
+    expect(
+      db.listIntegrationRetryJobs({
+        status: "PENDING",
+        dueBefore: new Date("2026-07-30T00:00:59.999Z"),
+      }),
+    ).toHaveLength(0);
+
+    const firstFailure = db.failIntegrationRetryJob(
+      queued.id,
+      "일시 오류",
+      new Date("2026-07-30T00:01:00.000Z"),
+    );
+    expect(firstFailure).toMatchObject({
+      status: "PENDING",
+      attemptCount: 1,
+      nextAttemptAt: "2026-07-30T00:03:00.000Z",
+    });
+
+    const secondFailure = db.failIntegrationRetryJob(
+      queued.id,
+      "일시 오류",
+      new Date("2026-07-30T00:03:00.000Z"),
+    );
+    expect(secondFailure).toMatchObject({
+      status: "PENDING",
+      attemptCount: 2,
+      nextAttemptAt: "2026-07-30T00:07:00.000Z",
+    });
+
+    const exhausted = db.failIntegrationRetryJob(
+      queued.id,
+      "일시 오류",
+      new Date("2026-07-30T00:07:00.000Z"),
+    );
+    expect(exhausted).toMatchObject({ status: "FAILED", attemptCount: 3 });
+  });
+
   it("stores internal room allocations without overlapping a pre-booked block", () => {
     db = new BridgeDatabase(":memory:");
     const firstCase = db.createInterviewCase({

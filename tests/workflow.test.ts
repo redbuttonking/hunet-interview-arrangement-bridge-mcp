@@ -143,6 +143,81 @@ describe("evaluation approval workflow", () => {
     });
   });
 
+  it("retries a temporary NineHire evaluation lookup failure from the local queue", async () => {
+    db = new BridgeDatabase(":memory:");
+    let attempts = 0;
+    const ninehire: NinehireWorkflowAdapter = {
+      async lookupCompletedEvaluation() {
+        attempts += 1;
+        if (attempts === 1) throw new Error("나인하이어 일시 오류");
+        return {
+          context: {
+            candidateRef: "A127",
+            candidateName: "재시도지원자",
+            recruitmentRef: "J456",
+            recruitmentName: "백엔드 엔지니어",
+          },
+          summary: {
+            applicantProgressId: "A127",
+            recruitmentId: "J456",
+            scoreSheets: [
+              {
+                scoreSheetId: "S4",
+                title: "서류 평가표",
+                participants: ["평가자"],
+                evaluators: [
+                  {
+                    name: "평가자",
+                    items: [
+                      {
+                        title: "최종 평가",
+                        finalEvaluation: true,
+                        selectedOptions: [{ title: "⭕ 합격" }],
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    };
+    const workflow = new WorkflowService(db, config, ninehire);
+    const parsed: ParsedSlackNotification = {
+      eventType: "EVALUATION_COMPLETED",
+      title: "서류 평가가 완료되었습니다.",
+      text: "서류 평가가 완료되었습니다.",
+      links: [],
+      payloadHash: "retry-hash",
+      payloadJson: "{}",
+      candidateName: "재시도지원자",
+      recruitmentName: "백엔드 엔지니어",
+    };
+
+    const initial = await workflow.ingestSlackNotification({
+      channelId: "C1",
+      messageTs: "1.05",
+      parsed,
+    });
+    expect(initial.result).toBe("EVALUATION_RETRY_SCHEDULED");
+    const [retry] = db.listIntegrationRetryJobs({ status: "PENDING" });
+    expect(retry).toBeDefined();
+
+    await workflow.processIntegrationRetryJob(retry!);
+    db.completeIntegrationRetryJob(retry!.id);
+    expect(db.getIntegrationRetryJob(retry!.id)?.status).toBe("COMPLETED");
+    expect(db.listOpenReviews()).toMatchObject([
+      { reviewType: "INTERVIEW_ARRANGEMENT_START_REQUIRED" },
+    ]);
+  });
+
   it("excludes a completed evaluation with only reject and hold decisions", async () => {
     db = new BridgeDatabase(":memory:");
     const ninehire: NinehireWorkflowAdapter = {

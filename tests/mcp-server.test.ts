@@ -136,6 +136,9 @@ describe("bridge MCP server", () => {
     expect(tools.tools.map((tool) => tool.name)).toContain(
       "get_interview_operations_dashboard",
     );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
+      "list_integration_retry_jobs",
+    );
 
     const status = await client.callTool({ name: "bridge_status" });
     expect(status.isError).not.toBe(true);

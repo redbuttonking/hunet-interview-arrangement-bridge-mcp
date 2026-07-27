@@ -3,6 +3,9 @@ import type { WebClient } from "@slack/web-api";
 import { getConfig, requireWorkerConfig } from "../config.js";
 import { BridgeDatabase } from "../db/database.js";
 import {
+  INTEGRATION_RETRY_POLL_INTERVAL_MS,
+} from "../domain/integration-retry.js";
+import {
   INTERVIEW_BRIDGE_WORKER_KEY,
   WORKER_DOWNTIME_THRESHOLD_MS,
   WORKER_HEARTBEAT_INTERVAL_MS,
@@ -238,11 +241,74 @@ app.error(async (error) => {
 });
 
 let cycleRunning = false;
-async function runCycle(): Promise<void> {
-  if (cycleRunning) return;
-  cycleRunning = true;
+let retryCycleRunning = false;
+const slackReconciliationDedupeKey = config.slack.sourceChannelId;
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.stack ?? error.message : String(error);
+}
+
+async function reconcileSlackNotifications(): Promise<void> {
   try {
     await reconciler.reconcile();
+    db.completePendingIntegrationRetryByDedupeKey(
+      "SLACK_NOTIFICATION_RECONCILIATION",
+      slackReconciliationDedupeKey,
+    );
+  } catch (error) {
+    const message = errorMessage(error);
+    db.enqueueIntegrationRetry({
+      jobType: "SLACK_NOTIFICATION_RECONCILIATION",
+      dedupeKey: slackReconciliationDedupeKey,
+      payload: {},
+    });
+    throw new Error(`Slack notification reconciliation failed: ${message}`);
+  }
+}
+
+async function runIntegrationRetryCycle(): Promise<void> {
+  if (retryCycleRunning || cycleRunning) return;
+  retryCycleRunning = true;
+  let failure: string | undefined;
+  try {
+    const jobs = db.listIntegrationRetryJobs({
+      status: "PENDING",
+      dueBefore: new Date(),
+      limit: 20,
+    });
+    for (const job of jobs) {
+      try {
+        if (job.jobType === "SLACK_NOTIFICATION_RECONCILIATION") {
+          await reconciler.reconcile();
+        } else {
+          await workflow.processIntegrationRetryJob(job);
+        }
+        db.completeIntegrationRetryJob(job.id);
+      } catch (error) {
+        const message = errorMessage(error);
+        const failed = db.failIntegrationRetryJob(job.id, message);
+        if (failed.status === "FAILED") {
+          workflow.handleIntegrationRetryExhausted(failed);
+        }
+        failure ??= message;
+      }
+    }
+    if (failure) {
+      db.recordWorkerCycleFailure(INTERVIEW_BRIDGE_WORKER_KEY, failure);
+      process.stderr.write(`[Integration retry] ${failure}\n`);
+    } else if (jobs.length > 0) {
+      db.recordWorkerCycleSuccess(INTERVIEW_BRIDGE_WORKER_KEY);
+    }
+  } finally {
+    retryCycleRunning = false;
+  }
+}
+
+async function runCycle(): Promise<void> {
+  if (cycleRunning || retryCycleRunning) return;
+  cycleRunning = true;
+  try {
+    await reconcileSlackNotifications();
     const dueBeforeRefresh = db.listDueReminders();
     const caseIds = [...new Set(dueBeforeRefresh.map((item) => item.caseId))];
     for (const caseId of caseIds) {
@@ -258,7 +324,7 @@ async function runCycle(): Promise<void> {
     }
     db.recordWorkerCycleSuccess(INTERVIEW_BRIDGE_WORKER_KEY);
   } catch (error) {
-    const message = error instanceof Error ? error.stack ?? error.message : String(error);
+    const message = errorMessage(error);
     db.recordWorkerCycleFailure(INTERVIEW_BRIDGE_WORKER_KEY, message);
     process.stderr.write(`[Worker cycle] ${message}\n`);
   } finally {
@@ -286,9 +352,14 @@ const heartbeatInterval = setInterval(
 );
 await runCycle();
 const interval = setInterval(() => void runCycle(), config.pollIntervalMs);
+const retryInterval = setInterval(
+  () => void runIntegrationRetryCycle(),
+  INTEGRATION_RETRY_POLL_INTERVAL_MS,
+);
 
 async function shutdown(signal: string): Promise<void> {
   clearInterval(interval);
+  clearInterval(retryInterval);
   clearInterval(heartbeatInterval);
   process.stdout.write(`Received ${signal}; stopping worker.\n`);
   await app.stop();

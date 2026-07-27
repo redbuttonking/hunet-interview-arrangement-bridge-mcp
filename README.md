@@ -51,6 +51,15 @@ Slack 버튼·모달의 가용시간 제출은 채널 메시지 재조회로 복
 - `approve_and_send_availability_recovery`로 승인·발송할 때만 Slack에 전송하며, 발송 완료 후 해당 중단 검토 건을 해결 처리한다.
 - PC가 장시간 꺼져 있거나 작업 스케줄러 재시작 횟수를 모두 소진하면 실시간 제출을 보장할 수 없다. 이 경우에는 대시보드의 `STALE` 상태를 확인하고 재제출 요청 또는 수동 입력으로 처리한다.
 
+## 외부 연동 재시도
+
+Slack 알림 채널 조회와 나인하이어 평가표 조회가 일시적으로 실패하면 로컬 SQLite 대기열에 저장한다. 워커는 대기열을 30초마다 확인하며 한 번에 최대 20건을 순서대로 처리한다.
+
+- 최초 실패 후 1분, 이후 실패마다 2분과 4분 뒤에 다시 시도한다.
+- 재시도는 최대 3회이며, 모두 실패한 나인하이어 평가표 조회는 `EVALUATION_LOOKUP_FAILED` 검토 건으로 전환한다.
+- Slack 알림 채널 조회가 모두 실패한 경우에는 대시보드의 실패 재시도 항목에서 사유를 확인한 뒤, 워커·Slack 권한·네트워크를 점검한다.
+- 재시도 대기열은 조회 작업만 처리한다. Slack 메시지 발송은 기존과 같이 사용자 승인 없이는 재시도하거나 자동 발송하지 않는다.
+
 ## 다우오피스 전용 브라우저 프로필
 
 다우오피스는 예약을 생성하거나 수정하지 않고, 면접실 예약 블록을 읽는 용도로만 연결한다. 개인 브라우저와 분리된 Microsoft Edge 프로필을 사용한다.
@@ -309,6 +318,7 @@ tool_timeout_sec = 60.0
 | `list_in_progress_recruitments` | 진행 중인 나인하이어 채용 목록과 마감 정보 조회 | 외부 읽기 |
 | `inspect_ninehire_tools` | 나인하이어 도구 스키마 조회 | 읽기 |
 | `sync_slack_notifications` | Slack 원본 채널 즉시 재확인 | 외부 읽기, 로컬 상태 갱신 |
+| `list_integration_retry_jobs` | Slack·나인하이어 재시도 대기·실패 현황 조회 | 없음 |
 | `reprocess_interview_arrangement_eligibility_reviews` | 기존 평가 검토 건을 합격 기준으로 재판정 | 로컬 상태 갱신 |
 | `reprocess_schedule_confirmation_notifications` | 기존 일정 확정 Slack 알림 재처리 | 로컬 상태·이벤트 갱신 |
 | `approve_interview_arrangement` | 평가표 검토 후 면접 조율 시작 승인 | 로컬 상태 갱신 |

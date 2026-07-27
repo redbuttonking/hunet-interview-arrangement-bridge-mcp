@@ -4,6 +4,11 @@ import {
   INTERVIEW_BRIDGE_WORKER_KEY,
   WORKER_DOWNTIME_THRESHOLD_MS,
 } from "../domain/worker-health.js";
+import {
+  INTEGRATION_RETRY_MAX_ATTEMPTS,
+  retryDelayMs,
+  type IntegrationRetryJobType,
+} from "../domain/integration-retry.js";
 import type {
   InterviewCaseStatus,
   InterviewerStatus,
@@ -101,6 +106,23 @@ export interface WorkerDowntime {
   startedAt: string;
   detectedAt: string;
   durationMs: number;
+}
+
+export type IntegrationRetryJobStatus = "PENDING" | "COMPLETED" | "FAILED";
+
+export interface IntegrationRetryJobRow {
+  id: string;
+  jobType: IntegrationRetryJobType;
+  dedupeKey: string;
+  payload: Record<string, unknown>;
+  attemptCount: number;
+  maxAttempts: number;
+  nextAttemptAt: string;
+  lastError: string | null;
+  status: IntegrationRetryJobStatus;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
 }
 
 export interface StoredSlackNotificationRow {
@@ -267,6 +289,32 @@ function toWorkerHealth(row: SqlRow): WorkerHealthRow {
     lastErrorMessage: nullableString(row.last_error_message),
     lastDowntimeStartedAt: nullableString(row.last_downtime_started_at),
     lastDowntimeDetectedAt: nullableString(row.last_downtime_detected_at),
+  };
+}
+
+function toIntegrationRetryJob(row: SqlRow): IntegrationRetryJobRow {
+  let payload: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(asString(row.payload_json)) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      payload = parsed as Record<string, unknown>;
+    }
+  } catch {
+    payload = {};
+  }
+  return {
+    id: asString(row.id),
+    jobType: asString(row.job_type) as IntegrationRetryJobType,
+    dedupeKey: asString(row.dedupe_key),
+    payload,
+    attemptCount: Number(row.attempt_count),
+    maxAttempts: Number(row.max_attempts),
+    nextAttemptAt: asString(row.next_attempt_at),
+    lastError: nullableString(row.last_error),
+    status: asString(row.status) as IntegrationRetryJobStatus,
+    createdAt: asString(row.created_at),
+    updatedAt: asString(row.updated_at),
+    completedAt: nullableString(row.completed_at),
   };
 }
 
@@ -542,6 +590,28 @@ export class BridgeDatabase {
         last_downtime_detected_at TEXT
       );
 
+      CREATE TABLE IF NOT EXISTS integration_retry_jobs (
+        id TEXT PRIMARY KEY,
+        job_type TEXT NOT NULL,
+        dedupe_key TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        max_attempts INTEGER NOT NULL,
+        next_attempt_at TEXT NOT NULL,
+        last_error TEXT,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        completed_at TEXT
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS integration_retry_jobs_pending_unique
+        ON integration_retry_jobs(job_type, dedupe_key)
+        WHERE status = 'PENDING';
+
+      CREATE INDEX IF NOT EXISTS integration_retry_jobs_due
+        ON integration_retry_jobs(status, next_attempt_at);
+
       CREATE TABLE IF NOT EXISTS meeting_room_blocks (
         id TEXT PRIMARY KEY,
         source_key TEXT NOT NULL UNIQUE,
@@ -751,6 +821,38 @@ export class BridgeDatabase {
         )
         .run();
     }
+
+    const versionNine = this.connection
+      .prepare("SELECT version FROM schema_migrations WHERE version = 9")
+      .get() as SqlRow | undefined;
+    if (!versionNine) {
+      this.connection.exec(`
+        CREATE TABLE IF NOT EXISTS integration_retry_jobs (
+          id TEXT PRIMARY KEY,
+          job_type TEXT NOT NULL,
+          dedupe_key TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          attempt_count INTEGER NOT NULL DEFAULT 0,
+          max_attempts INTEGER NOT NULL,
+          next_attempt_at TEXT NOT NULL,
+          last_error TEXT,
+          status TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          completed_at TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS integration_retry_jobs_pending_unique
+          ON integration_retry_jobs(job_type, dedupe_key)
+          WHERE status = 'PENDING';
+        CREATE INDEX IF NOT EXISTS integration_retry_jobs_due
+          ON integration_retry_jobs(status, next_attempt_at);
+      `);
+      this.connection
+        .prepare(
+          "INSERT INTO schema_migrations(version, applied_at) VALUES (9, datetime('now'))",
+        )
+        .run();
+    }
   }
 
   transaction<T>(operation: () => T): T {
@@ -790,6 +892,12 @@ export class BridgeDatabase {
       ),
       pendingCancellationExternalFollowUps: scalar(
         "SELECT COUNT(*) AS count FROM cancellation_external_follow_ups WHERE status = 'PENDING'",
+      ),
+      pendingIntegrationRetries: scalar(
+        "SELECT COUNT(*) AS count FROM integration_retry_jobs WHERE status = 'PENDING'",
+      ),
+      failedIntegrationRetries: scalar(
+        "SELECT COUNT(*) AS count FROM integration_retry_jobs WHERE status = 'FAILED'",
       ),
     };
   }
@@ -883,6 +991,142 @@ export class BridgeDatabase {
         WHERE worker_key = ?
       `)
       .run(now.toISOString(), errorMessage, workerKey);
+  }
+
+  enqueueIntegrationRetry(input: {
+    jobType: IntegrationRetryJobType;
+    dedupeKey: string;
+    payload: Record<string, unknown>;
+    maxAttempts?: number;
+    now?: Date;
+  }): IntegrationRetryJobRow {
+    const existing = this.connection
+      .prepare(`
+        SELECT * FROM integration_retry_jobs
+        WHERE job_type = ? AND dedupe_key = ? AND status = 'PENDING'
+        LIMIT 1
+      `)
+      .get(input.jobType, input.dedupeKey) as SqlRow | undefined;
+    if (existing) return toIntegrationRetryJob(existing);
+
+    const now = input.now ?? new Date();
+    const maxAttempts = input.maxAttempts ?? INTEGRATION_RETRY_MAX_ATTEMPTS;
+    const id = randomUUID();
+    this.connection
+      .prepare(`
+        INSERT INTO integration_retry_jobs(
+          id, job_type, dedupe_key, payload_json, attempt_count, max_attempts,
+          next_attempt_at, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 0, ?, ?, 'PENDING', ?, ?)
+      `)
+      .run(
+        id,
+        input.jobType,
+        input.dedupeKey,
+        JSON.stringify(input.payload),
+        maxAttempts,
+        new Date(now.getTime() + retryDelayMs(1)).toISOString(),
+        now.toISOString(),
+        now.toISOString(),
+      );
+    return this.getIntegrationRetryJob(id)!;
+  }
+
+  getIntegrationRetryJob(id: string): IntegrationRetryJobRow | undefined {
+    const row = this.connection
+      .prepare("SELECT * FROM integration_retry_jobs WHERE id = ?")
+      .get(id) as SqlRow | undefined;
+    return row ? toIntegrationRetryJob(row) : undefined;
+  }
+
+  listIntegrationRetryJobs(input?: {
+    status?: IntegrationRetryJobStatus;
+    dueBefore?: Date;
+    limit?: number;
+  }): IntegrationRetryJobRow[] {
+    const conditions: string[] = [];
+    const values: Array<string | number> = [];
+    if (input?.status) {
+      conditions.push("status = ?");
+      values.push(input.status);
+    }
+    if (input?.dueBefore) {
+      conditions.push("next_attempt_at <= ?");
+      values.push(input.dueBefore.toISOString());
+    }
+    values.push(input?.limit ?? 100);
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const rows = this.connection
+      .prepare(`
+        SELECT * FROM integration_retry_jobs
+        ${where}
+        ORDER BY
+          CASE status WHEN 'FAILED' THEN 0 WHEN 'PENDING' THEN 1 ELSE 2 END,
+          next_attempt_at ASC
+        LIMIT ?
+      `)
+      .all(...values) as SqlRow[];
+    return rows.map(toIntegrationRetryJob);
+  }
+
+  completeIntegrationRetryJob(id: string, now = new Date()): IntegrationRetryJobRow {
+    this.connection
+      .prepare(`
+        UPDATE integration_retry_jobs
+        SET status = 'COMPLETED', completed_at = ?, updated_at = ?
+        WHERE id = ? AND status = 'PENDING'
+      `)
+      .run(now.toISOString(), now.toISOString(), id);
+    const job = this.getIntegrationRetryJob(id);
+    if (!job) throw new Error(`Integration retry job not found: ${id}`);
+    return job;
+  }
+
+  completePendingIntegrationRetryByDedupeKey(
+    jobType: IntegrationRetryJobType,
+    dedupeKey: string,
+    now = new Date(),
+  ): void {
+    this.connection
+      .prepare(`
+        UPDATE integration_retry_jobs
+        SET status = 'COMPLETED', completed_at = ?, updated_at = ?
+        WHERE job_type = ? AND dedupe_key = ? AND status = 'PENDING'
+      `)
+      .run(now.toISOString(), now.toISOString(), jobType, dedupeKey);
+  }
+
+  failIntegrationRetryJob(
+    id: string,
+    errorMessage: string,
+    now = new Date(),
+  ): IntegrationRetryJobRow {
+    const job = this.getIntegrationRetryJob(id);
+    if (!job || job.status !== "PENDING") {
+      throw new Error(`Pending integration retry job not found: ${id}`);
+    }
+    const attemptCount = job.attemptCount + 1;
+    const exhausted = attemptCount >= job.maxAttempts;
+    const nextAttemptAt = new Date(
+      now.getTime() + retryDelayMs(attemptCount + 1),
+    ).toISOString();
+    this.connection
+      .prepare(`
+        UPDATE integration_retry_jobs
+        SET attempt_count = ?, next_attempt_at = ?, last_error = ?, status = ?,
+            completed_at = ?, updated_at = ?
+        WHERE id = ? AND status = 'PENDING'
+      `)
+      .run(
+        attemptCount,
+        nextAttemptAt,
+        errorMessage,
+        exhausted ? "FAILED" : "PENDING",
+        exhausted ? now.toISOString() : null,
+        now.toISOString(),
+        id,
+      );
+    return this.getIntegrationRetryJob(id)!;
   }
 
   insertNotification(
@@ -1297,6 +1541,7 @@ export class BridgeDatabase {
       );
     }
     const followUps = this.listCancellationExternalFollowUps({ limit });
+    const integrationRetries = this.listIntegrationRetryJobs({ limit });
     const workerHealth = this.getWorkerHealth(INTERVIEW_BRIDGE_WORKER_KEY);
     const heartbeatAgeMs = workerHealth
       ? Math.max(0, Date.now() - Date.parse(workerHealth.lastHeartbeatAt))
@@ -1335,6 +1580,12 @@ export class BridgeDatabase {
             AND interviewer.status = 'PENDING'
             AND interview_case.status NOT IN ('CANCELLED', 'CLOSED')
         `),
+        pendingIntegrationRetries: scalar(
+          "SELECT COUNT(*) AS count FROM integration_retry_jobs WHERE status = 'PENDING'",
+        ),
+        failedIntegrationRetries: scalar(
+          "SELECT COUNT(*) AS count FROM integration_retry_jobs WHERE status = 'FAILED'",
+        ),
         worker: workerHealth
           ? {
               status: workerStatus,
@@ -1365,6 +1616,18 @@ export class BridgeDatabase {
               recruitmentName: interviewCase?.recruitmentName ?? null,
             };
           }),
+        integrationRetries: integrationRetries
+          .filter((job) => job.status !== "COMPLETED")
+          .map((job) => ({
+            id: job.id,
+            jobType: job.jobType,
+            attemptCount: job.attemptCount,
+            maxAttempts: job.maxAttempts,
+            nextAttemptAt: job.nextAttemptAt,
+            lastError: job.lastError,
+            status: job.status,
+            createdAt: job.createdAt,
+          })),
       },
       cases: cases.map((interviewCase) => {
         const requiredInterviewers = this.listInterviewers(interviewCase.id).filter(

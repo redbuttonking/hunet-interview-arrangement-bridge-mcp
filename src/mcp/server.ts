@@ -502,6 +502,26 @@ export function createBridgeMcpServer(
   );
 
   server.registerTool(
+    "list_integration_retry_jobs",
+    {
+      title: "외부 연동 재시도 현황",
+      description:
+        "Slack 알림 동기화와 나인하이어 평가 조회의 재시도 대기·실패 현황을 조회합니다. 외부 시스템을 호출하지 않습니다.",
+      inputSchema: {
+        status: z.enum(["PENDING", "FAILED", "COMPLETED"]).optional(),
+        limit: z.number().int().min(1).max(200).default(100),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ status, limit }) => result({ retries: db.listIntegrationRetryJobs({ status, limit }) }),
+  );
+
+  server.registerTool(
     "suggest_common_interview_slots",
     {
       title: "공통 인터뷰 가능시간 계산",

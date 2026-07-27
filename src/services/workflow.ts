@@ -7,6 +7,7 @@ import {
   type ConfirmedInterviewScheduleRow,
   type DraftRow,
   type InterviewCaseRow,
+  type IntegrationRetryJobRow,
   type ScheduleTransitionResult,
   type WorkerDowntime,
 } from "../db/database.js";
@@ -154,6 +155,33 @@ function classifyInterviewArrangementEligibility(
   return hasOnlyRejectOrHold ? "NOT_ELIGIBLE" : "REVIEW_REQUIRED";
 }
 
+function evaluationRetryPayload(
+  payload: Record<string, unknown>,
+): { notificationId: string; parsed: ParsedSlackNotification } | undefined {
+  const notificationId = payload.notificationId;
+  const parsed = payload.parsed;
+  if (
+    typeof notificationId !== "string" ||
+    !parsed ||
+    typeof parsed !== "object" ||
+    Array.isArray(parsed)
+  ) {
+    return undefined;
+  }
+  const notification = parsed as Partial<ParsedSlackNotification>;
+  if (
+    notification.eventType !== "EVALUATION_COMPLETED" ||
+    typeof notification.title !== "string" ||
+    typeof notification.text !== "string" ||
+    !Array.isArray(notification.links) ||
+    typeof notification.payloadHash !== "string" ||
+    typeof notification.payloadJson !== "string"
+  ) {
+    return undefined;
+  }
+  return { notificationId, parsed: notification as ParsedSlackNotification };
+}
+
 export class WorkflowService {
   constructor(
     private readonly db: BridgeDatabase,
@@ -208,71 +236,102 @@ export class WorkflowService {
     }
 
     try {
-      const evaluation = await this.ninehire.lookupCompletedEvaluation(
-        input.parsed,
-      );
-      if (!evaluation.context || !evaluation.summary) {
-        this.db.updateNotificationStatus(stored.id, "REVIEW_REQUIRED");
-        this.db.createReview({
+      return await this.processEvaluationLookup(stored.id, input.parsed);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.db.updateNotificationStatus(stored.id, "RETRY_PENDING", message);
+      this.db.enqueueIntegrationRetry({
+        jobType: "NINEHIRE_EVALUATION_LOOKUP",
+        dedupeKey: stored.id,
+        payload: {
           notificationId: stored.id,
-          reviewType: "EVALUATION_LOOKUP_REQUIRED",
-          reason:
-            evaluation.reason ??
-            "평가표를 조회했지만 검토에 필요한 정보를 만들지 못했습니다.",
-        });
-        return { notificationId: stored.id, result: "REVIEW_REQUIRED" };
-      }
-      const eligibility = classifyInterviewArrangementEligibility(
-        evaluation.summary,
-      );
-      if (eligibility === "NOT_ELIGIBLE") {
-        this.db.updateNotificationStatus(stored.id, "NOT_ELIGIBLE");
-        return {
-          notificationId: stored.id,
-          result: "EVALUATION_NOT_ELIGIBLE",
-        };
-      }
+          parsed: input.parsed,
+        },
+      });
+      return { notificationId: stored.id, result: "EVALUATION_RETRY_SCHEDULED" };
+    }
+  }
 
-      if (eligibility === "REVIEW_REQUIRED") {
-        this.db.updateNotificationStatus(stored.id, "REVIEW_REQUIRED");
-        this.db.createReview({
-          notificationId: stored.id,
-          reviewType: "EVALUATION_DECISION_REQUIRED",
-          reason:
-            "최종 평가 항목에서 합격·불합격·보류를 판단할 수 없습니다. 평가표를 확인하세요.",
-          summary: {
-            context: evaluation.context,
-            evaluation: evaluation.summary,
-          },
-        });
-        return {
-          notificationId: stored.id,
-          result: "EVALUATION_DECISION_REQUIRED",
-        };
-      }
+  async processIntegrationRetryJob(
+    job: IntegrationRetryJobRow,
+  ): Promise<void> {
+    if (job.jobType !== "NINEHIRE_EVALUATION_LOOKUP") {
+      throw new Error(`Unsupported workflow retry job: ${job.jobType}`);
+    }
+    const payload = evaluationRetryPayload(job.payload);
+    if (!payload) {
+      throw new Error("Evaluation retry job payload is invalid.");
+    }
+    await this.processEvaluationLookup(payload.notificationId, payload.parsed);
+  }
 
-      this.db.updateNotificationStatus(stored.id, "AWAITING_START_APPROVAL");
+  handleIntegrationRetryExhausted(
+    job: IntegrationRetryJobRow,
+  ): void {
+    if (job.jobType !== "NINEHIRE_EVALUATION_LOOKUP") return;
+    const payload = evaluationRetryPayload(job.payload);
+    if (!payload) return;
+    const reason =
+      job.lastError ?? "평가표 조회 재시도 횟수를 모두 사용했습니다.";
+    this.db.updateNotificationStatus(payload.notificationId, "ERROR", reason);
+    this.db.createReview({
+      notificationId: payload.notificationId,
+      reviewType: "EVALUATION_LOOKUP_FAILED",
+      reason,
+    });
+  }
+
+  private async processEvaluationLookup(
+    notificationId: string,
+    parsed: ParsedSlackNotification,
+  ): Promise<{ notificationId: string; result: string }> {
+    const evaluation = await this.ninehire.lookupCompletedEvaluation(parsed);
+    if (!evaluation.context || !evaluation.summary) {
+      this.db.updateNotificationStatus(notificationId, "REVIEW_REQUIRED");
       this.db.createReview({
-        notificationId: stored.id,
-        reviewType: "INTERVIEW_ARRANGEMENT_START_REQUIRED",
+        notificationId,
+        reviewType: "EVALUATION_LOOKUP_REQUIRED",
         reason:
-          "완료된 평가표 요약을 확인한 뒤 면접 조율 시작 여부를 승인하세요.",
+          evaluation.reason ??
+          "평가표를 조회했지만 검토에 필요한 정보를 만들지 못했습니다.",
+      });
+      return { notificationId, result: "REVIEW_REQUIRED" };
+    }
+    const eligibility = classifyInterviewArrangementEligibility(
+      evaluation.summary,
+    );
+    if (eligibility === "NOT_ELIGIBLE") {
+      this.db.updateNotificationStatus(notificationId, "NOT_ELIGIBLE");
+      return { notificationId, result: "EVALUATION_NOT_ELIGIBLE" };
+    }
+
+    if (eligibility === "REVIEW_REQUIRED") {
+      this.db.updateNotificationStatus(notificationId, "REVIEW_REQUIRED");
+      this.db.createReview({
+        notificationId,
+        reviewType: "EVALUATION_DECISION_REQUIRED",
+        reason:
+          "최종 평가 항목에서 합격·불합격·보류를 판단할 수 없습니다. 평가표를 확인하세요.",
         summary: {
           context: evaluation.context,
           evaluation: evaluation.summary,
         },
       });
-      return { notificationId: stored.id, result: "EVALUATION_READY_FOR_APPROVAL" };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.db.updateNotificationStatus(stored.id, "ERROR", message);
-      this.db.createReview({
-        notificationId: stored.id,
-        reviewType: "EVALUATION_LOOKUP_FAILED",
-        reason: message,
-      });
-      return { notificationId: stored.id, result: "ERROR" };
+      return { notificationId, result: "EVALUATION_DECISION_REQUIRED" };
     }
+
+    this.db.updateNotificationStatus(notificationId, "AWAITING_START_APPROVAL");
+    this.db.createReview({
+      notificationId,
+      reviewType: "INTERVIEW_ARRANGEMENT_START_REQUIRED",
+      reason:
+        "완료된 평가표 요약을 확인한 뒤 면접 조율 시작 여부를 승인하세요.",
+      summary: {
+        context: evaluation.context,
+        evaluation: evaluation.summary,
+      },
+    });
+    return { notificationId, result: "EVALUATION_READY_FOR_APPROVAL" };
   }
 
   reprocessInterviewArrangementEligibilityReviews(): {
