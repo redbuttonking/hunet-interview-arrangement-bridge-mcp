@@ -930,6 +930,24 @@ export function createBridgeMcpServer(
   );
 
   server.registerTool(
+    "create_availability_recovery_draft",
+    {
+      title: "워커 중단 후 일정 재제출 요청 초안",
+      description:
+        "Slack 워커 중단으로 가용시간 제출이 누락됐을 수 있는 면접 건의 미제출 면접관에게 재제출을 요청하는 Slack 초안을 만듭니다. 발송하지 않습니다.",
+      inputSchema: { reviewId: z.string().uuid() },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ reviewId }) =>
+      result(workflow.createAvailabilityRecoveryDraft(reviewId)),
+  );
+
+  server.registerTool(
     "create_interviewer_request_draft",
     {
       title: "면접관 일정 요청 초안 생성",
@@ -998,6 +1016,28 @@ export function createBridgeMcpServer(
       },
     },
     async (input) => result(workflow.replacePendingDraftText(input)),
+  );
+
+  server.registerTool(
+    "approve_and_send_availability_recovery",
+    {
+      title: "일정 재제출 요청 승인·발송",
+      description:
+        "워커 중단 검토 건의 재제출 요청 초안을 명시적으로 승인하고 Slack에 발송합니다. 발송이 완료되면 해당 중단 검토 건을 해결 처리합니다.",
+      inputSchema: { draftId: z.string().uuid() },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ draftId }) => {
+      if (!slackClient) throw new Error("SLACK_BOT_TOKEN is not configured.");
+      return result(
+        await workflow.approveAndSendAvailabilityRecovery(draftId, slackClient),
+      );
+    },
   );
 
   server.registerTool(

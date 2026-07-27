@@ -8,6 +8,7 @@ import {
   type DraftRow,
   type InterviewCaseRow,
   type ScheduleTransitionResult,
+  type WorkerDowntime,
 } from "../db/database.js";
 import { proposalDates } from "../domain/calendar.js";
 import type {
@@ -19,6 +20,7 @@ import type {
 import type { NinehireWorkflowAdapter } from "../ninehire/adapter.js";
 import {
   buildRequestMessage,
+  buildAvailabilityRecoveryMessage,
   buildScheduleConfirmationMessage,
   buildScheduleUpdateMessage,
 } from "../slack/blocks.js";
@@ -79,6 +81,9 @@ function slackMetadataEventType(messageType: DraftRow["messageType"]): string {
   }
   if (messageType === "SCHEDULE_CONFIRMATION") {
     return "interview_bridge_schedule_confirmation";
+  }
+  if (messageType === "AVAILABILITY_RECOVERY") {
+    return "interview_bridge_availability_recovery";
   }
   return "interview_bridge_schedule_update";
 }
@@ -335,6 +340,105 @@ export class WorkflowService {
       excluded,
       decisionRequired,
     };
+  }
+
+  createWorkerDowntimeReviews(downtime: WorkerDowntime): {
+    downtime: WorkerDowntime;
+    impactedCaseIds: string[];
+    reviewIds: string[];
+  } {
+    const impactedCases = this.db.listCasesWithPendingRequiredInterviewers();
+    const reviewIds: string[] = [];
+    this.db.transaction(() => {
+      for (const interviewCase of impactedCases) {
+        const reviewId = this.db.createReview({
+          caseId: interviewCase.id,
+          reviewType: "WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED",
+          reason:
+            "Slack 워커 중단 구간에 면접관 가용시간 제출이 누락됐을 수 있습니다. 재제출 요청 초안을 만들거나 직접 확인하세요.",
+          summary: {
+            workerKey: downtime.workerKey,
+            downtimeStartedAt: downtime.startedAt,
+            downtimeDetectedAt: downtime.detectedAt,
+            downtimeDurationMs: downtime.durationMs,
+          },
+        });
+        this.db.addEvent(
+          interviewCase.id,
+          "WORKER_DOWNTIME_AVAILABILITY_REVIEW_CREATED",
+          "SYSTEM",
+          { reviewId, ...downtime },
+        );
+        reviewIds.push(reviewId);
+      }
+    });
+    return {
+      downtime,
+      impactedCaseIds: impactedCases.map((interviewCase) => interviewCase.id),
+      reviewIds,
+    };
+  }
+
+  createAvailabilityRecoveryDraft(reviewId: string): DraftRow {
+    if (!this.config.slack.requestChannelId) {
+      throw new Error("SLACK_REQUEST_CHANNEL_ID is not configured.");
+    }
+    const review = this.db.getReview(reviewId);
+    if (
+      !review ||
+      review.status !== "OPEN" ||
+      !review.caseId ||
+      review.reviewType !== "WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED"
+    ) {
+      throw new Error(`Open worker-downtime availability review not found: ${reviewId}`);
+    }
+    const summary = review.summary;
+    const startedAt = summary?.downtimeStartedAt;
+    const detectedAt = summary?.downtimeDetectedAt;
+    if (typeof startedAt !== "string" || typeof detectedAt !== "string") {
+      throw new Error("Worker downtime interval is missing from the review.");
+    }
+    const existing = this.db.findActiveDraftByWorkflowReviewId(
+      review.id,
+      "AVAILABILITY_RECOVERY",
+    );
+    if (existing) return existing;
+    const bundle = this.db.getCaseBundle(review.caseId);
+    if (!bundle || bundle.interviewCase.status !== "COLLECTING_AVAILABILITY") {
+      throw new Error(
+        "The case is not collecting interviewer availability for this recovery request.",
+      );
+    }
+    const missingSlackMappings = bundle.interviewers.filter(
+      (interviewer) =>
+        interviewer.active &&
+        interviewer.required &&
+        interviewer.status === "PENDING" &&
+        !interviewer.slackUserId,
+    );
+    if (missingSlackMappings.length > 0) {
+      throw new Error(
+        `Slack user mapping is missing for: ${missingSlackMappings.map((item) => item.displayName).join(", ")}`,
+      );
+    }
+    const payload = buildAvailabilityRecoveryMessage(bundle, {
+      startedAt,
+      detectedAt,
+    });
+    const draft = this.db.createDraft({
+      caseId: review.caseId,
+      workflowReviewId: review.id,
+      channelId: this.config.slack.requestChannelId,
+      previewText: payload.text,
+      blocksJson: JSON.stringify(payload.blocks),
+      payloadHash: hashPayload(payload.text, payload.blocks),
+      messageType: "AVAILABILITY_RECOVERY",
+    });
+    this.db.addEvent(review.caseId, "AVAILABILITY_RECOVERY_DRAFT_CREATED", "USER", {
+      reviewId: review.id,
+      draftId: draft.id,
+    });
+    return draft;
   }
 
   reprocessScheduleConfirmationNotifications(): {
@@ -914,6 +1018,13 @@ export class WorkflowService {
     client: WebClient,
   ): Promise<DraftRow> {
     return this.approveAndSendDraft(draftId, "INTERVIEWER_REQUEST", client);
+  }
+
+  async approveAndSendAvailabilityRecovery(
+    draftId: string,
+    client: WebClient,
+  ): Promise<DraftRow> {
+    return this.approveAndSendDraft(draftId, "AVAILABILITY_RECOVERY", client);
   }
 
   async approveAndSendScheduleConfirmation(

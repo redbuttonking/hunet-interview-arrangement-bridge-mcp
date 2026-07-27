@@ -3,6 +3,11 @@ import type { WebClient } from "@slack/web-api";
 import { getConfig, requireWorkerConfig } from "../config.js";
 import { BridgeDatabase } from "../db/database.js";
 import {
+  INTERVIEW_BRIDGE_WORKER_KEY,
+  WORKER_DOWNTIME_THRESHOLD_MS,
+  WORKER_HEARTBEAT_INTERVAL_MS,
+} from "../domain/worker-health.js";
+import {
   NinehireRecruitmentWorkflowAdapter,
 } from "../ninehire/adapter.js";
 import { NinehireMcpGateway } from "../ninehire/gateway.js";
@@ -251,24 +256,40 @@ async function runCycle(): Promise<void> {
       });
       db.markReminderSent(reminder.id);
     }
+    db.recordWorkerCycleSuccess(INTERVIEW_BRIDGE_WORKER_KEY);
   } catch (error) {
-    process.stderr.write(
-      `[Worker cycle] ${error instanceof Error ? error.stack : String(error)}\n`,
-    );
+    const message = error instanceof Error ? error.stack ?? error.message : String(error);
+    db.recordWorkerCycleFailure(INTERVIEW_BRIDGE_WORKER_KEY, message);
+    process.stderr.write(`[Worker cycle] ${message}\n`);
   } finally {
     cycleRunning = false;
   }
 }
 
 await app.start();
+const workerStart = db.registerWorkerStart({
+  workerKey: INTERVIEW_BRIDGE_WORKER_KEY,
+  downtimeThresholdMs: WORKER_DOWNTIME_THRESHOLD_MS,
+});
+if (workerStart.downtime) {
+  const recovery = workflow.createWorkerDowntimeReviews(workerStart.downtime);
+  process.stdout.write(
+    `Worker downtime detected. Impacted availability cases: ${recovery.impactedCaseIds.length}\n`,
+  );
+}
 process.stdout.write(
   `Interview bridge worker started. Reconciliation interval: ${config.pollIntervalMs}ms\n`,
+);
+const heartbeatInterval = setInterval(
+  () => db.recordWorkerHeartbeat(INTERVIEW_BRIDGE_WORKER_KEY),
+  WORKER_HEARTBEAT_INTERVAL_MS,
 );
 await runCycle();
 const interval = setInterval(() => void runCycle(), config.pollIntervalMs);
 
 async function shutdown(signal: string): Promise<void> {
   clearInterval(interval);
+  clearInterval(heartbeatInterval);
   process.stdout.write(`Received ${signal}; stopping worker.\n`);
   await app.stop();
   db.close();

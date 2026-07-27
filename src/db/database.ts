@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
+import {
+  INTERVIEW_BRIDGE_WORKER_KEY,
+  WORKER_DOWNTIME_THRESHOLD_MS,
+} from "../domain/worker-health.js";
 import type {
   InterviewCaseStatus,
   InterviewerStatus,
@@ -57,6 +61,7 @@ export interface DraftRow {
   payloadHash: string;
   messageType:
     | "INTERVIEWER_REQUEST"
+    | "AVAILABILITY_RECOVERY"
     | "SCHEDULE_CONFIRMATION"
     | "SCHEDULE_CHANGE"
     | "SCHEDULE_CANCELLATION";
@@ -64,6 +69,7 @@ export interface DraftRow {
   approvedAt: string | null;
   sentAt: string | null;
   slackMessageTs: string | null;
+  workflowReviewId: string | null;
   createdAt: string;
 }
 
@@ -78,6 +84,23 @@ export interface ReviewRow {
   resolution: string | null;
   createdAt: string;
   resolvedAt: string | null;
+}
+
+export interface WorkerHealthRow {
+  workerKey: string;
+  lastStartedAt: string;
+  lastHeartbeatAt: string;
+  lastSuccessfulCycleAt: string | null;
+  lastErrorMessage: string | null;
+  lastDowntimeStartedAt: string | null;
+  lastDowntimeDetectedAt: string | null;
+}
+
+export interface WorkerDowntime {
+  workerKey: string;
+  startedAt: string;
+  detectedAt: string;
+  durationMs: number;
 }
 
 export interface StoredSlackNotificationRow {
@@ -230,7 +253,20 @@ function toDraft(row: SqlRow): DraftRow {
     approvedAt: nullableString(row.approved_at),
     sentAt: nullableString(row.sent_at),
     slackMessageTs: nullableString(row.slack_message_ts),
+    workflowReviewId: nullableString(row.workflow_review_id),
     createdAt: asString(row.created_at),
+  };
+}
+
+function toWorkerHealth(row: SqlRow): WorkerHealthRow {
+  return {
+    workerKey: asString(row.worker_key),
+    lastStartedAt: asString(row.last_started_at),
+    lastHeartbeatAt: asString(row.last_heartbeat_at),
+    lastSuccessfulCycleAt: nullableString(row.last_successful_cycle_at),
+    lastErrorMessage: nullableString(row.last_error_message),
+    lastDowntimeStartedAt: nullableString(row.last_downtime_started_at),
+    lastDowntimeDetectedAt: nullableString(row.last_downtime_detected_at),
   };
 }
 
@@ -429,6 +465,7 @@ export class BridgeDatabase {
       CREATE TABLE IF NOT EXISTS message_drafts (
         id TEXT PRIMARY KEY,
         case_id TEXT NOT NULL REFERENCES interview_cases(id),
+        workflow_review_id TEXT,
         channel_id TEXT NOT NULL,
         preview_text TEXT NOT NULL,
         blocks_json TEXT NOT NULL,
@@ -493,6 +530,16 @@ export class BridgeDatabase {
         cursor_key TEXT PRIMARY KEY,
         cursor_value TEXT NOT NULL,
         updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS worker_runtime_health (
+        worker_key TEXT PRIMARY KEY,
+        last_started_at TEXT NOT NULL,
+        last_heartbeat_at TEXT NOT NULL,
+        last_successful_cycle_at TEXT,
+        last_error_message TEXT,
+        last_downtime_started_at TEXT,
+        last_downtime_detected_at TEXT
       );
 
       CREATE TABLE IF NOT EXISTS meeting_room_blocks (
@@ -671,6 +718,39 @@ export class BridgeDatabase {
         )
         .run();
     }
+
+    const versionEight = this.connection
+      .prepare("SELECT version FROM schema_migrations WHERE version = 8")
+      .get() as SqlRow | undefined;
+    if (!versionEight) {
+      const draftColumns = this.connection
+        .prepare("PRAGMA table_info(message_drafts)")
+        .all() as SqlRow[];
+      const hasWorkflowReviewId = draftColumns.some(
+        (column) => asString(column.name) === "workflow_review_id",
+      );
+      if (!hasWorkflowReviewId) {
+        this.connection.exec(
+          "ALTER TABLE message_drafts ADD COLUMN workflow_review_id TEXT",
+        );
+      }
+      this.connection.exec(`
+        CREATE TABLE IF NOT EXISTS worker_runtime_health (
+          worker_key TEXT PRIMARY KEY,
+          last_started_at TEXT NOT NULL,
+          last_heartbeat_at TEXT NOT NULL,
+          last_successful_cycle_at TEXT,
+          last_error_message TEXT,
+          last_downtime_started_at TEXT,
+          last_downtime_detected_at TEXT
+        );
+      `);
+      this.connection
+        .prepare(
+          "INSERT INTO schema_migrations(version, applied_at) VALUES (8, datetime('now'))",
+        )
+        .run();
+    }
   }
 
   transaction<T>(operation: () => T): T {
@@ -712,6 +792,97 @@ export class BridgeDatabase {
         "SELECT COUNT(*) AS count FROM cancellation_external_follow_ups WHERE status = 'PENDING'",
       ),
     };
+  }
+
+  getWorkerHealth(workerKey: string): WorkerHealthRow | undefined {
+    const row = this.connection
+      .prepare("SELECT * FROM worker_runtime_health WHERE worker_key = ?")
+      .get(workerKey) as SqlRow | undefined;
+    return row ? toWorkerHealth(row) : undefined;
+  }
+
+  registerWorkerStart(input: {
+    workerKey: string;
+    now?: Date;
+    downtimeThresholdMs?: number;
+  }): { health: WorkerHealthRow; downtime?: WorkerDowntime } {
+    const now = input.now ?? new Date();
+    const nowIso = now.toISOString();
+    const previous = this.getWorkerHealth(input.workerKey);
+    const previousHeartbeatMs = previous
+      ? Date.parse(previous.lastHeartbeatAt)
+      : Number.NaN;
+    const durationMs = Number.isNaN(previousHeartbeatMs)
+      ? 0
+      : now.getTime() - previousHeartbeatMs;
+    const threshold =
+      input.downtimeThresholdMs ?? WORKER_DOWNTIME_THRESHOLD_MS;
+    const downtime =
+      previous && durationMs >= threshold
+        ? {
+            workerKey: input.workerKey,
+            startedAt: previous.lastHeartbeatAt,
+            detectedAt: nowIso,
+            durationMs,
+          }
+        : undefined;
+
+    this.connection
+      .prepare(`
+        INSERT INTO worker_runtime_health(
+          worker_key, last_started_at, last_heartbeat_at,
+          last_successful_cycle_at, last_error_message,
+          last_downtime_started_at, last_downtime_detected_at
+        ) VALUES (?, ?, ?, NULL, NULL, ?, ?)
+        ON CONFLICT(worker_key) DO UPDATE SET
+          last_started_at = excluded.last_started_at,
+          last_heartbeat_at = excluded.last_heartbeat_at,
+          last_error_message = NULL,
+          last_downtime_started_at = COALESCE(excluded.last_downtime_started_at, worker_runtime_health.last_downtime_started_at),
+          last_downtime_detected_at = COALESCE(excluded.last_downtime_detected_at, worker_runtime_health.last_downtime_detected_at)
+      `)
+      .run(
+        input.workerKey,
+        nowIso,
+        nowIso,
+        downtime?.startedAt ?? null,
+        downtime?.detectedAt ?? null,
+      );
+    return { health: this.getWorkerHealth(input.workerKey)!, downtime };
+  }
+
+  recordWorkerHeartbeat(workerKey: string, now = new Date()): void {
+    this.connection
+      .prepare(`
+        UPDATE worker_runtime_health
+        SET last_heartbeat_at = ?
+        WHERE worker_key = ?
+      `)
+      .run(now.toISOString(), workerKey);
+  }
+
+  recordWorkerCycleSuccess(workerKey: string, now = new Date()): void {
+    this.connection
+      .prepare(`
+        UPDATE worker_runtime_health
+        SET last_heartbeat_at = ?, last_successful_cycle_at = ?, last_error_message = NULL
+        WHERE worker_key = ?
+      `)
+      .run(now.toISOString(), now.toISOString(), workerKey);
+  }
+
+  recordWorkerCycleFailure(
+    workerKey: string,
+    errorMessage: string,
+    now = new Date(),
+  ): void {
+    this.connection
+      .prepare(`
+        UPDATE worker_runtime_health
+        SET last_heartbeat_at = ?, last_error_message = ?
+        WHERE worker_key = ?
+      `)
+      .run(now.toISOString(), errorMessage, workerKey);
   }
 
   insertNotification(
@@ -949,6 +1120,22 @@ export class BridgeDatabase {
     return rows.map(toCase);
   }
 
+  listCasesWithPendingRequiredInterviewers(): InterviewCaseRow[] {
+    const rows = this.connection
+      .prepare(`
+        SELECT DISTINCT interview_case.*
+        FROM interview_cases AS interview_case
+        JOIN case_interviewers AS interviewer ON interviewer.case_id = interview_case.id
+        WHERE interview_case.status = 'COLLECTING_AVAILABILITY'
+          AND interviewer.active = 1
+          AND interviewer.required = 1
+          AND interviewer.status = 'PENDING'
+        ORDER BY interview_case.updated_at ASC
+      `)
+      .all() as SqlRow[];
+    return rows.map(toCase);
+  }
+
   listCancellationExternalFollowUps(input?: {
     caseId?: string;
     status?: CancellationExternalFollowUpStatus;
@@ -1110,6 +1297,18 @@ export class BridgeDatabase {
       );
     }
     const followUps = this.listCancellationExternalFollowUps({ limit });
+    const workerHealth = this.getWorkerHealth(INTERVIEW_BRIDGE_WORKER_KEY);
+    const heartbeatAgeMs = workerHealth
+      ? Math.max(0, Date.now() - Date.parse(workerHealth.lastHeartbeatAt))
+      : null;
+    const workerStatus =
+      !workerHealth
+        ? "UNKNOWN"
+        : heartbeatAgeMs !== null && heartbeatAgeMs > WORKER_DOWNTIME_THRESHOLD_MS
+          ? "STALE"
+          : workerHealth.lastErrorMessage
+            ? "DEGRADED"
+            : "RUNNING";
     const followUpsByCase = new Map<string, CancellationExternalFollowUpRow[]>();
     for (const followUp of followUps) {
       const items = followUpsByCase.get(followUp.caseId) ?? [];
@@ -1136,6 +1335,17 @@ export class BridgeDatabase {
             AND interviewer.status = 'PENDING'
             AND interview_case.status NOT IN ('CANCELLED', 'CLOSED')
         `),
+        worker: workerHealth
+          ? {
+              status: workerStatus,
+              lastStartedAt: workerHealth.lastStartedAt,
+              lastHeartbeatAt: workerHealth.lastHeartbeatAt,
+              lastSuccessfulCycleAt: workerHealth.lastSuccessfulCycleAt,
+              lastErrorMessage: workerHealth.lastErrorMessage,
+              lastDowntimeStartedAt: workerHealth.lastDowntimeStartedAt,
+              lastDowntimeDetectedAt: workerHealth.lastDowntimeDetectedAt,
+            }
+          : { status: workerStatus },
       },
       attention: {
         reviews: reviews.map((review) => ({
@@ -2346,6 +2556,7 @@ export class BridgeDatabase {
 
   createDraft(input: {
     caseId: string;
+    workflowReviewId?: string;
     channelId: string;
     previewText: string;
     blocksJson: string;
@@ -2356,23 +2567,30 @@ export class BridgeDatabase {
       .prepare(`
         SELECT * FROM message_drafts
         WHERE case_id = ? AND payload_hash = ? AND message_type = ?
+          AND workflow_review_id IS ?
           AND status IN ('DRAFT', 'APPROVED', 'SENT')
         ORDER BY created_at DESC LIMIT 1
       `)
-      .get(input.caseId, input.payloadHash, input.messageType) as SqlRow | undefined;
+      .get(
+        input.caseId,
+        input.payloadHash,
+        input.messageType,
+        input.workflowReviewId ?? null,
+      ) as SqlRow | undefined;
     if (existing) return toDraft(existing);
 
     const id = randomUUID();
     this.connection
       .prepare(`
         INSERT INTO message_drafts(
-          id, case_id, channel_id, preview_text, blocks_json, payload_hash,
+          id, case_id, workflow_review_id, channel_id, preview_text, blocks_json, payload_hash,
           message_type, status, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?)
       `)
       .run(
         id,
         input.caseId,
+        input.workflowReviewId ?? null,
         input.channelId,
         input.previewText,
         input.blocksJson,
@@ -2394,6 +2612,22 @@ export class BridgeDatabase {
     const row = this.connection
       .prepare("SELECT * FROM message_drafts WHERE id = ?")
       .get(id) as SqlRow | undefined;
+    return row ? toDraft(row) : undefined;
+  }
+
+  findActiveDraftByWorkflowReviewId(
+    workflowReviewId: string,
+    messageType: DraftRow["messageType"],
+  ): DraftRow | undefined {
+    const row = this.connection
+      .prepare(`
+        SELECT * FROM message_drafts
+        WHERE workflow_review_id = ? AND message_type = ?
+          AND status IN ('DRAFT', 'APPROVED', 'SENT')
+        ORDER BY created_at DESC
+        LIMIT 1
+      `)
+      .get(workflowReviewId, messageType) as SqlRow | undefined;
     return row ? toDraft(row) : undefined;
   }
 
@@ -2495,6 +2729,21 @@ export class BridgeDatabase {
         this.addEvent(draft.caseId, "SCHEDULE_CONFIRMATION_SENT", "USER", {
           draftId: id,
           slackMessageTs,
+        });
+      } else if (draft.messageType === "AVAILABILITY_RECOVERY") {
+        if (draft.workflowReviewId) {
+          this.connection
+            .prepare(`
+              UPDATE workflow_reviews
+              SET status = 'RESOLVED', resolution = 'AVAILABILITY_RECOVERY_SENT', resolved_at = ?
+              WHERE id = ? AND status = 'OPEN'
+            `)
+            .run(new Date().toISOString(), draft.workflowReviewId);
+        }
+        this.addEvent(draft.caseId, "AVAILABILITY_RECOVERY_SENT", "USER", {
+          draftId: id,
+          slackMessageTs,
+          workflowReviewId: draft.workflowReviewId,
         });
       } else {
         this.addEvent(draft.caseId, "SCHEDULE_UPDATE_SENT", "USER", {

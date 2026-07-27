@@ -1,0 +1,4 @@
+// 로컬 Slack 워커의 상태 감지 기준을 정의한다.
+export const INTERVIEW_BRIDGE_WORKER_KEY = "INTERVIEW_BRIDGE_WORKER";
+export const WORKER_HEARTBEAT_INTERVAL_MS = 30_000;
+export const WORKER_DOWNTIME_THRESHOLD_MS = 90_000;

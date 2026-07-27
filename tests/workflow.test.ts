@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { AppConfig } from "../src/config.js";
 import { BridgeDatabase } from "../src/db/database.js";
+import { INTERVIEW_BRIDGE_WORKER_KEY } from "../src/domain/worker-health.js";
 import type { NinehireWorkflowAdapter } from "../src/ninehire/adapter.js";
 import { WorkflowService } from "../src/services/workflow.js";
 import type { ParsedSlackNotification } from "../src/slack/parser.js";
@@ -353,6 +354,79 @@ describe("evaluation approval workflow", () => {
       resolution: "AUTO_EXCLUDED_NO_PASS",
     });
     expect(db.listOpenReviews()).toHaveLength(0);
+  });
+
+  it("creates a recovery draft only for pending interviewers after worker downtime", () => {
+    db = new BridgeDatabase(":memory:");
+    const ninehire: NinehireWorkflowAdapter = {
+      async lookupCompletedEvaluation() {
+        return { reason: "이 테스트에서는 사용하지 않습니다." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    };
+    const workflow = new WorkflowService(
+      db,
+      { ...config, slack: { requestChannelId: "C1" } },
+      ninehire,
+    );
+    const interviewCase = db.createInterviewCase({
+      candidateName: "지원자 1",
+      recruitmentName: "테스트 채용",
+      proposalDates: ["2026-07-30"],
+    });
+    db.addOrUpdateInterviewer({
+      caseId: interviewCase.id,
+      displayName: "미제출 면접관",
+      slackUserId: "U1",
+      source: "MANUAL",
+    });
+    const submittedInterviewer = db.addOrUpdateInterviewer({
+      caseId: interviewCase.id,
+      displayName: "제출 면접관",
+      slackUserId: "U2",
+      source: "MANUAL",
+    });
+    db.replaceAvailabilityForInterviewer(interviewCase.id, submittedInterviewer.id, [
+      { date: "2026-07-30", start: "09:00", end: "10:00" },
+    ]);
+    db.setCaseStatus(interviewCase.id, "COLLECTING_AVAILABILITY");
+
+    db.registerWorkerStart({
+      workerKey: INTERVIEW_BRIDGE_WORKER_KEY,
+      now: new Date("2026-07-30T00:00:00.000Z"),
+      downtimeThresholdMs: 90_000,
+    });
+    const workerRestart = db.registerWorkerStart({
+      workerKey: INTERVIEW_BRIDGE_WORKER_KEY,
+      now: new Date("2026-07-30T00:02:00.000Z"),
+      downtimeThresholdMs: 90_000,
+    });
+    expect(workerRestart.downtime).toMatchObject({ durationMs: 120_000 });
+
+    const recovery = workflow.createWorkerDowntimeReviews(workerRestart.downtime!);
+    expect(recovery.impactedCaseIds).toEqual([interviewCase.id]);
+    const draft = workflow.createAvailabilityRecoveryDraft(recovery.reviewIds[0]!);
+
+    expect(draft).toMatchObject({
+      caseId: interviewCase.id,
+      messageType: "AVAILABILITY_RECOVERY",
+      workflowReviewId: recovery.reviewIds[0],
+      status: "DRAFT",
+    });
+    expect(draft.blocksJson).toContain("<@U1>");
+    expect(draft.blocksJson).not.toContain("<@U2>");
+
+    db.approveDraft(draft.id);
+    db.markDraftSent(draft.id, "30.0");
+    expect(db.getReview(recovery.reviewIds[0]!)).toMatchObject({
+      status: "RESOLVED",
+      resolution: "AVAILABILITY_RECOVERY_SENT",
+    });
   });
 
   it("adds direct recruitment participants and flags unresolved user groups", async () => {

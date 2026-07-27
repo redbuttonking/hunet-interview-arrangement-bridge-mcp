@@ -21,23 +21,48 @@ function dateLabel(date: string): string {
   }).format(new Date(`${date}T00:00:00Z`));
 }
 
+function dateTimeLabel(value: string): string {
+  return new Intl.DateTimeFormat("ko-KR", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "Asia/Seoul",
+  }).format(new Date(value));
+}
+
 function candidateLabel(interviewCase: InterviewCaseRow): string {
   return interviewCase.candidateName ?? "이름 미확인 지원자";
 }
 
-export function buildRequestMessage(bundle: CaseBundle): {
+export function buildRequestMessage(
+  bundle: CaseBundle,
+  options?: {
+    title?: string;
+    requestText?: string;
+    targetInterviewerIds?: string[];
+  },
+): {
   text: string;
   blocks: KnownBlock[];
 } {
   const { interviewCase } = bundle;
   const isRescheduleRound = interviewCase.scheduleRound > 1;
-  const requestTitle = isRescheduleRound
+  const defaultTitle = isRescheduleRound
     ? "인터뷰 가능 일정 재입력 요청"
     : "인터뷰 가능 일정 입력 요청";
-  const requestText = isRescheduleRound
+  const defaultRequestText = isRescheduleRound
     ? "일정 변경 조율을 위해 가능한 시간을 다시 선택해 주세요. 이번 제출 내용만 새 일정 검토에 반영됩니다."
     : "가능한 시간을 선택해 주세요. 현재 참여가 어려운 경우 별도로 알려주시면 담당자가 면접관 구성을 검토합니다.";
-  const active = bundle.interviewers.filter((item) => item.active);
+  const requestTitle = options?.title ?? defaultTitle;
+  const requestText = options?.requestText ?? defaultRequestText;
+  const active = bundle.interviewers.filter(
+    (item) =>
+      item.active &&
+      (!options?.targetInterviewerIds ||
+        options.targetInterviewerIds.includes(item.id)),
+  );
   const mentions = active
     .map((item) =>
       item.slackUserId ? `<@${item.slackUserId}>` : item.displayName,
@@ -116,6 +141,27 @@ export function buildRequestMessage(bundle: CaseBundle): {
     },
   ];
   return { text, blocks };
+}
+
+export function buildAvailabilityRecoveryMessage(
+  bundle: CaseBundle,
+  downtime: { startedAt: string; detectedAt: string },
+): { text: string; blocks: KnownBlock[] } {
+  const pendingInterviewerIds = bundle.interviewers
+    .filter(
+      (interviewer) =>
+        interviewer.active &&
+        interviewer.required &&
+        interviewer.status === "PENDING",
+    )
+    .map((interviewer) => interviewer.id);
+  return buildRequestMessage(bundle, {
+    title: "인터뷰 가능 일정 재제출 요청",
+    requestText:
+      `${dateTimeLabel(downtime.startedAt)}~${dateTimeLabel(downtime.detectedAt)} 사이에 ` +
+      "일정 입력을 시도하셨다면 제출 결과를 보장할 수 없습니다. 아래 버튼으로 가능한 시간을 다시 입력해 주세요.",
+    targetInterviewerIds: pendingInterviewerIds,
+  });
 }
 
 export function buildScheduleConfirmationMessage(

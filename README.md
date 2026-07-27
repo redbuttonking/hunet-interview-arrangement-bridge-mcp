@@ -41,6 +41,16 @@
 
 `get_interview_operations_dashboard`는 웹 화면 없이 대시보드 구현에 사용할 운영 데이터를 반환합니다. 진행·확정·취소·검토 대기·면접관 미응답·취소 후 외부 확인 대기를 함께 조회하며, 후보자 이름은 로컬 MCP 응답에서만 최소한으로 제공합니다.
 
+## 워커 중단과 가용시간 재제출
+
+Slack 버튼·모달의 가용시간 제출은 채널 메시지 재조회로 복구할 수 없다. 워커는 30초마다 상태 신호를 로컬 DB에 남기며, 마지막 상태 신호 후 90초 이상 지나 재시작하면 중단 구간을 감지한다.
+
+- 가용시간을 수집 중이고 필수 면접관이 아직 미제출인 건마다 `WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED` 검토 건을 만든다.
+- `get_interview_operations_dashboard`의 `summary.worker`에서 워커 상태, 마지막 상태 신호, 마지막 정상 동기화, 최근 중단 구간을 확인할 수 있다.
+- `create_availability_recovery_draft`는 미제출 필수 면접관만 멘션하고, 같은 [가능 일정 입력] 버튼이 포함된 재제출 요청 초안을 만든다.
+- `approve_and_send_availability_recovery`로 승인·발송할 때만 Slack에 전송하며, 발송 완료 후 해당 중단 검토 건을 해결 처리한다.
+- PC가 장시간 꺼져 있거나 작업 스케줄러 재시작 횟수를 모두 소진하면 실시간 제출을 보장할 수 없다. 이 경우에는 대시보드의 `STALE` 상태를 확인하고 재제출 요청 또는 수동 입력으로 처리한다.
+
 ## 다우오피스 전용 브라우저 프로필
 
 다우오피스는 예약을 생성하거나 수정하지 않고, 면접실 예약 블록을 읽는 용도로만 연결한다. 개인 브라우저와 분리된 Microsoft Edge 프로필을 사용한다.
@@ -91,6 +101,7 @@ Codex는 이 서버의 MCP 도구를 호출하고, 로컬 백그라운드 워커
 - 미응답자에게 2영업시간 후 1차, 다음 영업일 10:00에 2차 리마인드
 - 2차 리마인드 뒤 담당자 검토 대기 전환
 - 중복 이벤트 방지, 상태 이력, 검토 대기 사유, 메시지 발송 상태 저장
+- 워커 중단 감지와 미제출 면접관 대상 재제출 요청 초안
 
 ## 중요한 범위 구분
 
@@ -309,11 +320,13 @@ tool_timeout_sec = 60.0
 | `set_interviewer_required` | 필수/선택 면접관 변경 | 로컬 상태 갱신 |
 | `set_case_schedule_rules` | 소요시간·제안 날짜 변경 | 로컬 상태 갱신 |
 | `record_manual_availability` | 예외 시간 직접 기록 | 로컬 상태 갱신 |
+| `create_availability_recovery_draft` | 워커 중단 후 미제출 면접관 재요청 초안 생성 | 발송 없음 |
 | `create_interviewer_request_draft` | Slack 메시지 초안 생성 | 발송 없음 |
 | `confirm_internal_interview_schedule` | 회의실 배정 기반 내부 일정 확정 | 로컬 상태·이벤트 갱신 |
 | `create_interviewer_schedule_confirmation_draft` | 면접관 최종 일정 안내 초안 생성 | 발송 없음 |
 | `list_pending_message_drafts` | 승인 대기 초안 조회 | 없음 |
 | `approve_and_send_interviewer_request` | 초안 승인 후 Slack 발송 | **Slack 메시지 발송** |
+| `approve_and_send_availability_recovery` | 재제출 요청 승인 후 Slack 발송 | **Slack 메시지 발송** |
 | `approve_and_send_interviewer_schedule_confirmation` | 최종 일정 안내 승인 후 Slack 발송 | **Slack 메시지 발송** |
 
 ## 날짜와 리마인드 규칙
