@@ -510,4 +510,42 @@ describe("evaluation approval workflow", () => {
     expect(revised.payloadHash).not.toBe("before-revision");
     expect(revised.blocksJson).toContain("일정에 참조 부탁드립니다.");
   });
+
+  it("creates external follow-ups when an interview is cancelled", () => {
+    db = new BridgeDatabase(":memory:");
+    const ninehire: NinehireWorkflowAdapter = {
+      async lookupCompletedEvaluation() {
+        return { reason: "Not used in this test." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    };
+    const workflow = new WorkflowService(
+      db,
+      { ...config, slack: { requestChannelId: "C1" } },
+      ninehire,
+    );
+    const interviewCase = db.createInterviewCase({
+      candidateName: "테스트1",
+      recruitmentName: "인터뷰 어레인지 자동화 테스트 채용",
+      proposalDates: ["2026-07-27"],
+    });
+
+    const cancelled = workflow.cancelInterviewArrangement({
+      caseId: interviewCase.id,
+      reason: "후보자 불참으로 취소합니다.",
+    });
+
+    expect(cancelled).toMatchObject({
+      interviewCase: { status: "CANCELLED" },
+      cancellationExternalFollowUps: [
+        { followUpType: "NINEHIRE_CANDIDATE_SCHEDULE", status: "PENDING" },
+        { followUpType: "DAOU_ROOM_RESERVATION", status: "PENDING" },
+      ],
+    });
+  });
 });

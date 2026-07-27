@@ -358,6 +358,75 @@ export function createBridgeMcpServer(
   );
 
   server.registerTool(
+    "backfill_cancellation_external_follow_ups",
+    {
+      title: "기존 취소 건 외부 확인 항목 생성",
+      description:
+        "기존에 취소된 인터뷰 건에 나인하이어 후보자 일정과 다우오피스 회의실 예약 확인 항목을 추가합니다. 외부 시스템을 변경하지 않습니다.",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () => result(db.backfillCancellationExternalFollowUps()),
+  );
+
+  server.registerTool(
+    "list_cancellation_external_follow_ups",
+    {
+      title: "취소 건 외부 확인 목록",
+      description:
+        "취소된 인터뷰의 나인하이어 일정과 다우오피스 예약 확인 항목을 조회합니다.",
+      inputSchema: {
+        status: z.enum(["PENDING", "CONFIRMED", "NOT_REQUIRED"]).optional(),
+        limit: z.number().int().min(1).max(200).default(100),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ status, limit }) =>
+      result({
+        followUps: db
+          .listCancellationExternalFollowUps({ status, limit })
+          .map((followUp) => {
+            const interviewCase = db.getCase(followUp.caseId);
+            return {
+              ...followUp,
+              candidateName: interviewCase?.candidateName ?? null,
+              recruitmentName: interviewCase?.recruitmentName ?? null,
+            };
+          }),
+      }),
+  );
+
+  server.registerTool(
+    "resolve_cancellation_external_follow_up",
+    {
+      title: "취소 건 외부 확인 완료 기록",
+      description:
+        "수동으로 확인한 나인하이어 일정 또는 다우오피스 예약 처리 결과를 기록합니다. 외부 시스템을 변경하지 않습니다.",
+      inputSchema: {
+        followUpId: z.string().uuid(),
+        status: z.enum(["CONFIRMED", "NOT_REQUIRED"]),
+        resolutionNote: z.string().trim().min(1).max(500).optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (input) => result(db.resolveCancellationExternalFollowUp(input)),
+  );
+
+  server.registerTool(
     "list_interview_cases",
     {
       title: "인터뷰 건 목록",
@@ -411,6 +480,25 @@ export function createBridgeMcpServer(
       if (!bundle) throw new Error(`Case not found: ${caseId}`);
       return result(bundle);
     },
+  );
+
+  server.registerTool(
+    "get_interview_operations_dashboard",
+    {
+      title: "인터뷰 운영 현황 조회",
+      description:
+        "웹 화면 없이도 진행·확정·취소·검토 대기·면접관 미응답·취소 후 외부 확인 대기를 한 번에 조회할 수 있는 대시보드용 데이터를 반환합니다.",
+      inputSchema: {
+        limit: z.number().int().min(1).max(200).default(100),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ limit }) => result(db.getOperationsDashboard(limit)),
   );
 
   server.registerTool(

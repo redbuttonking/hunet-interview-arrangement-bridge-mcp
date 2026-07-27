@@ -642,7 +642,12 @@ export class WorkflowService {
   cancelInterviewArrangement(input: {
     caseId: string;
     reason: string;
-  }): ScheduleTransitionResult & { scheduleUpdateDraft: DraftRow | null } {
+  }): ScheduleTransitionResult & {
+    scheduleUpdateDraft: DraftRow | null;
+    cancellationExternalFollowUps: ReturnType<
+      BridgeDatabase["createCancellationExternalFollowUps"]
+    >;
+  } {
     if (!this.config.slack.requestChannelId) {
       throw new Error("SLACK_REQUEST_CHANNEL_ID is not configured.");
     }
@@ -657,7 +662,9 @@ export class WorkflowService {
             "SCHEDULE_CANCELLATION",
           )
         : null;
-    return { ...transition, scheduleUpdateDraft };
+    const cancellationExternalFollowUps =
+      this.db.createCancellationExternalFollowUps(input.caseId);
+    return { ...transition, scheduleUpdateDraft, cancellationExternalFollowUps };
   }
 
   resolveCandidateInterviewAbsenceReview(input: {

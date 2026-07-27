@@ -29,6 +29,18 @@
 - 새 규칙 적용 전의 후보자 메시지는 `reprocess_candidate_interview_absence_notifications`로 다시 처리할 수 있습니다.
 - 다른 일정 변경·취소 알림 형식은 실제 사례를 확인한 뒤 별도 감지 규칙을 추가합니다.
 
+## 취소 후 외부 반영 확인
+
+인터뷰를 취소하면 로컬 서버가 나인하이어 후보자 일정과 다우오피스 회의실 예약을 자동으로 변경하지 않습니다. 대신 두 확인 항목을 생성해 실제 운영 반영 여부를 기록합니다.
+
+- `list_cancellation_external_follow_ups`로 나인하이어 일정과 다우오피스 예약 확인 대상을 조회합니다.
+- `resolve_cancellation_external_follow_up`에서 수동 처리 완료는 `CONFIRMED`, 공용 예약 유지처럼 조치가 필요 없으면 `NOT_REQUIRED`로 기록합니다.
+- 기존 취소 건은 `backfill_cancellation_external_follow_ups`로 확인 항목을 한 번 생성할 수 있습니다.
+
+## 운영 현황 데이터
+
+`get_interview_operations_dashboard`는 웹 화면 없이 대시보드 구현에 사용할 운영 데이터를 반환합니다. 진행·확정·취소·검토 대기·면접관 미응답·취소 후 외부 확인 대기를 함께 조회하며, 후보자 이름은 로컬 MCP 응답에서만 최소한으로 제공합니다.
+
 ## 다우오피스 전용 브라우저 프로필
 
 다우오피스는 예약을 생성하거나 수정하지 않고, 면접실 예약 블록을 읽는 용도로만 연결한다. 개인 브라우저와 분리된 Microsoft Edge 프로필을 사용한다.

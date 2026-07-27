@@ -128,6 +128,25 @@ export interface ScheduleTransitionResult {
   cancelledDraftIds: string[];
 }
 
+export type CancellationExternalFollowUpType =
+  | "NINEHIRE_CANDIDATE_SCHEDULE"
+  | "DAOU_ROOM_RESERVATION";
+
+export type CancellationExternalFollowUpStatus =
+  | "PENDING"
+  | "CONFIRMED"
+  | "NOT_REQUIRED";
+
+export interface CancellationExternalFollowUpRow {
+  id: string;
+  caseId: string;
+  followUpType: CancellationExternalFollowUpType;
+  status: CancellationExternalFollowUpStatus;
+  resolutionNote: string | null;
+  createdAt: string;
+  resolvedAt: string | null;
+}
+
 export interface CaseBundle {
   interviewCase: InterviewCaseRow;
   interviewers: InterviewerRow[];
@@ -288,6 +307,22 @@ function toRoomAllocation(row: SqlRow): RoomAllocationRow {
   };
 }
 
+function toCancellationExternalFollowUp(
+  row: SqlRow,
+): CancellationExternalFollowUpRow {
+  return {
+    id: asString(row.id),
+    caseId: asString(row.case_id),
+    followUpType: asString(
+      row.follow_up_type,
+    ) as CancellationExternalFollowUpType,
+    status: asString(row.status) as CancellationExternalFollowUpStatus,
+    resolutionNote: nullableString(row.resolution_note),
+    createdAt: asString(row.created_at),
+    resolvedAt: nullableString(row.resolved_at),
+  };
+}
+
 export class BridgeDatabase {
   readonly connection: DatabaseSync;
 
@@ -440,6 +475,20 @@ export class BridgeDatabase {
         created_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS cancellation_external_follow_ups (
+        id TEXT PRIMARY KEY,
+        case_id TEXT NOT NULL REFERENCES interview_cases(id),
+        follow_up_type TEXT NOT NULL,
+        status TEXT NOT NULL,
+        resolution_note TEXT,
+        created_at TEXT NOT NULL,
+        resolved_at TEXT,
+        UNIQUE(case_id, follow_up_type)
+      );
+
+      CREATE INDEX IF NOT EXISTS cancellation_external_follow_ups_pending
+        ON cancellation_external_follow_ups(status, created_at);
+
       CREATE TABLE IF NOT EXISTS sync_cursors (
         cursor_key TEXT PRIMARY KEY,
         cursor_value TEXT NOT NULL,
@@ -574,6 +623,31 @@ export class BridgeDatabase {
         )
         .run();
     }
+
+    const versionSix = this.connection
+      .prepare("SELECT version FROM schema_migrations WHERE version = 6")
+      .get() as SqlRow | undefined;
+    if (!versionSix) {
+      this.connection.exec(`
+        CREATE TABLE IF NOT EXISTS cancellation_external_follow_ups (
+          id TEXT PRIMARY KEY,
+          case_id TEXT NOT NULL REFERENCES interview_cases(id),
+          follow_up_type TEXT NOT NULL,
+          status TEXT NOT NULL,
+          resolution_note TEXT,
+          created_at TEXT NOT NULL,
+          resolved_at TEXT,
+          UNIQUE(case_id, follow_up_type)
+        );
+        CREATE INDEX IF NOT EXISTS cancellation_external_follow_ups_pending
+          ON cancellation_external_follow_ups(status, created_at);
+      `);
+      this.connection
+        .prepare(
+          "INSERT INTO schema_migrations(version, applied_at) VALUES (6, datetime('now'))",
+        )
+        .run();
+    }
   }
 
   transaction<T>(operation: () => T): T {
@@ -610,6 +684,9 @@ export class BridgeDatabase {
       ),
       activeRoomAllocations: scalar(
         "SELECT COUNT(*) AS count FROM room_allocations WHERE status = 'ACTIVE'",
+      ),
+      pendingCancellationExternalFollowUps: scalar(
+        "SELECT COUNT(*) AS count FROM cancellation_external_follow_ups WHERE status = 'PENDING'",
       ),
     };
   }
@@ -847,6 +924,255 @@ export class BridgeDatabase {
           `)
           .all(limit) as SqlRow[]);
     return rows.map(toCase);
+  }
+
+  listCancellationExternalFollowUps(input?: {
+    caseId?: string;
+    status?: CancellationExternalFollowUpStatus;
+    limit?: number;
+  }): CancellationExternalFollowUpRow[] {
+    const conditions: string[] = [];
+    const values: Array<string | number> = [];
+    if (input?.caseId) {
+      conditions.push("case_id = ?");
+      values.push(input.caseId);
+    }
+    if (input?.status) {
+      conditions.push("status = ?");
+      values.push(input.status);
+    }
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    values.push(input?.limit ?? 100);
+    const rows = this.connection
+      .prepare(`
+        SELECT * FROM cancellation_external_follow_ups
+        ${where}
+        ORDER BY
+          CASE status WHEN 'PENDING' THEN 0 ELSE 1 END,
+          CASE follow_up_type
+            WHEN 'NINEHIRE_CANDIDATE_SCHEDULE' THEN 0
+            ELSE 1
+          END,
+          created_at ASC
+        LIMIT ?
+      `)
+      .all(...values) as SqlRow[];
+    return rows.map(toCancellationExternalFollowUp);
+  }
+
+  createCancellationExternalFollowUps(
+    caseId: string,
+  ): CancellationExternalFollowUpRow[] {
+    const interviewCase = this.getCase(caseId);
+    if (!interviewCase || interviewCase.status !== "CANCELLED") {
+      throw new Error(`Cancelled interview case not found: ${caseId}`);
+    }
+    const types: CancellationExternalFollowUpType[] = [
+      "NINEHIRE_CANDIDATE_SCHEDULE",
+      "DAOU_ROOM_RESERVATION",
+    ];
+    let created = 0;
+    this.transaction(() => {
+      const insert = this.connection.prepare(`
+        INSERT OR IGNORE INTO cancellation_external_follow_ups(
+          id, case_id, follow_up_type, status, created_at
+        ) VALUES (?, ?, ?, 'PENDING', ?)
+      `);
+      const createdAt = new Date().toISOString();
+      for (const followUpType of types) {
+        const result = insert.run(randomUUID(), caseId, followUpType, createdAt);
+        created += Number(result.changes);
+      }
+      if (created > 0) {
+        this.addEvent(caseId, "CANCELLATION_EXTERNAL_FOLLOW_UPS_CREATED", "SYSTEM", {
+          created,
+        });
+      }
+    });
+    return this.listCancellationExternalFollowUps({ caseId });
+  }
+
+  backfillCancellationExternalFollowUps(): {
+    cancelledCases: number;
+    followUpsCreated: number;
+  } {
+    const rows = this.connection
+      .prepare("SELECT id FROM interview_cases WHERE status = 'CANCELLED'")
+      .all() as SqlRow[];
+    let followUpsCreated = 0;
+    for (const row of rows) {
+      const caseId = asString(row.id);
+      const before = this.listCancellationExternalFollowUps({ caseId }).length;
+      this.createCancellationExternalFollowUps(caseId);
+      followUpsCreated +=
+        this.listCancellationExternalFollowUps({ caseId }).length - before;
+    }
+    return { cancelledCases: rows.length, followUpsCreated };
+  }
+
+  resolveCancellationExternalFollowUp(input: {
+    followUpId: string;
+    status: Exclude<CancellationExternalFollowUpStatus, "PENDING">;
+    resolutionNote?: string;
+  }): CancellationExternalFollowUpRow {
+    const current = this.connection
+      .prepare("SELECT * FROM cancellation_external_follow_ups WHERE id = ?")
+      .get(input.followUpId) as SqlRow | undefined;
+    if (!current) {
+      throw new Error(`Cancellation external follow-up not found: ${input.followUpId}`);
+    }
+    const followUp = toCancellationExternalFollowUp(current);
+    if (followUp.status === input.status) return followUp;
+    if (followUp.status !== "PENDING") {
+      throw new Error(`Cancellation external follow-up is already resolved: ${input.followUpId}`);
+    }
+    this.transaction(() => {
+      this.connection
+        .prepare(`
+          UPDATE cancellation_external_follow_ups
+          SET status = ?, resolution_note = ?, resolved_at = ?
+          WHERE id = ? AND status = 'PENDING'
+        `)
+        .run(
+          input.status,
+          input.resolutionNote?.trim() || null,
+          new Date().toISOString(),
+          input.followUpId,
+        );
+      this.addEvent(
+        followUp.caseId,
+        "CANCELLATION_EXTERNAL_FOLLOW_UP_RESOLVED",
+        "USER",
+        {
+          followUpId: followUp.id,
+          followUpType: followUp.followUpType,
+          status: input.status,
+        },
+      );
+    });
+    return this.listCancellationExternalFollowUps({ caseId: followUp.caseId }).find(
+      (item) => item.id === input.followUpId,
+    )!;
+  }
+
+  getOperationsDashboard(limit = 100): Record<string, unknown> {
+    const statusCounts: Record<InterviewCaseStatus, number> = {
+      READY_FOR_DRAFT: 0,
+      DRAFT_CREATED: 0,
+      REQUEST_SENT: 0,
+      COLLECTING_AVAILABILITY: 0,
+      READY_TO_SCHEDULE: 0,
+      AWAITING_CANDIDATE_CONFIRMATION: 0,
+      CONFIRMED: 0,
+      CANCELLED: 0,
+      REVIEW_REQUIRED: 0,
+      CLOSED: 0,
+    };
+    const countRows = this.connection
+      .prepare("SELECT status, COUNT(*) AS count FROM interview_cases GROUP BY status")
+      .all() as SqlRow[];
+    for (const row of countRows) {
+      const status = asString(row.status) as InterviewCaseStatus;
+      statusCounts[status] = Number(row.count);
+    }
+    const scalar = (sql: string): number =>
+      Number((this.connection.prepare(sql).get() as SqlRow).count);
+    const cases = this.listCases(undefined, limit);
+    const reviews = this.listOpenReviews(limit);
+    const reviewCountByCase = new Map<string, number>();
+    for (const review of reviews) {
+      if (!review.caseId) continue;
+      reviewCountByCase.set(
+        review.caseId,
+        (reviewCountByCase.get(review.caseId) ?? 0) + 1,
+      );
+    }
+    const followUps = this.listCancellationExternalFollowUps({ limit });
+    const followUpsByCase = new Map<string, CancellationExternalFollowUpRow[]>();
+    for (const followUp of followUps) {
+      const items = followUpsByCase.get(followUp.caseId) ?? [];
+      items.push(followUp);
+      followUpsByCase.set(followUp.caseId, items);
+    }
+
+    return {
+      generatedAt: new Date().toISOString(),
+      summary: {
+        caseCountsByStatus: statusCounts,
+        openReviews: scalar(
+          "SELECT COUNT(*) AS count FROM workflow_reviews WHERE status = 'OPEN'",
+        ),
+        pendingCancellationExternalFollowUps: scalar(
+          "SELECT COUNT(*) AS count FROM cancellation_external_follow_ups WHERE status = 'PENDING'",
+        ),
+        pendingRequiredInterviewerResponses: scalar(`
+          SELECT COUNT(*) AS count
+          FROM case_interviewers AS interviewer
+          JOIN interview_cases AS interview_case ON interview_case.id = interviewer.case_id
+          WHERE interviewer.active = 1
+            AND interviewer.required = 1
+            AND interviewer.status = 'PENDING'
+            AND interview_case.status NOT IN ('CANCELLED', 'CLOSED')
+        `),
+      },
+      attention: {
+        reviews: reviews.map((review) => ({
+          id: review.id,
+          caseId: review.caseId,
+          reviewType: review.reviewType,
+          reason: review.reason,
+          createdAt: review.createdAt,
+        })),
+        cancellationExternalFollowUps: followUps
+          .filter((followUp) => followUp.status === "PENDING")
+          .map((followUp) => {
+            const interviewCase = this.getCase(followUp.caseId);
+            return {
+              ...followUp,
+              candidateName: interviewCase?.candidateName ?? null,
+              recruitmentName: interviewCase?.recruitmentName ?? null,
+            };
+          }),
+      },
+      cases: cases.map((interviewCase) => {
+        const requiredInterviewers = this.listInterviewers(interviewCase.id).filter(
+          (interviewer) => interviewer.required,
+        );
+        const caseFollowUps = followUpsByCase.get(interviewCase.id) ?? [];
+        const pendingInterviewerResponses = requiredInterviewers.filter(
+          (interviewer) => interviewer.status === "PENDING",
+        ).length;
+        const pendingCancellationExternalFollowUps = caseFollowUps.filter(
+          (followUp) => followUp.status === "PENDING",
+        ).length;
+        return {
+          id: interviewCase.id,
+          candidateName: interviewCase.candidateName,
+          recruitmentName: interviewCase.recruitmentName,
+          status: interviewCase.status,
+          isReschedule: interviewCase.scheduleRound > 1,
+          scheduledDate: interviewCase.scheduledDate,
+          scheduledStartTime: interviewCase.scheduledStartTime,
+          scheduledEndTime: interviewCase.scheduledEndTime,
+          interviewerResponses: {
+            required: requiredInterviewers.length,
+            submitted: requiredInterviewers.filter(
+              (interviewer) => interviewer.status === "SUBMITTED",
+            ).length,
+            pending: pendingInterviewerResponses,
+            declinedPendingReview: requiredInterviewers.filter(
+              (interviewer) =>
+                interviewer.status === "DECLINED_PENDING_REVIEW",
+            ).length,
+          },
+          cancellationExternalFollowUps: caseFollowUps,
+          needsAttention:
+            pendingInterviewerResponses > 0 ||
+            pendingCancellationExternalFollowUps > 0 ||
+            (reviewCountByCase.get(interviewCase.id) ?? 0) > 0,
+        };
+      }),
+    };
   }
 
   getCase(id: string): InterviewCaseRow | undefined {

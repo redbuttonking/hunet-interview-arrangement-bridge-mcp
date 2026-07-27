@@ -115,6 +115,18 @@ describe("bridge MCP server", () => {
     expect(tools.tools.map((tool) => tool.name)).toContain(
       "replace_pending_message_draft_text",
     );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
+      "backfill_cancellation_external_follow_ups",
+    );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
+      "list_cancellation_external_follow_ups",
+    );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
+      "resolve_cancellation_external_follow_up",
+    );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
+      "get_interview_operations_dashboard",
+    );
 
     const status = await client.callTool({ name: "bridge_status" });
     expect(status.isError).not.toBe(true);
