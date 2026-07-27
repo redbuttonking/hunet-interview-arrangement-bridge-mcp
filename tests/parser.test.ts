@@ -100,4 +100,34 @@ describe("NineHire Slack parser", () => {
       scheduledEndTime: "16:00",
     });
   });
+
+  it("recognizes a candidate message reporting interview absence", () => {
+    const parsed = parseNinehireSlackMessage({
+      attachments: [
+        {
+          fallback: "지원자로부터 메시지가 도착했습니다.",
+          fields: [
+            {
+              title: "지원자:",
+              value: "<https://app.ninehire.com/applicants/A123|테스트1>",
+            },
+            {
+              title: "채용:",
+              value: "인터뷰 어레인지 자동화 테스트 채용",
+            },
+            {
+              title: "메시지:",
+              value: "테스트1 지원자 일정에 불참합니다.",
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(parsed).toMatchObject({
+      eventType: "CANDIDATE_INTERVIEW_ABSENCE",
+      candidateName: "테스트1",
+      recruitmentName: "인터뷰 어레인지 자동화 테스트 채용",
+    });
+  });
 });

@@ -694,6 +694,19 @@ export class BridgeDatabase {
     return rows.map(toStoredSlackNotification);
   }
 
+  listIgnoredCandidateInterviewAbsenceNotifications(): StoredSlackNotificationRow[] {
+    const rows = this.connection
+      .prepare(`
+        SELECT * FROM slack_notifications
+        WHERE event_type = 'CANDIDATE_MESSAGE'
+          AND processing_status = 'IGNORED'
+          AND payload_json LIKE '%일정에 불참합니다%'
+        ORDER BY created_at ASC
+      `)
+      .all() as SqlRow[];
+    return rows.map(toStoredSlackNotification);
+  }
+
   createReview(input: {
     notificationId?: string;
     caseId?: string;
@@ -851,6 +864,22 @@ export class BridgeDatabase {
       .prepare(`
         SELECT * FROM interview_cases
         WHERE status = 'AWAITING_CANDIDATE_CONFIRMATION'
+          AND candidate_name = ?
+          AND recruitment_name = ?
+        ORDER BY created_at ASC
+      `)
+      .all(candidateName, recruitmentName) as SqlRow[];
+    return rows.map(toCase);
+  }
+
+  findScheduledCandidateCases(
+    candidateName: string,
+    recruitmentName: string,
+  ): InterviewCaseRow[] {
+    const rows = this.connection
+      .prepare(`
+        SELECT * FROM interview_cases
+        WHERE status IN ('AWAITING_CANDIDATE_CONFIRMATION', 'CONFIRMED')
           AND candidate_name = ?
           AND recruitment_name = ?
         ORDER BY created_at ASC

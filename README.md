@@ -21,7 +21,12 @@
 - 이전 최종 일정 안내가 발송된 건이면 `SCHEDULE_CANCELLATION` 초안이 생성됩니다. 검토 후 `approve_and_send_interviewer_schedule_update`로 발송합니다.
 - 두 도구 모두 다우오피스 예약이나 나인하이어의 후보자 일정은 변경하지 않습니다.
 
-나인하이어의 일정 변경·취소 Slack 알림 형식은 아직 실제 사례로 확인되지 않았습니다. 해당 알림을 받으면 현재는 검토 후 위 도구로 처리하며, 실제 알림 예시를 확보한 뒤 자동 감지 규칙을 추가합니다.
+나인하이어 후보자 메시지 중 `일정에 불참합니다`는 자동 감지합니다. 단, 이 문구만으로는 인터뷰 포기와 재조율 요청을 구분할 수 없으므로 일정·회의실·Slack 메시지를 자동 변경하지 않고 `CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED` 검토 건만 만듭니다.
+
+- `resolve_candidate_interview_absence_review`에서 기존 가능 시간으로 재조율, 면접관 일정 재수집 후 재조율, 취소, 보류를 명시적으로 선택합니다.
+- 재조율과 취소는 기존과 같이 Slack 안내 초안만 생성하며, 승인 전에는 발송하지 않습니다.
+- 새 규칙 적용 전의 후보자 메시지는 `reprocess_candidate_interview_absence_notifications`로 다시 처리할 수 있습니다.
+- 다른 일정 변경·취소 알림 형식은 실제 사례를 확인한 뒤 별도 감지 규칙을 추가합니다.
 
 ## 다우오피스 전용 브라우저 프로필
 

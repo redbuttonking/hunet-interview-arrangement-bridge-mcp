@@ -261,7 +261,7 @@ describe("evaluation approval workflow", () => {
     });
   });
 
-  it("confirms an internally scheduled case from a matching NineHire Slack notification", async () => {
+  it("confirms a schedule and requires review for a candidate absence message", async () => {
     db = new BridgeDatabase(":memory:");
     const ninehire: NinehireWorkflowAdapter = {
       async lookupCompletedEvaluation() {
@@ -308,6 +308,52 @@ describe("evaluation approval workflow", () => {
     expect(workflow.createScheduleConfirmationDraft(caseId).previewText).toBe(
       "테스트1 지원자 인터뷰 일정 확정 안내",
     );
+
+    const absence = await workflow.ingestSlackNotification({
+      channelId: "C1",
+      messageTs: "10.1",
+      parsed: {
+        eventType: "CANDIDATE_INTERVIEW_ABSENCE",
+        title: "지원자로부터 메시지가 도착했습니다.",
+        text: "테스트1 지원자 일정에 불참합니다.",
+        links: [],
+        payloadHash: "candidate-absence",
+        payloadJson: "{}",
+        candidateName: "테스트1",
+        recruitmentName: "인터뷰 어레인지 자동화 테스트 채용",
+      },
+    });
+
+    expect(absence).toMatchObject({
+      result: "CANDIDATE_ATTENDANCE_REVIEW_REQUIRED",
+      caseId,
+    });
+    expect(db.getCase(caseId)?.status).toBe("REVIEW_REQUIRED");
+    expect(db.listRoomAllocations(caseId)[0]?.status).toBe("ACTIVE");
+    const review = db.listOpenReviews().find(
+      (item) => item.reviewType === "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED",
+    );
+    expect(review).toBeDefined();
+
+    expect(
+      workflow.resolveCandidateInterviewAbsenceReview({
+        reviewId: review!.id,
+        action: "HOLD",
+      }),
+    ).toMatchObject({ reviewOpen: true, caseId });
+    expect(db.getReview(review!.id)?.status).toBe("OPEN");
+
+    expect(
+      workflow.resolveCandidateInterviewAbsenceReview({
+        reviewId: review!.id,
+        action: "RESCHEDULE_USING_EXISTING_AVAILABILITY",
+      }),
+    ).toMatchObject({
+      reviewOpen: false,
+      outcome: { interviewCase: { status: "READY_TO_SCHEDULE" } },
+    });
+    expect(db.getReview(review!.id)?.status).toBe("RESOLVED");
+    expect(db.listRoomAllocations(caseId)[0]?.status).toBe("CANCELLED");
   });
 
   it("requires review when a confirmed Slack schedule differs from the internal schedule", async () => {
@@ -351,7 +397,7 @@ describe("evaluation approval workflow", () => {
     ]);
   });
 
-  it("reprocesses a stored schedule confirmation after adding the detection rule", async () => {
+  it("reprocesses stored schedule confirmation and candidate absence notifications", async () => {
     db = new BridgeDatabase(":memory:");
     const ninehire: NinehireWorkflowAdapter = {
       async lookupCompletedEvaluation() {
@@ -389,5 +435,30 @@ describe("evaluation approval workflow", () => {
       reviewRequired: 0,
     });
     expect(db.getCase(caseId)?.status).toBe("CONFIRMED");
+
+    const confirmedCase = db.getCase(caseId)!;
+
+    const absenceText =
+      "지원자로부터 메시지가 도착했습니다.\n테스트1 지원자 일정에 불참합니다.";
+    await workflow.ingestSlackNotification({
+      channelId: "C1",
+      messageTs: "12.1",
+      parsed: {
+        eventType: "CANDIDATE_MESSAGE",
+        title: "지원자로부터 메시지가 도착했습니다.",
+        text: absenceText,
+        links: [],
+        payloadHash: "stored-candidate-absence",
+        payloadJson: JSON.stringify({ text: absenceText }),
+        candidateName: confirmedCase.candidateName!,
+        recruitmentName: confirmedCase.recruitmentName!,
+      },
+    });
+
+    expect(workflow.reprocessCandidateInterviewAbsenceNotifications()).toEqual({
+      scanned: 1,
+      reviewRequired: 1,
+    });
+    expect(db.getCase(caseId)?.status).toBe("REVIEW_REQUIRED");
   });
 });

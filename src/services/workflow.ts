@@ -23,6 +23,7 @@ import {
   buildScheduleUpdateMessage,
 } from "../slack/blocks.js";
 import {
+  isCandidateInterviewAbsenceText,
   parseConfirmedScheduleDateTime,
   type ParsedSlackNotification,
 } from "../slack/parser.js";
@@ -125,7 +126,9 @@ export class WorkflowService {
         ? "EVALUATION_LOOKUP_PENDING"
         : input.parsed.eventType === "SCHEDULE_CONFIRMED"
           ? "SCHEDULE_CONFIRMATION_PENDING"
-        : "IGNORED",
+          : input.parsed.eventType === "CANDIDATE_INTERVIEW_ABSENCE"
+            ? "CANDIDATE_ATTENDANCE_REVIEW_PENDING"
+          : "IGNORED",
     );
     if (!stored.inserted) {
       return { notificationId: stored.id, result: "DUPLICATE" };
@@ -133,6 +136,12 @@ export class WorkflowService {
     if (input.parsed.eventType !== "EVALUATION_COMPLETED") {
       if (input.parsed.eventType === "SCHEDULE_CONFIRMED") {
         return this.processScheduleConfirmation(stored.id, input.parsed);
+      }
+      if (input.parsed.eventType === "CANDIDATE_INTERVIEW_ABSENCE") {
+        return this.processCandidateInterviewAbsence(
+          stored.id,
+          input.parsed,
+        );
       }
       return { notificationId: stored.id, result: "IGNORED" };
     }
@@ -227,6 +236,52 @@ export class WorkflowService {
     return { scanned: notifications.length, confirmed, reviewRequired };
   }
 
+  reprocessCandidateInterviewAbsenceNotifications(): {
+    scanned: number;
+    reviewRequired: number;
+  } {
+    const notifications = this.db.listIgnoredCandidateInterviewAbsenceNotifications();
+    let reviewRequired = 0;
+    for (const notification of notifications) {
+      let text = "";
+      try {
+        const payload = JSON.parse(notification.payloadJson) as { text?: unknown };
+        text = typeof payload.text === "string" ? payload.text : "";
+      } catch {
+        text = "";
+      }
+      if (!isCandidateInterviewAbsenceText(text)) continue;
+      this.db.updateNotificationEventType(
+        notification.id,
+        "CANDIDATE_INTERVIEW_ABSENCE",
+      );
+      const processed = this.processCandidateInterviewAbsence(notification.id, {
+        eventType: "CANDIDATE_INTERVIEW_ABSENCE",
+        title: "지원자 인터뷰 불참 메시지",
+        text,
+        links: [],
+        payloadHash: "",
+        payloadJson: notification.payloadJson,
+        ...(notification.candidateRef
+          ? { candidateRef: notification.candidateRef }
+          : {}),
+        ...(notification.candidateName
+          ? { candidateName: notification.candidateName }
+          : {}),
+        ...(notification.recruitmentRef
+          ? { recruitmentRef: notification.recruitmentRef }
+          : {}),
+        ...(notification.recruitmentName
+          ? { recruitmentName: notification.recruitmentName }
+          : {}),
+      });
+      if (processed.result === "CANDIDATE_ATTENDANCE_REVIEW_REQUIRED") {
+        reviewRequired += 1;
+      }
+    }
+    return { scanned: notifications.length, reviewRequired };
+  }
+
   private processScheduleConfirmation(
     notificationId: string,
     parsed: ParsedSlackNotification,
@@ -314,6 +369,73 @@ export class WorkflowService {
     return {
       notificationId,
       result: "INTERVIEW_CONFIRMED",
+      caseId: interviewCase.id,
+    };
+  }
+
+  private processCandidateInterviewAbsence(
+    notificationId: string,
+    parsed: ParsedSlackNotification,
+  ): { notificationId: string; result: string; caseId?: string } {
+    if (!parsed.candidateName || !parsed.recruitmentName) {
+      this.db.updateNotificationStatus(notificationId, "REVIEW_REQUIRED");
+      this.db.createReview({
+        notificationId,
+        reviewType: "CANDIDATE_INTERVIEW_ABSENCE_MATCH_REQUIRED",
+        reason:
+          "The candidate interview-absence message is missing candidate or recruitment information.",
+      });
+      return { notificationId, result: "REVIEW_REQUIRED" };
+    }
+
+    const matches = this.db.findScheduledCandidateCases(
+      parsed.candidateName,
+      parsed.recruitmentName,
+    );
+    if (matches.length !== 1) {
+      this.db.updateNotificationStatus(notificationId, "REVIEW_REQUIRED");
+      this.db.createReview({
+        notificationId,
+        reviewType: "CANDIDATE_INTERVIEW_ABSENCE_MATCH_REQUIRED",
+        reason:
+          "The candidate interview-absence message did not match exactly one scheduled interview case.",
+        summary: {
+          candidateName: parsed.candidateName,
+          recruitmentName: parsed.recruitmentName,
+          matchedCaseCount: matches.length,
+        },
+      });
+      return { notificationId, result: "REVIEW_REQUIRED" };
+    }
+
+    const interviewCase = matches[0]!;
+    this.db.transaction(() => {
+      this.db.setCaseStatus(interviewCase.id, "REVIEW_REQUIRED");
+      this.db.createReview({
+        notificationId,
+        caseId: interviewCase.id,
+        reviewType: "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED",
+        reason:
+          "The candidate reported that they will not attend. Confirm whether the interview should be rescheduled, cancelled, or held.",
+        summary: {
+          candidateName: parsed.candidateName,
+          recruitmentName: parsed.recruitmentName,
+          scheduledDate: interviewCase.scheduledDate,
+          scheduledStartTime: interviewCase.scheduledStartTime,
+          scheduledEndTime: interviewCase.scheduledEndTime,
+        },
+      });
+      this.db.addEvent(
+        interviewCase.id,
+        "CANDIDATE_INTERVIEW_ABSENCE_REPORTED",
+        "NINEHIRE_SLACK",
+        { notificationId },
+      );
+      this.db.updateNotificationStatus(notificationId, "REVIEW_REQUIRED");
+    });
+    return {
+      notificationId,
+      result: "CANDIDATE_ATTENDANCE_REVIEW_REQUIRED",
       caseId: interviewCase.id,
     };
   }
@@ -509,6 +631,62 @@ export class WorkflowService {
           )
         : null;
     return { ...transition, scheduleUpdateDraft };
+  }
+
+  resolveCandidateInterviewAbsenceReview(input: {
+    reviewId: string;
+    action:
+      | "RESCHEDULE_USING_EXISTING_AVAILABILITY"
+      | "RESCHEDULE_WITH_NEW_AVAILABILITY"
+      | "CANCEL"
+      | "HOLD";
+    note?: string;
+  }) {
+    const review = this.db.getReview(input.reviewId);
+    if (
+      !review ||
+      review.status !== "OPEN" ||
+      !review.caseId ||
+      review.reviewType !== "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED"
+    ) {
+      throw new Error(`Open candidate-attendance review not found: ${input.reviewId}`);
+    }
+
+    const reason = input.note?.trim() || "Candidate reported interview absence.";
+    if (input.action === "HOLD") {
+      this.db.addEvent(
+        review.caseId,
+        "CANDIDATE_INTERVIEW_ABSENCE_HELD",
+        "USER",
+        { reviewId: review.id, note: input.note?.trim() || null },
+      );
+      return {
+        action: input.action,
+        reviewId: review.id,
+        caseId: review.caseId,
+        reviewOpen: true,
+      };
+    }
+
+    const outcome =
+      input.action === "CANCEL"
+        ? this.cancelInterviewArrangement({ caseId: review.caseId, reason })
+        : this.reopenInterviewSchedule({
+            caseId: review.caseId,
+            availabilityPolicy:
+              input.action === "RESCHEDULE_USING_EXISTING_AVAILABILITY"
+                ? "REUSE"
+                : "RECOLLECT",
+            reason,
+          });
+    this.db.resolveReview(review.id, input.action);
+    return {
+      action: input.action,
+      reviewId: review.id,
+      caseId: review.caseId,
+      reviewOpen: false,
+      outcome,
+    };
   }
 
   createScheduleConfirmationDraft(caseId: string): DraftRow {

@@ -7,6 +7,7 @@ export interface ParsedSlackNotification extends CandidateContext {
     | "APPLICATION_CREATED"
     | "CANDIDATE_REJECTED"
     | "CANDIDATE_MESSAGE"
+    | "CANDIDATE_INTERVIEW_ABSENCE"
     | "SCHEDULE_CONFIRMED"
     | "REPLY_DEADLINE_EXPIRED"
     | "EVALUATION_DEADLINE_EXPIRED"
@@ -107,6 +108,13 @@ function attachmentField(value: unknown, label: string): string | undefined {
   return undefined;
 }
 
+export function isCandidateInterviewAbsenceText(text: string): boolean {
+  return (
+    text.includes("지원자로부터 메시지가 도착했습니다.") &&
+    text.includes("일정에 불참합니다")
+  );
+}
+
 function classify(text: string): ParsedSlackNotification["eventType"] {
   if (text.includes("일정이 확정되었습니다")) {
     return "SCHEDULE_CONFIRMED";
@@ -123,6 +131,9 @@ function classify(text: string): ParsedSlackNotification["eventType"] {
   }
   if (text.includes("지원자가 불합격하였습니다.")) {
     return "CANDIDATE_REJECTED";
+  }
+  if (isCandidateInterviewAbsenceText(text)) {
+    return "CANDIDATE_INTERVIEW_ABSENCE";
   }
   if (text.includes("지원자로부터 메시지가 도착했습니다.")) {
     return "CANDIDATE_MESSAGE";

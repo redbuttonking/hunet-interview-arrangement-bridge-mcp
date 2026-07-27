@@ -439,7 +439,7 @@ export function createBridgeMcpServer(
     {
       title: "검토 대기 목록",
       description:
-        "평가 결과 미매핑, 면접관 미응답/불참 등 사람의 판단이 필요한 항목을 조회합니다.",
+        "평가 결과 미매핑, 면접관 미응답/불참, 후보자 인터뷰 불참 메시지 등 사람의 판단이 필요한 항목을 조회합니다.",
       inputSchema: {
         limit: z.number().int().min(1).max(200).default(100),
       },
@@ -532,6 +532,22 @@ export function createBridgeMcpServer(
   );
 
   server.registerTool(
+    "reprocess_candidate_interview_absence_notifications",
+    {
+      title: "기존 후보자 불참 알림 재처리",
+      description:
+        "새 감지 규칙이 적용되기 전에 저장된 나인하이어 후보자 메시지 중 ‘일정에 불참합니다’ 알림을 다시 처리합니다. 일정·회의실·Slack 메시지는 변경하지 않고 검토 건만 생성합니다.",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () => result(workflow.reprocessCandidateInterviewAbsenceNotifications()),
+  );
+
+  server.registerTool(
     "approve_interview_arrangement",
     {
       title: "면접 조율 시작 승인",
@@ -593,6 +609,32 @@ export function createBridgeMcpServer(
         resolution,
       });
     },
+  );
+
+  server.registerTool(
+    "resolve_candidate_interview_absence_review",
+    {
+      title: "후보자 인터뷰 불참 검토 처리",
+      description:
+        "후보자의 불참 메시지에 대해 기존 가능 시간으로 재조율, 면접관 일정 재수집 후 재조율, 인터뷰 취소, 보류 중 하나를 명시적으로 처리합니다. 재조율·취소 시에도 Slack 안내는 초안만 만들고 자동 발송하지 않습니다.",
+      inputSchema: {
+        reviewId: z.string().uuid(),
+        action: z.enum([
+          "RESCHEDULE_USING_EXISTING_AVAILABILITY",
+          "RESCHEDULE_WITH_NEW_AVAILABILITY",
+          "CANCEL",
+          "HOLD",
+        ]),
+        note: z.string().trim().min(1).max(500).optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    async (input) => result(workflow.resolveCandidateInterviewAbsenceReview(input)),
   );
 
   server.registerTool(
