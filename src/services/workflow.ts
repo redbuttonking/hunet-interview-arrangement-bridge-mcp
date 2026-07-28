@@ -332,6 +332,59 @@ export class WorkflowService {
     return plan;
   }
 
+  setCaseSequentialInterviewPlan(input: {
+    caseId: string;
+    sessions: Array<{ stepId: string; interviewerIds: string[] }>;
+  }) {
+    const interviewCase = this.db.getCase(input.caseId);
+    if (!interviewCase?.recruitmentRef) {
+      throw new Error("The case is missing its NineHire recruitment ID.");
+    }
+    if (!["READY_FOR_DRAFT", "DRAFT_CREATED"].includes(interviewCase.status)) {
+      throw new Error("Change an interview plan before sending an interviewer request.");
+    }
+    if (input.sessions.length < 2) {
+      throw new Error("A sequential interview requires at least two stages.");
+    }
+    if (new Set(input.sessions.map((session) => session.stepId)).size !== input.sessions.length) {
+      throw new Error("Each sequential interview stage can be selected only once.");
+    }
+    const template = this.db.getRecruitmentInterviewTemplate(
+      interviewCase.recruitmentRef,
+    );
+    if (!template) {
+      throw new Error("Approve the recruitment interview template before setting an exception.");
+    }
+    const sessions = input.sessions.map((session) => {
+      const step = template.steps.find((item) => item.stepId === session.stepId);
+      if (!step || session.interviewerIds.length === 0) {
+        throw new Error("Each sequential stage needs a configured step and at least one interviewer.");
+      }
+      return {
+        stepId: step.stepId,
+        stepName: step.name,
+        interviewerIds: [...new Set(session.interviewerIds)],
+      };
+    });
+    const interviewerIds = [...new Set(sessions.flatMap((session) => session.interviewerIds))];
+    this.db.setRequiredInterviewers(input.caseId, interviewerIds);
+    const plan = this.db.upsertCaseInterviewPlan({
+      caseId: input.caseId,
+      source: "CANDIDATE_OVERRIDE",
+      mode: "SEQUENTIAL",
+      stepIds: sessions.map((session) => session.stepId),
+      stepNames: sessions.map((session) => session.stepName),
+      interviewerIds,
+      sessions,
+      durationMinutes: sessions.length * 60,
+    });
+    this.db.addEvent(input.caseId, "CANDIDATE_SEQUENTIAL_INTERVIEW_CONFIGURED", "USER", {
+      sessions,
+      durationMinutes: plan.durationMinutes,
+    });
+    return plan;
+  }
+
   async ingestSlackNotification(input: {
     channelId: string;
     messageTs: string;

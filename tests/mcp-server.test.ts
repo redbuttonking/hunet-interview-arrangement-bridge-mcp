@@ -95,6 +95,9 @@ describe("bridge MCP server", () => {
       "set_case_combined_interview_plan",
     );
     expect(tools.tools.map((tool) => tool.name)).toContain(
+      "set_case_sequential_interview_plan",
+    );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
       "open_daou_office_login",
     );
     expect(tools.tools.map((tool) => tool.name)).toContain(
@@ -104,7 +107,16 @@ describe("bridge MCP server", () => {
       "suggest_interview_slots_with_rooms",
     );
     expect(tools.tools.map((tool) => tool.name)).toContain(
+      "suggest_sequential_interview_slots_with_rooms",
+    );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
+      "allocate_sequential_interview_room_slots",
+    );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
       "confirm_internal_interview_schedule",
+    );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
+      "confirm_sequential_interview_schedule",
     );
     expect(tools.tools.map((tool) => tool.name)).toContain(
       "create_interviewer_schedule_confirmation_draft",

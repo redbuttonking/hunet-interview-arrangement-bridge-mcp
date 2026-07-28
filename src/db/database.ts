@@ -149,9 +149,11 @@ export interface RoomAllocationRow {
   id: string;
   caseId: string;
   roomBlockId: string;
+  interviewStepId: string | null;
   date: string;
   startTime: string;
   endTime: string;
+  sequenceIndex: number;
   status: "ACTIVE" | "CANCELLED";
   createdAt: string;
   updatedAt: string;
@@ -200,7 +202,13 @@ export interface CaseBundle {
   drafts: DraftRow[];
 }
 
-export type InterviewPlanMode = "STANDARD" | "COMBINED";
+export type InterviewPlanMode = "STANDARD" | "COMBINED" | "SEQUENTIAL";
+
+export interface SequentialInterviewSession {
+  stepId: string;
+  stepName: string;
+  interviewerIds: string[];
+}
 
 export interface RecruitmentInterviewTemplateStep {
   stepId: string;
@@ -227,6 +235,7 @@ export interface CaseInterviewPlanRow {
   stepIds: string[];
   stepNames: string[];
   interviewerIds: string[];
+  sessions: SequentialInterviewSession[];
   durationMinutes: number;
   createdAt: string;
   updatedAt: string;
@@ -416,9 +425,11 @@ function toRoomAllocation(row: SqlRow): RoomAllocationRow {
     id: asString(row.id),
     caseId: asString(row.case_id),
     roomBlockId: asString(row.room_block_id),
+    interviewStepId: nullableString(row.interview_step_id),
     date: asString(row.date),
     startTime: asString(row.start_time),
     endTime: asString(row.end_time),
+    sequenceIndex: Number(row.sequence_index ?? 0),
     status: asString(row.status) as RoomAllocationRow["status"],
     createdAt: asString(row.created_at),
     updatedAt: asString(row.updated_at),
@@ -675,9 +686,11 @@ export class BridgeDatabase {
         id TEXT PRIMARY KEY,
         case_id TEXT NOT NULL REFERENCES interview_cases(id),
         room_block_id TEXT NOT NULL REFERENCES meeting_room_blocks(id),
+        interview_step_id TEXT,
         date TEXT NOT NULL,
         start_time TEXT NOT NULL,
         end_time TEXT NOT NULL,
+        sequence_index INTEGER NOT NULL DEFAULT 0,
         status TEXT NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -702,6 +715,7 @@ export class BridgeDatabase {
         step_ids_json TEXT NOT NULL,
         step_names_json TEXT NOT NULL,
         interviewer_ids_json TEXT NOT NULL,
+        sessions_json TEXT NOT NULL DEFAULT '[]',
         duration_minutes INTEGER NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -1856,6 +1870,7 @@ export class BridgeDatabase {
       stepIds: JSON.parse(asString(row.step_ids_json)) as string[],
       stepNames: JSON.parse(asString(row.step_names_json)) as string[],
       interviewerIds: JSON.parse(asString(row.interviewer_ids_json)) as string[],
+      sessions: JSON.parse(asString(row.sessions_json ?? "[]")) as SequentialInterviewSession[],
       durationMinutes: Number(row.duration_minutes),
       createdAt: asString(row.created_at),
       updatedAt: asString(row.updated_at),
@@ -1869,6 +1884,7 @@ export class BridgeDatabase {
     stepIds: string[];
     stepNames: string[];
     interviewerIds?: string[];
+    sessions?: SequentialInterviewSession[];
     durationMinutes: number;
   }): CaseInterviewPlanRow {
     if (input.stepIds.length === 0 || input.stepIds.length !== input.stepNames.length) {
@@ -1878,15 +1894,16 @@ export class BridgeDatabase {
     this.connection
       .prepare(`
         INSERT INTO case_interview_plans(
-          case_id, source, mode, step_ids_json, step_names_json, interviewer_ids_json,
+          case_id, source, mode, step_ids_json, step_names_json, interviewer_ids_json, sessions_json,
           duration_minutes, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(case_id) DO UPDATE SET
           source = excluded.source,
           mode = excluded.mode,
           step_ids_json = excluded.step_ids_json,
           step_names_json = excluded.step_names_json,
           interviewer_ids_json = excluded.interviewer_ids_json,
+          sessions_json = excluded.sessions_json,
           duration_minutes = excluded.duration_minutes,
           updated_at = excluded.updated_at
       `)
@@ -1897,6 +1914,7 @@ export class BridgeDatabase {
         JSON.stringify(input.stepIds),
         JSON.stringify(input.stepNames),
         JSON.stringify(input.interviewerIds ?? []),
+        JSON.stringify(input.sessions ?? []),
         input.durationMinutes,
         now,
         now,
@@ -2370,6 +2388,123 @@ export class BridgeDatabase {
     return this.listRoomAllocations(input.caseId).find((row) => row.id === id)!;
   }
 
+  allocateSequentialRoomBlocks(input: {
+    caseId: string;
+    sessions: Array<{ stepId: string; roomBlockId: string; startTime: string; endTime: string }>;
+  }): RoomAllocationRow[] {
+    const interviewCase = this.getCase(input.caseId);
+    const plan = this.getCaseInterviewPlan(input.caseId);
+    if (!interviewCase || !plan || plan.mode !== "SEQUENTIAL") {
+      throw new Error("A sequential interview plan is required before allocating rooms.");
+    }
+    if (interviewCase.status !== "READY_TO_SCHEDULE") {
+      throw new Error("Wait for every required interviewer response before allocating a sequential schedule.");
+    }
+    if (input.sessions.length !== plan.sessions.length) {
+      throw new Error("Allocate one room slot for every sequential interview stage.");
+    }
+    const configured = new Set(plan.sessions.map((session) => session.stepId));
+    if (
+      new Set(input.sessions.map((session) => session.stepId)).size !== input.sessions.length ||
+      input.sessions.some((session) => !configured.has(session.stepId))
+    ) {
+      throw new Error("Allocated stages do not match the sequential interview plan.");
+    }
+    if (this.listRoomAllocations(input.caseId).some((allocation) => allocation.status === "ACTIVE")) {
+      throw new Error("This case already has active room allocations.");
+    }
+    const allocations: RoomAllocationRow[] = [];
+    this.transaction(() => {
+      let previousEnd: string | undefined;
+      let expectedDate: string | undefined;
+      for (const [sequenceIndex, session] of input.sessions.entries()) {
+        if (timeMinutes(session.endTime) - timeMinutes(session.startTime) !== 60) {
+          throw new Error("Each sequential interview stage must be exactly 60 minutes.");
+        }
+        if (previousEnd && session.startTime !== previousEnd) {
+          throw new Error("Sequential interview stages must be contiguous.");
+        }
+        const blockRow = this.connection
+          .prepare("SELECT * FROM meeting_room_blocks WHERE id = ? AND active = 1")
+          .get(session.roomBlockId) as SqlRow | undefined;
+        if (!blockRow) throw new Error("Active meeting room block not found.");
+        const block = toMeetingRoomBlock(blockRow);
+        if (
+          (expectedDate && block.date !== expectedDate) ||
+          timeMinutes(session.startTime) < timeMinutes(block.startTime) ||
+          timeMinutes(session.endTime) > timeMinutes(block.endTime)
+        ) {
+          throw new Error("Each room slot must fit its meeting room block on the same date.");
+        }
+        const conflict = this.connection
+          .prepare("SELECT id FROM room_allocations WHERE room_block_id = ? AND status = 'ACTIVE' AND start_time < ? AND end_time > ? LIMIT 1")
+          .get(session.roomBlockId, session.endTime, session.startTime) as SqlRow | undefined;
+        if (conflict) throw new Error("A selected meeting room slot is already allocated.");
+        const id = randomUUID();
+        const now = new Date().toISOString();
+        this.connection
+          .prepare(`INSERT INTO room_allocations(
+            id, case_id, room_block_id, interview_step_id, date, start_time, end_time, sequence_index,
+            status, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)`)
+          .run(id, input.caseId, block.id, session.stepId, block.date, session.startTime, session.endTime, sequenceIndex, now, now);
+        allocations.push({
+          id, caseId: input.caseId, roomBlockId: block.id, interviewStepId: session.stepId, date: block.date,
+          startTime: session.startTime, endTime: session.endTime, sequenceIndex,
+          status: "ACTIVE", createdAt: now, updatedAt: now,
+        });
+        previousEnd = session.endTime;
+        expectedDate = block.date;
+      }
+      this.addEvent(input.caseId, "SEQUENTIAL_ROOMS_ALLOCATED", "USER", { sessions: input.sessions });
+    });
+    return allocations;
+  }
+
+  confirmSequentialInternalSchedule(caseId: string): ConfirmedInterviewScheduleRow {
+    const interviewCase = this.getCase(caseId);
+    const plan = this.getCaseInterviewPlan(caseId);
+    if (!interviewCase || !plan || plan.mode !== "SEQUENTIAL") {
+      throw new Error("A sequential interview plan is required before confirming the schedule.");
+    }
+    if (interviewCase.status !== "READY_TO_SCHEDULE") {
+      throw new Error("Only a ready sequential interview can be internally confirmed.");
+    }
+    const allocations = this.listRoomAllocations(caseId)
+      .filter((allocation) => allocation.status === "ACTIVE")
+      .sort((left, right) => left.sequenceIndex - right.sequenceIndex);
+    if (allocations.length !== plan.sessions.length) {
+      throw new Error("Allocate every sequential interview room slot before confirming.");
+    }
+    const first = allocations[0]!;
+    const last = allocations.at(-1)!;
+    if (allocations.some((item) => item.date !== first.date) || allocations.some((item, index) => index > 0 && item.startTime !== allocations[index - 1]!.endTime)) {
+      throw new Error("Sequential room allocations must be on one date and contiguous.");
+    }
+    const roomNames = allocations.map((allocation) => {
+      const row = this.connection.prepare("SELECT room_name FROM meeting_room_blocks WHERE id = ?")
+        .get(allocation.roomBlockId) as SqlRow;
+      return asString(row.room_name);
+    });
+    const now = new Date().toISOString();
+    this.connection.prepare(`
+      UPDATE interview_cases
+      SET status = 'AWAITING_CANDIDATE_CONFIRMATION', scheduled_room_allocation_id = ?,
+          scheduled_room_name = ?, scheduled_date = ?, scheduled_start_time = ?,
+          scheduled_end_time = ?, internal_schedule_confirmed_at = ?, updated_at = ?
+      WHERE id = ?
+    `).run(first.id, roomNames.join(" → "), first.date, first.startTime, last.endTime, now, now, caseId);
+    this.addEvent(caseId, "SEQUENTIAL_INTERNAL_SCHEDULE_CONFIRMED", "USER", {
+      sessions: allocations.map((allocation, index) => ({
+        stepId: allocation.interviewStepId,
+        roomName: roomNames[index],
+        startTime: allocation.startTime,
+        endTime: allocation.endTime,
+      })),
+    });
+    return this.getConfirmedInterviewSchedule(caseId)!;
+  }
+
   confirmInternalSchedule(caseId: string): ConfirmedInterviewScheduleRow {
     const interviewCase = this.getCase(caseId);
     if (!interviewCase) throw new Error(`Case not found: ${caseId}`);
@@ -2530,22 +2665,22 @@ export class BridgeDatabase {
 
     this.transaction(() => {
       const now = new Date().toISOString();
-      if (previousSchedule.roomAllocationId) {
-        const allocationResult = this.connection
+      const activeAllocations = this.connection
+        .prepare(
+          "SELECT id FROM room_allocations WHERE case_id = ? AND status = 'ACTIVE'",
+        )
+        .all(input.caseId) as SqlRow[];
+      for (const allocation of activeAllocations) {
+        const allocationId = asString(allocation.id);
+        this.connection
           .prepare(
-            `
-              UPDATE room_allocations
-              SET status = 'CANCELLED', updated_at = ?
-              WHERE id = ? AND case_id = ? AND status = 'ACTIVE'
-            `,
+            "UPDATE room_allocations SET status = 'CANCELLED', updated_at = ? WHERE id = ?",
           )
-          .run(now, previousSchedule.roomAllocationId, input.caseId);
-        if (Number(allocationResult.changes) === 1) {
-          this.addEvent(input.caseId, "ROOM_ALLOCATION_CANCELLED", "USER", {
-            allocationId: previousSchedule.roomAllocationId,
-            reason: "SCHEDULE_REOPENED",
-          });
-        }
+          .run(now, allocationId);
+        this.addEvent(input.caseId, "ROOM_ALLOCATION_CANCELLED", "USER", {
+          allocationId,
+          reason: "SCHEDULE_REOPENED",
+        });
       }
 
       cancelledDraftIds = this.cancelUnsentDrafts(
@@ -2751,7 +2886,7 @@ export class BridgeDatabase {
     const allocation = toRoomAllocation(row);
     if (allocation.status === "CANCELLED") return allocation;
     const interviewCase = this.getCase(caseId);
-    if (interviewCase?.scheduledRoomAllocationId === allocationId) {
+    if (interviewCase?.scheduledRoomAllocationId && allocation.status === "ACTIVE") {
       throw new Error(
         "The room allocation is part of an internally confirmed schedule. Reopen the schedule before cancelling it.",
       );
@@ -3448,6 +3583,52 @@ export class BridgeDatabase {
       this.connection
         .prepare(
           "INSERT INTO schema_migrations(version, applied_at) VALUES (11, datetime('now'))",
+        )
+        .run();
+    }
+
+    const versionTwelve = this.connection
+      .prepare("SELECT version FROM schema_migrations WHERE version = 12")
+      .get() as SqlRow | undefined;
+    if (!versionTwelve) {
+      const allocationColumns = this.connection
+        .prepare("PRAGMA table_info(room_allocations)")
+        .all() as SqlRow[];
+      if (!allocationColumns.some((column) => asString(column.name) === "sequence_index")) {
+        this.connection.exec(
+          "ALTER TABLE room_allocations ADD COLUMN sequence_index INTEGER NOT NULL DEFAULT 0",
+        );
+      }
+      const planColumns = this.connection
+        .prepare("PRAGMA table_info(case_interview_plans)")
+        .all() as SqlRow[];
+      if (!planColumns.some((column) => asString(column.name) === "sessions_json")) {
+        this.connection.exec(
+          "ALTER TABLE case_interview_plans ADD COLUMN sessions_json TEXT NOT NULL DEFAULT '[]'",
+        );
+      }
+      this.connection
+        .prepare(
+          "INSERT INTO schema_migrations(version, applied_at) VALUES (12, datetime('now'))",
+        )
+        .run();
+    }
+
+    const versionThirteen = this.connection
+      .prepare("SELECT version FROM schema_migrations WHERE version = 13")
+      .get() as SqlRow | undefined;
+    if (!versionThirteen) {
+      const allocationColumns = this.connection
+        .prepare("PRAGMA table_info(room_allocations)")
+        .all() as SqlRow[];
+      if (!allocationColumns.some((column) => asString(column.name) === "interview_step_id")) {
+        this.connection.exec(
+          "ALTER TABLE room_allocations ADD COLUMN interview_step_id TEXT",
+        );
+      }
+      this.connection
+        .prepare(
+          "INSERT INTO schema_migrations(version, applied_at) VALUES (13, datetime('now'))",
         )
         .run();
     }

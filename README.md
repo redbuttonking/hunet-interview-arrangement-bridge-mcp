@@ -125,6 +125,16 @@ Codex는 이 서버의 MCP 도구를 호출하고, 로컬 백그라운드 워커
 - 후보자별 긴급 예외는 `set_case_combined_interview_plan`으로 설정한다. 두 단계 이상을 60분으로 통합하고, 이번 후보자에게 실제로 참석할 면접관만 필수로 지정한다.
 - 통합 예외는 면접관 일정 요청을 보내기 전까지만 변경할 수 있으며, 나인하이어의 단계 이동이나 합격 처리는 자동으로 변경하지 않는다.
 
+### 같은 날 연속 면접
+
+1차와 2차처럼 여러 단계를 같은 날 이어서 진행해야 하면 `set_case_sequential_interview_plan`으로 원래 진행 순서와 단계별 실제 참석 면접관을 설정한다.
+
+- 각 단계는 60분이며, 1차 면접관과 2차 면접관의 가용시간은 각각 독립적으로 계산한다. 어느 한 면접관에게 2시간 연속 가능 시간을 요구하지 않는다.
+- `suggest_sequential_interview_slots_with_rooms`는 기본 순서인 1차 → 2차 조합을 먼저 찾는다. 이 순서가 가능한 시간과 회의실 조합을 하나도 만들 수 없을 때만 2차 → 1차 역순을 제안한다.
+- 같은 회의실에서 연속 진행할 수 있는 경우를 우선한다. 같은 방이 없으면 1차 `행복룸 13:00–14:00`, 2차 `열정룸 14:00–15:00`처럼 단계별로 다른 면접실을 연달아 사용할 수 있다.
+- 사용자가 추천안을 확인한 뒤 `allocate_sequential_interview_room_slots`로 각 단계의 회의실을 로컬에 배정하고, `confirm_sequential_interview_schedule`로 내부 일정을 확정한다. 이 과정도 다우오피스 예약과 후보자 연락을 변경하지 않는다.
+- 배정 결과에는 단계, 시간, 회의실을 모두 저장한다. 재조율 또는 취소 시에는 모든 단계의 로컬 배정을 함께 해제하지만, 다우오피스의 원래 예약 블록은 유지한다.
+
 ## 중요한 범위 구분
 
 나인하이어 공식 설명에 따르면 지원자 단계 이동, 불합격 처리, 안내 메일 발송, 면접 일정 조율 같은 규칙 기반 작업은 나인하이어 MCP가 아니라 나인하이어 워크플로우 자동화의 범위입니다. 따라서 이 프로젝트는 다음처럼 역할을 나눕니다.
@@ -347,10 +357,14 @@ tool_timeout_sec = 60.0
 | `set_interviewer_required` | 필수/선택 면접관 변경 | 로컬 상태 갱신 |
 | `set_case_schedule_rules` | 소요시간·제안 날짜 변경 | 로컬 상태 갱신 |
 | `set_case_combined_interview_plan` | 후보자별 통합 면접과 실제 참석 면접관 지정 | 로컬 상태 갱신 |
+| `set_case_sequential_interview_plan` | 후보자별 같은 날 연속 면접의 단계·단계별 면접관 지정 | 로컬 상태 갱신 |
 | `record_manual_availability` | 예외 시간 직접 기록 | 로컬 상태 갱신 |
 | `create_availability_recovery_draft` | 워커 중단 후 미제출 면접관 재요청 초안 생성 | 발송 없음 |
 | `create_interviewer_request_draft` | Slack 메시지 초안 생성 | 발송 없음 |
+| `suggest_sequential_interview_slots_with_rooms` | 단계별 가용시간, 정상·역순, 동일·분리 회의실을 반영한 연속 면접 추천 | 없음 |
+| `allocate_sequential_interview_room_slots` | 연속 면접의 단계별 회의실 시간대 로컬 배정 | 로컬 상태 갱신 |
 | `confirm_internal_interview_schedule` | 회의실 배정 기반 내부 일정 확정 | 로컬 상태·이벤트 갱신 |
+| `confirm_sequential_interview_schedule` | 단계별 회의실 배정 기반 연속 면접 내부 일정 확정 | 로컬 상태·이벤트 갱신 |
 | `create_interviewer_schedule_confirmation_draft` | 면접관 최종 일정 안내 초안 생성 | 발송 없음 |
 | `list_pending_message_drafts` | 승인 대기 초안 조회 | 없음 |
 | `approve_and_send_interviewer_request` | 초안 승인 후 Slack 발송 | **Slack 메시지 발송** |

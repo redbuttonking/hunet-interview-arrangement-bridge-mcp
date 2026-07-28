@@ -20,6 +20,7 @@ import {
   type SlackIdentityResolver,
 } from "../services/workflow.js";
 import { suggestInterviewSlotsWithRooms } from "../services/room-scheduling.js";
+import { suggestSequentialInterviewSlotsWithRooms } from "../services/sequential-scheduling.js";
 import { SlackReconciler } from "../slack/reconciler.js";
 
 function result(value: unknown) {
@@ -258,6 +259,23 @@ export function createBridgeMcpServer(
   );
 
   server.registerTool(
+    "suggest_sequential_interview_slots_with_rooms",
+    {
+      title: "연속 면접 시간과 회의실 추천",
+      description:
+        "단계별 면접관의 가용시간을 각각 계산합니다. 1차→2차 순서를 우선 추천하고, 가능한 조합이 없을 때만 역순을 제안합니다. 같은 회의실 연속 배정을 우선하며 불가하면 단계별 다른 회의실을 제안합니다.",
+      inputSchema: { caseId: z.string().uuid() },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ caseId }) => result(suggestSequentialInterviewSlotsWithRooms(db, caseId)),
+  );
+
+  server.registerTool(
     "allocate_interview_room_slot",
     {
       title: "면접실 내부 시간대 배정",
@@ -280,6 +298,31 @@ export function createBridgeMcpServer(
   );
 
   server.registerTool(
+    "allocate_sequential_interview_room_slots",
+    {
+      title: "연속 면접 단계별 회의실 배정",
+      description:
+        "추천된 연속 면접의 각 60분 단계에 회의실을 로컬로 배정합니다. 같은 회의실 또는 단계별 다른 회의실을 사용할 수 있으며 다우오피스 예약은 변경하지 않습니다.",
+      inputSchema: {
+        caseId: z.string().uuid(),
+        sessions: z.array(z.object({
+          stepId: z.string().min(1),
+          roomBlockId: z.string().uuid(),
+          startTime: z.string().regex(/^\d{2}:\d{2}$/),
+          endTime: z.string().regex(/^\d{2}:\d{2}$/),
+        })).min(2).max(10),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (input) => result(db.allocateSequentialRoomBlocks(input)),
+  );
+
+  server.registerTool(
     "confirm_internal_interview_schedule",
     {
       title: "인터뷰 내부 일정 확정",
@@ -294,6 +337,23 @@ export function createBridgeMcpServer(
       },
     },
     async ({ caseId }) => result(workflow.confirmInternalSchedule(caseId)),
+  );
+
+  server.registerTool(
+    "confirm_sequential_interview_schedule",
+    {
+      title: "연속 면접 내부 일정 확정",
+      description:
+        "단계별 회의실 배정을 하나의 연속 면접 일정으로 내부 확정합니다. 후보자·Slack·나인하이어에는 전송하지 않습니다.",
+      inputSchema: { caseId: z.string().uuid() },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ caseId }) => result(db.confirmSequentialInternalSchedule(caseId)),
   );
 
   server.registerTool(
@@ -1022,6 +1082,29 @@ export function createBridgeMcpServer(
       },
     },
     async (input) => result(workflow.setCaseCombinedInterviewPlan(input)),
+  );
+
+  server.registerTool(
+    "set_case_sequential_interview_plan",
+    {
+      title: "연속 면접 단계별 계획 적용",
+      description:
+        "같은 날 이어서 진행할 면접 단계를 원래 순서대로 설정하고, 단계별 실제 참석 면접관을 지정합니다. 각 단계의 면접관 가용시간은 서로 독립적으로 계산합니다.",
+      inputSchema: {
+        caseId: z.string().uuid(),
+        sessions: z.array(z.object({
+          stepId: z.string().min(1),
+          interviewerIds: z.array(z.string().uuid()).min(1).max(30),
+        })).min(2).max(10),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (input) => result(workflow.setCaseSequentialInterviewPlan(input)),
   );
 
   server.registerTool(
