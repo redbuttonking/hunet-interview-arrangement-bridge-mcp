@@ -1,4 +1,4 @@
-// 연속 면접의 단계별 면접관 가용시간과 회의실 배정을 추천한다.
+// 연속 인터뷰의 단계별 면접관 가용시간과 회의실 배정을 추천한다.
 import type { BridgeDatabase, SequentialInterviewSession } from "../db/database.js";
 import type { TimeSlot } from "../domain/types.js";
 

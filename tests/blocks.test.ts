@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { buildAvailabilityModal } from "../src/slack/blocks.js";
+import {
+  buildAvailabilityModal,
+  buildRequestMessage,
+  buildScheduleConfirmationMessage,
+} from "../src/slack/blocks.js";
 import type {
+  CaseBundle,
+  CaseInterviewPlanRow,
+  ConfirmedInterviewScheduleRow,
   InterviewCaseRow,
   InterviewerRow,
 } from "../src/db/database.js";
@@ -66,5 +73,78 @@ describe("availability modal", () => {
       expect(block.element.options).toHaveLength(10);
     }
     expect(modal.blocks.length).toBeLessThanOrEqual(100);
+  });
+
+  it("shows each sequential interview stage and its assigned interviewer", () => {
+    const secondInterviewer: InterviewerRow = {
+      ...interviewer,
+      id: "33333333-3333-4333-8333-333333333333",
+      slackUserId: "U2",
+      displayName: "면접관 2",
+    };
+    const bundle: CaseBundle = {
+      interviewCase,
+      interviewers: [interviewer, secondInterviewer],
+      availability: [],
+      drafts: [],
+    };
+    const plan: CaseInterviewPlanRow = {
+      caseId: interviewCase.id,
+      source: "CANDIDATE_OVERRIDE",
+      mode: "SEQUENTIAL",
+      stepIds: ["S1", "S2"],
+      stepNames: ["1차 인터뷰", "2차 인터뷰"],
+      interviewerIds: [interviewer.id, secondInterviewer.id],
+      sessions: [
+        {
+          stepId: "S1",
+          stepName: "1차 인터뷰",
+          interviewerIds: [interviewer.id],
+        },
+        {
+          stepId: "S2",
+          stepName: "2차 인터뷰",
+          interviewerIds: [secondInterviewer.id],
+        },
+      ],
+      durationMinutes: 120,
+      createdAt: "2026-07-24T00:00:00.000Z",
+      updatedAt: "2026-07-24T00:00:00.000Z",
+    };
+    const schedule: ConfirmedInterviewScheduleRow = {
+      caseId: interviewCase.id,
+      roomAllocationId: null,
+      date: "2026-07-30",
+      startTime: "13:00",
+      endTime: "15:00",
+      roomName: "행복룸 → 열정룸",
+      confirmedAt: "2026-07-24T00:00:00.000Z",
+    };
+
+    const request = buildRequestMessage(bundle, { plan });
+    const confirmation = buildScheduleConfirmationMessage(bundle, schedule, {
+      sequentialSessions: [
+        {
+          ...plan.sessions[0]!,
+          startTime: "13:00",
+          endTime: "14:00",
+          roomName: "행복룸",
+        },
+        {
+          ...plan.sessions[1]!,
+          startTime: "14:00",
+          endTime: "15:00",
+          roomName: "열정룸",
+        },
+      ],
+    });
+
+    expect(JSON.stringify(request.blocks)).toContain("단계별 인터뷰 및 면접관");
+    expect(JSON.stringify(request.blocks)).toContain("1차 인터뷰");
+    expect(JSON.stringify(request.blocks)).toContain("<@U1>");
+    expect(JSON.stringify(request.blocks)).toContain("<@U2>");
+    expect(JSON.stringify(confirmation.blocks)).toContain("단계별 인터뷰 일정");
+    expect(JSON.stringify(confirmation.blocks)).toContain("13:00~14:00 · 행복룸");
+    expect(JSON.stringify(confirmation.blocks)).toContain("14:00~15:00 · 열정룸");
   });
 });

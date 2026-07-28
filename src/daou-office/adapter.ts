@@ -1,4 +1,4 @@
-// 인증된 전용 Edge 브라우저를 통해 다우오피스 면접실 예약 블록을 읽는다.
+// 인증된 전용 Edge 브라우저를 통해 다우오피스 인터뷰 회의실 예약 블록을 읽는다.
 import { chromium, type Page } from "playwright-core";
 import type { AppConfig } from "../config.js";
 import {

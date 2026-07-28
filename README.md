@@ -1,24 +1,28 @@
 # Interview Arrangement Bridge MCP
 
-## 기본 면접 흐름과 운영 사전점검
+## 기본 인터뷰 흐름과 운영 사전점검
 
 채용별 기본 흐름은 `approve_recruitment_interview_template`의 `routes`로 승인한다. 흐름은 시작 단계와 포함 단계를 연결하며, 후보자가 시작 단계에 도달했을 때 자동 적용한다.
 
-- `STANDARD`는 한 단계의 60분 면접이다.
-- `COMBINED`는 여러 단계 면접관이 한 시간에 함께 참석하는 통합 면접이다.
+- `STANDARD`는 한 단계의 60분 인터뷰다.
+- `COMBINED`는 여러 단계 면접관이 한 시간에 함께 참석하는 통합 인터뷰다.
 - `SEQUENTIAL`은 여러 단계를 같은 날 60분씩 원래 칸반 순서대로 진행한다.
 
-예를 들어 `1차 → 2차` 연속 흐름은 1차를 시작 단계로 둔다. 2차는 별도의 자동 조율 시작 단계로 만들지 않아 중복 조율 건이 생기지 않는다. 다만 나인하이어 참여자 목록만으로는 단계별 실제 면접관을 판별할 수 없으므로, 연속 면접은 Slack 요청 초안 전에 `set_case_sequential_interview_plan`으로 각 단계 참석자를 지정해야 한다.
+예를 들어 `1차 → 2차` 연속 흐름은 1차를 시작 단계로 둔다. 2차는 별도의 자동 조율 시작 단계로 만들지 않아 중복 조율 건이 생기지 않는다. 다만 나인하이어 참여자 목록만으로는 단계별 실제 면접관을 판별할 수 없으므로, 연속 인터뷰는 Slack 요청 초안 전에 `set_case_sequential_interview_plan`으로 각 단계 참석자를 지정해야 한다.
 
 `get_operational_readiness`는 로컬 DB, 워커, Slack·나인하이어 설정, 마지막 동기화 시각, 다우오피스 전용 브라우저 상태를 점검한다. 기본 조회는 로컬 정보만 읽고, `checkExternal: true`일 때만 Slack 인증과 나인하이어 도구 목록을 읽기 전용으로 확인한다. 다우오피스 로그인 여부는 실제 회의실 동기화 시점에 검증한다.
 
-`get_interview_operations_dashboard`는 기존 운영 현황 외에 면접 방식별 건수, 단계별 면접관 지정이 필요한 연속 면접 건수, 채용별 상태·미응답 집계, 회의실별 로컬 배정 건수와 시간 합계를 반환한다. 웹 대시보드는 아직 만들지 않으며, 이 응답을 이후 화면의 기준 데이터로 사용한다.
+`get_interview_operations_dashboard`는 기존 운영 현황 외에 인터뷰 방식별 건수, 단계별 면접관 지정이 필요한 연속 인터뷰 건수, 채용별 상태·미응답 집계, 회의실별 로컬 배정 건수와 시간 합계를 반환한다. 웹 대시보드는 아직 만들지 않으며, 이 응답을 이후 화면의 기준 데이터로 사용한다.
+
+### 단계별 Slack 안내
+
+연속 인터뷰의 Slack 일정 요청 초안에는 단계별 실제 면접관을 표시한다. 내부 일정 확정 안내 초안에는 각 단계의 시간·회의실·면접관을 표시한다. 단일·통합 인터뷰의 기존 안내 형식과 사용자 승인 후 발송 방식은 유지한다.
 
 새 MCP 도구는 `get_operational_readiness`다.
 
 ## 일정 변경과 취소
 
-확정된 면접의 변경과 취소는 나인하이어나 Slack에 자동으로 전송하지 않습니다. 담당자가 MCP에서 전환하고, 생성된 Slack 안내 초안을 검토·승인한 경우에만 발송합니다.
+확정된 인터뷰의 변경과 취소는 나인하이어나 Slack에 자동으로 전송하지 않습니다. 담당자가 MCP에서 전환하고, 생성된 Slack 안내 초안을 검토·승인한 경우에만 발송합니다.
 
 ### 일정 재조율
 
@@ -26,14 +30,14 @@
 
 - `availabilityPolicy: REUSE`는 기존 면접관 가능 시간을 그대로 사용해 새 시간과 회의실을 다시 추천합니다.
 - `availabilityPolicy: RECOLLECT`는 기존 가능 시간을 비우고 면접관에게 새 일정 입력 요청을 보냅니다. 이전 Slack 버튼과 모달 응답은 재조율 회차가 달라져 반영되지 않습니다.
-- 기존 로컬 면접실 배정과 미발송 안내 초안은 취소합니다. 다우오피스에 미리 잡아 둔 예약 블록은 변경하지 않습니다.
+- 기존 로컬 인터뷰 회의실 배정과 미발송 안내 초안은 취소합니다. 다우오피스에 미리 잡아 둔 예약 블록은 변경하지 않습니다.
 - 이전 최종 일정 안내가 발송된 건이면 `SCHEDULE_CHANGE` 초안이 함께 생성됩니다. `approve_and_send_interviewer_schedule_update`로만 발송합니다.
 
 ### 인터뷰 취소
 
 `cancel_interview_arrangement`를 사용합니다.
 
-- 로컬 면접실 배정, 미발송 초안, 미발송 리마인더를 정리하고 건 상태를 `CANCELLED`로 기록합니다.
+- 로컬 인터뷰 회의실 배정, 미발송 초안, 미발송 리마인더를 정리하고 건 상태를 `CANCELLED`로 기록합니다.
 - 이전 최종 일정 안내가 발송된 건이면 `SCHEDULE_CANCELLATION` 초안이 생성됩니다. 검토 후 `approve_and_send_interviewer_schedule_update`로 발송합니다.
 - 두 도구 모두 다우오피스 예약이나 나인하이어의 후보자 일정은 변경하지 않습니다.
 
@@ -80,7 +84,7 @@ Slack 알림 채널 조회와 나인하이어 평가표 조회가 일시적으�
 
 ## 다우오피스 전용 브라우저 프로필
 
-다우오피스는 예약을 생성하거나 수정하지 않고, 면접실 예약 블록을 읽는 용도로만 연결한다. 개인 브라우저와 분리된 Microsoft Edge 프로필을 사용한다.
+다우오피스는 예약을 생성하거나 수정하지 않고, 인터뷰 회의실 예약 블록을 읽는 용도로만 연결한다. 개인 브라우저와 분리된 Microsoft Edge 프로필을 사용한다.
 
 1. MCP에서 `open_daou_office_login`을 실행하거나 `npm run daou:login`을 실행한다.
 2. 새로 열린 Edge 창에서 다우오피스에 직접 로그인한다. 비밀번호는 `.env`나 소스 코드에 저장하지 않는다.
@@ -90,13 +94,13 @@ Slack 알림 채널 조회와 나인하이어 평가표 조회가 일시적으�
 
 다우오피스 연동은 다음 순서로 사용한다.
 
-1. `sync_daou_meeting_room_blocks`로 면접 건의 제안 날짜에 예약 블록을 읽는다.
+1. `sync_daou_meeting_room_blocks`로 인터뷰 건의 제안 날짜에 예약 블록을 읽는다.
 2. `suggest_interview_slots_with_rooms`로 면접관 가능 시간과 회의실을 함께 추천받는다.
 3. 사용자가 날짜·시간·회의실을 확인한 뒤에만 `allocate_interview_room_slot`으로 로컬 내부 배정을 확정한다.
 4. `confirm_internal_interview_schedule`로 내부 일정 확정을 기록한다. 이때 상태는 `AWAITING_CANDIDATE_CONFIRMATION`이며 후보자에게 확정 안내를 보낸 상태는 아니다.
 5. `create_interviewer_schedule_confirmation_draft`로 면접관 안내 초안을 만들고, 검토 후 `approve_and_send_interviewer_schedule_confirmation`으로만 Slack에 발송한다.
 
-내부 배정은 다우오피스의 기존 3시간 예약 블록을 수정하지 않는다. 같은 블록 안에서 1시간 면접 세 건 또는 30분 면접 여섯 건처럼 겹치지 않는 시간만 로컬 DB에 기록한다.
+내부 배정은 다우오피스의 기존 3시간 예약 블록을 수정하지 않는다. 같은 블록 안에서 1시간 인터뷰 세 건 또는 30분 인터뷰 여섯 건처럼 겹치지 않는 시간만 로컬 DB에 기록한다.
 다우오피스 예약과 나인하이어의 후보자 메시지는 이 과정에서 생성·변경하지 않는다.
 
 나인하이어의 평가 완료 알림을 감지하고, 완료된 평가표 요약을 사용자에게 보여준 뒤 승인된 지원자의 면접관 가용시간을 Slack에서 수집하는 **로컬 업무형 브릿지 MCP 서버**입니다.
@@ -110,7 +114,7 @@ Codex는 이 서버의 MCP 도구를 호출하고, 로컬 백그라운드 워커
 - Slack 비공개 나인하이어 알림 채널을 실시간 수신하고 5분마다 누락 메시지를 재확인
 - `서류 평가가 완료되었습니다.`, `평가가 완료되었습니다.`, `평가표 제출이 완료되었습니다.` 알림만 조율 시작 후보로 분류하고, 나인하이어의 실제 평가표 완료 상태를 다시 확인
 - 나인하이어 MCP에서 완료된 평가표·평가자·의견·선택 점수를 조회. 최종 평가에 합격이 하나라도 있으면 검토 대기 건 생성하고, 합격 없이 불합격·보류만 있으면 조율 대상에서 제외
-- 사용자가 MCP에서 `면접 조율 시작`을 승인한 경우에만 인터뷰 조율 건 생성
+- 사용자가 MCP에서 `인터뷰 조율 시작`을 승인한 경우에만 인터뷰 조율 건 생성
 - 사용자가 나인하이어에서 후보자 일정 제안을 수동 발송한 뒤, Slack의 `일정이 확정되었습니다` 알림에서 후보자·채용·날짜·시간이 내부 일정과 일치하면 최종 확정 처리
 - 서버 밖에서 조율되고 후보자 수락까지 끝난 일정은 `record_manual_confirmed_interview`로 수동 최종 확정 이력에 기록. Slack·나인하이어·다우오피스에는 변경을 전송하지 않음
 - Slack 알림의 장소는 회사 주소로 보존하며 회의실 일치 조건에는 사용하지 않음. 후보자·채용 식별 또는 날짜·시간이 다르면 자동 확정하지 않고 검토 대기 처리
@@ -131,29 +135,29 @@ Codex는 이 서버의 MCP 도구를 호출하고, 로컬 백그라운드 워커
 - 중복 이벤트 방지, 상태 이력, 검토 대기 사유, 메시지 발송 상태 저장
 - 워커 중단 감지와 미제출 면접관 대상 재제출 요청 초안
 
-## 채용별 면접 단계 템플릿
+## 채용별 인터뷰 단계 템플릿
 
-나인하이어의 채용 칸반 단계는 `get_recruitment.steps`에서 제목·순서·현재 인원 수와 함께 읽는다. `preview_recruitment_interview_template`로 초안을 확인한 뒤 `approve_recruitment_interview_template`에서 실제 면접 단계만 승인한다.
+나인하이어의 채용 칸반 단계는 `get_recruitment.steps`에서 제목·순서·현재 인원 수와 함께 읽는다. `preview_recruitment_interview_template`로 초안을 확인한 뒤 `approve_recruitment_interview_template`에서 실제 인터뷰 단계만 승인한다.
 
-- 승인된 모든 기본 면접 시간은 60분이다. CEO 인터뷰도 60분으로 동일하게 적용한다.
-- 칸반 단계가 `실무자, 임원 면접`처럼 통합 면접인 경우 `COMBINED`로 승인한다. 이는 1차·2차 면접관이 한 시간에 모두 참석하는 단일 면접이다.
+- 승인된 모든 기본 인터뷰 시간은 60분이다. CEO 인터뷰도 60분으로 동일하게 적용한다.
+- 칸반 단계가 `실무자, 임원 인터뷰`처럼 통합 인터뷰인 경우 `COMBINED`로 승인한다. 이는 1차·2차 면접관이 한 시간에 모두 참석하는 단일 인터뷰다.
 - 템플릿은 나인하이어 채용 ID에 연결한다. 칸반 구성이 바뀌면 미리 보기 결과가 `requiresApproval: true`가 되어 재승인을 요구한다.
 - 후보자별 긴급 예외는 `set_case_combined_interview_plan`으로 설정한다. 두 단계 이상을 60분으로 통합하고, 이번 후보자에게 실제로 참석할 면접관만 필수로 지정한다.
 - 통합 예외는 면접관 일정 요청을 보내기 전까지만 변경할 수 있으며, 나인하이어의 단계 이동이나 합격 처리는 자동으로 변경하지 않는다.
 
-### 같은 날 연속 면접
+### 같은 날 연속 인터뷰
 
 1차와 2차처럼 여러 단계를 같은 날 이어서 진행해야 하면 `set_case_sequential_interview_plan`으로 원래 진행 순서와 단계별 실제 참석 면접관을 설정한다.
 
 - 각 단계는 60분이며, 1차 면접관과 2차 면접관의 가용시간은 각각 독립적으로 계산한다. 어느 한 면접관에게 2시간 연속 가능 시간을 요구하지 않는다.
 - `suggest_sequential_interview_slots_with_rooms`는 기본 순서인 1차 → 2차 조합을 먼저 찾는다. 이 순서가 가능한 시간과 회의실 조합을 하나도 만들 수 없을 때만 2차 → 1차 역순을 제안한다.
-- 같은 회의실에서 연속 진행할 수 있는 경우를 우선한다. 같은 방이 없으면 1차 `행복룸 13:00–14:00`, 2차 `열정룸 14:00–15:00`처럼 단계별로 다른 면접실을 연달아 사용할 수 있다.
+- 같은 회의실에서 연속 진행할 수 있는 경우를 우선한다. 같은 방이 없으면 1차 `행복룸 13:00–14:00`, 2차 `열정룸 14:00–15:00`처럼 단계별로 다른 인터뷰 회의실을 연달아 사용할 수 있다.
 - 사용자가 추천안을 확인한 뒤 `allocate_sequential_interview_room_slots`로 각 단계의 회의실을 로컬에 배정하고, `confirm_sequential_interview_schedule`로 내부 일정을 확정한다. 이 과정도 다우오피스 예약과 후보자 연락을 변경하지 않는다.
 - 배정 결과에는 단계, 시간, 회의실을 모두 저장한다. 재조율 또는 취소 시에는 모든 단계의 로컬 배정을 함께 해제하지만, 다우오피스의 원래 예약 블록은 유지한다.
 
 ## 중요한 범위 구분
 
-나인하이어 공식 설명에 따르면 지원자 단계 이동, 불합격 처리, 안내 메일 발송, 면접 일정 조율 같은 규칙 기반 작업은 나인하이어 MCP가 아니라 나인하이어 워크플로우 자동화의 범위입니다. 따라서 이 프로젝트는 다음처럼 역할을 나눕니다.
+나인하이어 공식 설명에 따르면 지원자 단계 이동, 불합격 처리, 안내 메일 발송, 인터뷰 일정 조율 같은 규칙 기반 작업은 나인하이어 MCP가 아니라 나인하이어 워크플로우 자동화의 범위입니다. 따라서 이 프로젝트는 다음처럼 역할을 나눕니다.
 
 - **나인하이어 MCP:** 평가 결과·면접관 등 채용 데이터 조회
 - **Slack 앱:** 면접관에게 가능한 시간 요청, 응답 수집, 리마인드
@@ -227,7 +231,7 @@ npm test
    - 설치 후 Bot User OAuth Token `xoxb-...`를 `SLACK_BOT_TOKEN`에 입력합니다.
 5. Slack에서 앱을 두 비공개 채널 모두에 초대합니다.
    - 원본 나인하이어 알림 채널
-   - 분리된 면접 요청 테스트 채널
+   - 분리된 인터뷰 요청 테스트 채널
 6. 두 채널의 채널 ID를 `.env`에 입력합니다.
    - `SLACK_SOURCE_CHANNEL_ID`
    - `SLACK_REQUEST_CHANNEL_ID`
@@ -278,9 +282,9 @@ npm run inspect:ninehire
 
 현재 서버는 나인하이어의 실제 읽기 도구인 `get_recruitments`, `get_applicant_progresses`, `get_applicant_progress`를 사용합니다. Slack 알림의 지원자·채용 링크를 우선 사용하고, 링크 ID를 쓸 수 없으면 이름이 정확히 하나만 일치할 때만 보완 조회합니다.
 
-완료된 평가표는 평가 방식, 완료 시각, 평가 참여자, 평가자별 전체 의견, 항목별 선택값과 점수를 요약해 로컬 검토 건에 저장합니다. 이름이나 채용명이 중복되거나 완료된 평가표를 찾지 못하면 자동으로 면접 조율을 시작하지 않고 검토 사유만 남깁니다.
+완료된 평가표는 평가 방식, 완료 시각, 평가 참여자, 평가자별 전체 의견, 항목별 선택값과 점수를 요약해 로컬 검토 건에 저장합니다. 이름이나 채용명이 중복되거나 완료된 평가표를 찾지 못하면 자동으로 인터뷰 조율을 시작하지 않고 검토 사유만 남깁니다.
 
-`list_workflow_reviews`로 평가 요약을 확인한 뒤 `approve_interview_arrangement`를 호출하면 면접 조율 건이 생성됩니다. 이 승인 단계에서는 Slack 메시지가 발송되지 않습니다.
+`list_workflow_reviews`로 평가 요약을 확인한 뒤 `approve_interview_arrangement`를 호출하면 인터뷰 조율 건이 생성됩니다. 이 승인 단계에서는 Slack 메시지가 발송되지 않습니다.
 
 ### 4. 로컬 워커 실행
 
@@ -335,7 +339,7 @@ tool_timeout_sec = 60.0
 1. 워커가 Slack 원본 채널에서 평가 완료 알림을 감지합니다.
 2. 나인하이어에서 완료된 평가표 요약을 조회해 검토 대기 건에 저장합니다.
 3. Codex에 “검토 대기 평가표를 보여줘”라고 요청합니다.
-4. 평가표를 검토하고 `approve_interview_arrangement`로 면접 조율 시작을 승인합니다.
+4. 평가표를 검토하고 `approve_interview_arrangement`로 인터뷰 조율 시작을 승인합니다.
 5. 면접관과 소요시간·제안 날짜를 확인합니다.
 6. “이 건의 Slack 요청 초안만 만들어서 보여줘”라고 요청합니다.
 7. 초안의 대상·날짜·내용을 확인합니다.
@@ -343,7 +347,7 @@ tool_timeout_sec = 60.0
 9. 면접관은 Slack 버튼과 모달로 가용시간을 제출합니다.
 10. Codex에서 인터뷰 건 상세를 조회해 공통 가능시간을 검토합니다.
 
-완료된 평가표의 최종 평가 항목에 합격이 하나라도 있으면 검토 대기 건을 만듭니다. 합격 없이 불합격·보류만 있으면 조율 대상에서 제외합니다. 그 밖의 표현이거나 최종 평가를 찾지 못하면 자동으로 제외하지 않고 `EVALUATION_DECISION_REQUIRED` 검토 건으로 남깁니다. 조율 대상은 `list_workflow_reviews`에서 평가 요약을 확인한 뒤에만 `approve_interview_arrangement`로 면접 조율을 시작할 수 있습니다.
+완료된 평가표의 최종 평가 항목에 합격이 하나라도 있으면 검토 대기 건을 만듭니다. 합격 없이 불합격·보류만 있으면 조율 대상에서 제외합니다. 그 밖의 표현이거나 최종 평가를 찾지 못하면 자동으로 제외하지 않고 `EVALUATION_DECISION_REQUIRED` 검토 건으로 남깁니다. 조율 대상은 `list_workflow_reviews`에서 평가 요약을 확인한 뒤에만 `approve_interview_arrangement`로 인터뷰 조율을 시작할 수 있습니다.
 
 ## 제공 MCP 도구
 
@@ -356,15 +360,15 @@ tool_timeout_sec = 60.0
 | `list_workflow_reviews` | 사람 판단이 필요한 항목 | 없음 |
 | `list_in_progress_recruitments` | 진행 중인 나인하이어 채용 목록과 마감 정보 조회 | 외부 읽기 |
 | `preview_recruitment_interview_template` | 나인하이어 칸반 단계와 승인 필요 여부 확인 | 외부 읽기 |
-| `approve_recruitment_interview_template` | 채용별 면접 단계·통합 여부·기본 60분 규칙 저장 | 로컬 상태 갱신 |
-| `get_recruitment_interview_template` | 승인된 채용별 면접 단계 규칙 조회 | 없음 |
+| `approve_recruitment_interview_template` | 채용별 인터뷰 단계·통합 여부·기본 60분 규칙 저장 | 로컬 상태 갱신 |
+| `get_recruitment_interview_template` | 승인된 채용별 인터뷰 단계 규칙 조회 | 없음 |
 | `inspect_ninehire_tools` | 나인하이어 도구 스키마 조회 | 읽기 |
 | `sync_slack_notifications` | Slack 원본 채널 즉시 재확인 | 외부 읽기, 로컬 상태 갱신 |
 | `list_integration_retry_jobs` | Slack·나인하이어 재시도 대기·실패 현황 조회 | 없음 |
 | `reprocess_interview_arrangement_eligibility_reviews` | 기존 평가 검토 건을 합격 기준으로 재판정 | 로컬 상태 갱신 |
 | `reprocess_schedule_confirmation_notifications` | 기존 일정 확정 Slack 알림 재처리 | 로컬 상태·이벤트 갱신 |
-| `approve_interview_arrangement` | 평가표 검토 후 면접 조율 시작 승인 | 로컬 상태 갱신 |
-| `record_manual_confirmed_interview` | 서버 밖에서 최종 확정된 면접 일정 기록 | 로컬 상태·이력 갱신 |
+| `approve_interview_arrangement` | 평가표 검토 후 인터뷰 조율 시작 승인 | 로컬 상태 갱신 |
+| `record_manual_confirmed_interview` | 서버 밖에서 최종 확정된 인터뷰 일정 기록 | 로컬 상태·이력 갱신 |
 | `resolve_interviewer_review` | 면접관 교체·제외 등 조치 후 검토 완료 | 로컬 상태 갱신 |
 | `sync_case_interviewers` | 나인하이어 채용 참여자를 면접관 후보로 반영 | 외부 읽기, 로컬 상태 갱신 |
 | `map_interviewer_to_slack` | 나인하이어–Slack ID 매핑 | 로컬 상태 갱신 |
@@ -372,15 +376,15 @@ tool_timeout_sec = 60.0
 | `exclude_case_interviewer` | 이번 건에서 면접관 제외 | 로컬 상태 갱신, 이력 보존 |
 | `set_interviewer_required` | 필수/선택 면접관 변경 | 로컬 상태 갱신 |
 | `set_case_schedule_rules` | 소요시간·제안 날짜 변경 | 로컬 상태 갱신 |
-| `set_case_combined_interview_plan` | 후보자별 통합 면접과 실제 참석 면접관 지정 | 로컬 상태 갱신 |
-| `set_case_sequential_interview_plan` | 후보자별 같은 날 연속 면접의 단계·단계별 면접관 지정 | 로컬 상태 갱신 |
+| `set_case_combined_interview_plan` | 후보자별 통합 인터뷰와 실제 참석 면접관 지정 | 로컬 상태 갱신 |
+| `set_case_sequential_interview_plan` | 후보자별 같은 날 연속 인터뷰의 단계·단계별 면접관 지정 | 로컬 상태 갱신 |
 | `record_manual_availability` | 예외 시간 직접 기록 | 로컬 상태 갱신 |
 | `create_availability_recovery_draft` | 워커 중단 후 미제출 면접관 재요청 초안 생성 | 발송 없음 |
 | `create_interviewer_request_draft` | Slack 메시지 초안 생성 | 발송 없음 |
-| `suggest_sequential_interview_slots_with_rooms` | 단계별 가용시간, 정상·역순, 동일·분리 회의실을 반영한 연속 면접 추천 | 없음 |
-| `allocate_sequential_interview_room_slots` | 연속 면접의 단계별 회의실 시간대 로컬 배정 | 로컬 상태 갱신 |
+| `suggest_sequential_interview_slots_with_rooms` | 단계별 가용시간, 정상·역순, 동일·분리 회의실을 반영한 연속 인터뷰 추천 | 없음 |
+| `allocate_sequential_interview_room_slots` | 연속 인터뷰의 단계별 회의실 시간대 로컬 배정 | 로컬 상태 갱신 |
 | `confirm_internal_interview_schedule` | 회의실 배정 기반 내부 일정 확정 | 로컬 상태·이벤트 갱신 |
-| `confirm_sequential_interview_schedule` | 단계별 회의실 배정 기반 연속 면접 내부 일정 확정 | 로컬 상태·이벤트 갱신 |
+| `confirm_sequential_interview_schedule` | 단계별 회의실 배정 기반 연속 인터뷰 내부 일정 확정 | 로컬 상태·이벤트 갱신 |
 | `create_interviewer_schedule_confirmation_draft` | 면접관 최종 일정 안내 초안 생성 | 발송 없음 |
 | `list_pending_message_drafts` | 승인 대기 초안 조회 | 없음 |
 | `approve_and_send_interviewer_request` | 초안 승인 후 Slack 발송 | **Slack 메시지 발송** |
@@ -507,8 +511,8 @@ npm run build
 
 ## 알려진 제한과 다음 단계
 
-- 다우오피스는 지정 면접실·예약자·이용 목적이 일치하는 예약 블록만 읽습니다. 예약 생성·수정·취소는 지원하지 않습니다.
-- 후보자에게 면접 일정을 생성하거나 메시지를 발송하는 나인하이어 MCP 도구는 현재 확인되지 않았습니다. 후보자 확인은 나인하이어에서 수동으로 처리하고 후속 단계에서 결과를 기록해야 합니다.
+- 다우오피스는 지정 인터뷰 회의실·예약자·이용 목적이 일치하는 예약 블록만 읽습니다. 다만 현재 이용 목적 값은 다우오피스의 실제 값인 `면접`으로 판별합니다. 예약 생성·수정·취소는 지원하지 않습니다.
+- 후보자에게 인터뷰 일정을 생성하거나 메시지를 발송하는 나인하이어 MCP 도구는 현재 확인되지 않았습니다. 후보자 확인은 나인하이어에서 수동으로 처리하고 후속 단계에서 결과를 기록해야 합니다.
 - 대시보드는 아직 없습니다. SQLite의 구조화 상태를 그대로 읽는 방식으로 후속 구현할 수 있습니다.
 - 나인하이어가 실제 제공하는 도구 스키마를 키 없이 확인할 수 없으므로 최초 매핑은 필요합니다.
 - Slack 알림 Block Kit 원본 형식이 바뀌면 파서 fixture를 추가하고 `src/slack/parser.ts`를 조정해야 합니다.

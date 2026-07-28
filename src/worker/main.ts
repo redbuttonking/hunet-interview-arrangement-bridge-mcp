@@ -201,7 +201,7 @@ app.view(AVAILABILITY_VIEW_CALLBACK, async ({ ack, body, view }) => {
   } catch {
     await ack({
       response_action: "errors",
-      errors: { global_all: "면접 건 정보를 읽지 못했습니다. 다시 열어주세요." },
+        errors: { global_all: "인터뷰 건 정보를 읽지 못했습니다. 다시 열어주세요." },
     });
     return;
   }

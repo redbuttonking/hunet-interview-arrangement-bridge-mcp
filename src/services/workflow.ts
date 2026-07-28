@@ -27,6 +27,7 @@ import {
   buildAvailabilityRecoveryMessage,
   buildScheduleConfirmationMessage,
   buildScheduleUpdateMessage,
+  type SequentialInterviewScheduleMessageSession,
 } from "../slack/blocks.js";
 import {
   isCandidateInterviewAbsenceText,
@@ -603,7 +604,7 @@ export class WorkflowService {
       notificationId,
       reviewType: "INTERVIEW_ARRANGEMENT_START_REQUIRED",
       reason:
-        "완료된 평가표 요약을 확인한 뒤 면접 조율 시작 여부를 승인하세요.",
+        "완료된 평가표 요약을 확인한 뒤 인터뷰 조율 시작 여부를 승인하세요.",
       summary: {
         context: evaluation.context,
         evaluation: evaluation.summary,
@@ -761,7 +762,7 @@ export class WorkflowService {
     const payload = buildAvailabilityRecoveryMessage(bundle, {
       startedAt,
       detectedAt,
-    });
+    }, this.db.getCaseInterviewPlan(review.caseId));
     const draft = this.db.createDraft({
       caseId: review.caseId,
       workflowReviewId: review.id,
@@ -1324,7 +1325,7 @@ export class WorkflowService {
         `Slack user mapping is missing for: ${missing.map((item) => item.displayName).join(", ")}`,
       );
     }
-    const payload = buildRequestMessage(bundle);
+    const payload = buildRequestMessage(bundle, { plan });
     return this.db.createDraft({
       caseId,
       channelId: this.config.slack.requestChannelId,
@@ -1460,9 +1461,7 @@ export class WorkflowService {
         "Confirm the internal schedule before creating a schedule confirmation draft.",
       );
     }
-    const schedule = this.db.getConfirmedInterviewSchedule(caseId);
-    if (!schedule) throw new Error("The confirmed schedule record is missing.");
-    const payload = buildScheduleConfirmationMessage(bundle, schedule);
+    const payload = this.buildScheduleConfirmationPayload(caseId, bundle);
     return this.db.createDraft({
       caseId,
       channelId: this.config.slack.requestChannelId,
@@ -1561,15 +1560,11 @@ export class WorkflowService {
     if (!currentBundle) throw new Error(`Case not found: ${existing.caseId}`);
     const current =
       messageType === "INTERVIEWER_REQUEST"
-        ? buildRequestMessage(currentBundle)
+        ? buildRequestMessage(currentBundle, {
+            plan: this.db.getCaseInterviewPlan(existing.caseId),
+          })
         : messageType === "SCHEDULE_CONFIRMATION"
-          ? (() => {
-            const schedule = this.db.getConfirmedInterviewSchedule(existing.caseId);
-            if (!schedule) {
-              throw new Error("The confirmed schedule record is missing.");
-            }
-            return buildScheduleConfirmationMessage(currentBundle, schedule);
-          })()
+          ? this.buildScheduleConfirmationPayload(existing.caseId, currentBundle)
           : {
               text: existing.previewText,
               blocks: JSON.parse(existing.blocksJson) as unknown,
@@ -1626,6 +1621,55 @@ export class WorkflowService {
       blocksJson: JSON.stringify(payload.blocks),
       payloadHash: hashPayload(payload.text, payload.blocks),
       messageType,
+    });
+  }
+
+  private buildScheduleConfirmationPayload(caseId: string, bundle: CaseBundle) {
+    const schedule = this.db.getConfirmedInterviewSchedule(caseId);
+    if (!schedule) throw new Error("The confirmed schedule record is missing.");
+    return buildScheduleConfirmationMessage(bundle, schedule, {
+      sequentialSessions: this.getSequentialScheduleMessageSessions(caseId),
+    });
+  }
+
+  private getSequentialScheduleMessageSessions(
+    caseId: string,
+  ): SequentialInterviewScheduleMessageSession[] | undefined {
+    const plan = this.db.getCaseInterviewPlan(caseId);
+    if (plan?.mode !== "SEQUENTIAL") return undefined;
+
+    const blocksById = new Map(
+      this.db
+        .listMeetingRoomBlocks(undefined, false)
+        .map((block) => [block.id, block]),
+    );
+    const sessionsByStepId = new Map(
+      plan.sessions.map((session) => [session.stepId, session]),
+    );
+    const allocations = this.db
+      .listRoomAllocations(caseId)
+      .filter((allocation) => allocation.status === "ACTIVE")
+      .sort((left, right) => left.sequenceIndex - right.sequenceIndex);
+    if (allocations.length !== plan.sessions.length) {
+      throw new Error("The sequential interview room allocations are incomplete.");
+    }
+
+    return allocations.map((allocation) => {
+      const session = allocation.interviewStepId
+        ? sessionsByStepId.get(allocation.interviewStepId)
+        : undefined;
+      const room = blocksById.get(allocation.roomBlockId);
+      if (!session || !room) {
+        throw new Error("The sequential interview stage schedule is incomplete.");
+      }
+      return {
+        stepId: session.stepId,
+        stepName: session.stepName,
+        interviewerIds: session.interviewerIds,
+        startTime: allocation.startTime,
+        endTime: allocation.endTime,
+        roomName: room.roomName,
+      };
     });
   }
 

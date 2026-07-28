@@ -927,6 +927,111 @@ describe("evaluation approval workflow", () => {
     });
   });
 
+  it("creates a sequential confirmation draft with stage-specific times, rooms, and interviewers", () => {
+    db = new BridgeDatabase(":memory:");
+    const ninehire: NinehireWorkflowAdapter = {
+      async lookupCompletedEvaluation() {
+        return { reason: "테스트에서는 사용하지 않습니다." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    };
+    const workflow = new WorkflowService(
+      db,
+      { ...config, slack: { requestChannelId: "C1" } },
+      ninehire,
+    );
+    const interviewCase = db.createInterviewCase({
+      candidateName: "지원자 2",
+      recruitmentName: "연속 인터뷰 테스트 채용",
+      proposalDates: ["2026-07-30"],
+    });
+    const first = db.addOrUpdateInterviewer({
+      caseId: interviewCase.id,
+      displayName: "1차 면접관",
+      slackUserId: "U1",
+      source: "MANUAL",
+    });
+    const second = db.addOrUpdateInterviewer({
+      caseId: interviewCase.id,
+      displayName: "2차 면접관",
+      slackUserId: "U2",
+      source: "MANUAL",
+    });
+    db.upsertCaseInterviewPlan({
+      caseId: interviewCase.id,
+      source: "CANDIDATE_OVERRIDE",
+      mode: "SEQUENTIAL",
+      stepIds: ["S1", "S2"],
+      stepNames: ["1차 인터뷰", "2차 인터뷰"],
+      interviewerIds: [first.id, second.id],
+      sessions: [
+        { stepId: "S1", stepName: "1차 인터뷰", interviewerIds: [first.id] },
+        { stepId: "S2", stepName: "2차 인터뷰", interviewerIds: [second.id] },
+      ],
+      durationMinutes: 120,
+    });
+    const blocks = db.syncMeetingRoomBlocks(
+      ["2026-07-30"],
+      [
+        {
+          sourceKey: "DAOU:sequential-first",
+          roomId: "103",
+          roomName: "[818호] 행복룸",
+          reservedBy: "강해빈",
+          purpose: "면접",
+          date: "2026-07-30",
+          startTime: "13:00",
+          endTime: "14:00",
+          sourcePayloadHash: "sequential-first",
+        },
+        {
+          sourceKey: "DAOU:sequential-second",
+          roomId: "104",
+          roomName: "[818호] 열정룸",
+          reservedBy: "강해빈",
+          purpose: "면접",
+          date: "2026-07-30",
+          startTime: "14:00",
+          endTime: "15:00",
+          sourcePayloadHash: "sequential-second",
+        },
+      ],
+    );
+    db.setCaseStatus(interviewCase.id, "READY_TO_SCHEDULE");
+    db.allocateSequentialRoomBlocks({
+      caseId: interviewCase.id,
+      sessions: [
+        {
+          stepId: "S1",
+          roomBlockId: blocks[0]!.id,
+          startTime: "13:00",
+          endTime: "14:00",
+        },
+        {
+          stepId: "S2",
+          roomBlockId: blocks[1]!.id,
+          startTime: "14:00",
+          endTime: "15:00",
+        },
+      ],
+    });
+    db.confirmSequentialInternalSchedule(interviewCase.id);
+
+    const draft = workflow.createScheduleConfirmationDraft(interviewCase.id);
+
+    expect(draft.blocksJson).toContain("단계별 인터뷰 일정");
+    expect(draft.blocksJson).toContain("1차 인터뷰");
+    expect(draft.blocksJson).toContain("13:00~14:00 · [818호] 행복룸");
+    expect(draft.blocksJson).toContain("14:00~15:00 · [818호] 열정룸");
+    expect(draft.blocksJson).toContain("<@U1>");
+    expect(draft.blocksJson).toContain("<@U2>");
+  });
+
   it("confirms a schedule and requires review for a candidate absence message", async () => {
     db = new BridgeDatabase(":memory:");
     const ninehire: NinehireWorkflowAdapter = {

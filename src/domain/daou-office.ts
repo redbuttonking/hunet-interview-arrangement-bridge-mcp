@@ -1,4 +1,4 @@
-// 다우오피스 예약 응답에서 면접실 블록만 추출하는 도메인 규칙을 제공한다.
+// 다우오피스 예약 응답에서 인터뷰 회의실 블록만 추출하는 도메인 규칙을 제공한다.
 import { createHash } from "node:crypto";
 export const DAOU_INTERVIEW_ROOM_NAMES = [
   "열정룸",

@@ -201,9 +201,9 @@ export function createBridgeMcpServer(
   server.registerTool(
     "sync_daou_meeting_room_blocks",
     {
-      title: "다우오피스 면접실 예약 동기화",
+      title: "다우오피스 인터뷰 회의실 예약 동기화",
       description:
-        "해당 면접 건의 제안 날짜에 대해 전용 브라우저로 다우오피스 예약을 읽고, 지정 면접실·예약자·이용 목적이 모두 일치하는 예약 블록만 로컬 DB에 반영합니다. 다우오피스 예약을 변경하지 않습니다.",
+        "해당 인터뷰 건의 제안 날짜에 대해 전용 브라우저로 다우오피스 예약을 읽고, 지정 인터뷰 회의실·예약자·이용 목적이 모두 일치하는 예약 블록만 로컬 DB에 반영합니다. 다우오피스 예약을 변경하지 않습니다.",
       inputSchema: { caseId: z.string().uuid() },
       annotations: {
         readOnlyHint: false,
@@ -239,9 +239,9 @@ export function createBridgeMcpServer(
   server.registerTool(
     "list_daou_meeting_room_blocks",
     {
-      title: "동기화된 면접실 예약 블록 조회",
+      title: "동기화된 인터뷰 회의실 예약 블록 조회",
       description:
-        "로컬 DB에 동기화된 면접실 예약 블록을 조회합니다. 예약자 이름은 출력하지 않습니다.",
+        "로컬 DB에 동기화된 인터뷰 회의실 예약 블록을 조회합니다. 예약자 이름은 출력하지 않습니다.",
       inputSchema: {
         dates: z
           .array(z.string().regex(/^\d{4}-\d{2}-\d{2}$/))
@@ -271,9 +271,9 @@ export function createBridgeMcpServer(
   server.registerTool(
     "suggest_interview_slots_with_rooms",
     {
-      title: "면접관과 면접실을 함께 반영한 일정 추천",
+      title: "면접관과 회의실을 함께 반영한 일정 추천",
       description:
-        "면접관 공통 가능 시간과 동기화된 면접실 예약 블록, 이미 로컬에 배정한 면접 시간을 함께 반영해 추천합니다. 일정이나 예약을 변경하지 않습니다.",
+        "면접관 공통 가능 시간과 동기화된 인터뷰 회의실 예약 블록, 이미 로컬에 배정한 인터뷰 시간을 함께 반영해 추천합니다. 일정이나 예약을 변경하지 않습니다.",
       inputSchema: { caseId: z.string().uuid() },
       annotations: {
         readOnlyHint: true,
@@ -288,7 +288,7 @@ export function createBridgeMcpServer(
   server.registerTool(
     "suggest_sequential_interview_slots_with_rooms",
     {
-      title: "연속 면접 시간과 회의실 추천",
+      title: "연속 인터뷰 시간과 회의실 추천",
       description:
         "단계별 면접관의 가용시간을 각각 계산합니다. 1차→2차 순서를 우선 추천하고, 가능한 조합이 없을 때만 역순을 제안합니다. 같은 회의실 연속 배정을 우선하며 불가하면 단계별 다른 회의실을 제안합니다.",
       inputSchema: { caseId: z.string().uuid() },
@@ -305,9 +305,9 @@ export function createBridgeMcpServer(
   server.registerTool(
     "allocate_interview_room_slot",
     {
-      title: "면접실 내부 시간대 배정",
+      title: "인터뷰 회의실 내부 시간대 배정",
       description:
-        "사용자가 선택한 면접 시간과 회의실 블록을 로컬 DB에 배정해 다른 후보자와 겹치지 않도록 합니다. 다우오피스 예약은 변경하지 않습니다.",
+        "사용자가 선택한 인터뷰 시간과 회의실 블록을 로컬 DB에 배정해 다른 후보자와 겹치지 않도록 합니다. 다우오피스 예약은 변경하지 않습니다.",
       inputSchema: {
         caseId: z.string().uuid(),
         roomBlockId: z.string().uuid(),
@@ -327,9 +327,9 @@ export function createBridgeMcpServer(
   server.registerTool(
     "allocate_sequential_interview_room_slots",
     {
-      title: "연속 면접 단계별 회의실 배정",
+      title: "연속 인터뷰 단계별 회의실 배정",
       description:
-        "추천된 연속 면접의 각 60분 단계에 회의실을 로컬로 배정합니다. 같은 회의실 또는 단계별 다른 회의실을 사용할 수 있으며 다우오피스 예약은 변경하지 않습니다.",
+        "추천된 연속 인터뷰의 각 60분 단계에 회의실을 로컬로 배정합니다. 같은 회의실 또는 단계별 다른 회의실을 사용할 수 있으며 다우오피스 예약은 변경하지 않습니다.",
       inputSchema: {
         caseId: z.string().uuid(),
         sessions: z.array(z.object({
@@ -354,7 +354,7 @@ export function createBridgeMcpServer(
     {
       title: "인터뷰 내부 일정 확정",
       description:
-        "활성 면접실 배정을 내부 확정 일정으로 기록하고 후보자 확인 대기 상태로 변경합니다. Slack이나 나인하이어에는 전송하지 않습니다.",
+        "활성 인터뷰 회의실 배정을 내부 확정 일정으로 기록하고 후보자 확인 대기 상태로 변경합니다. Slack이나 나인하이어에는 전송하지 않습니다.",
       inputSchema: { caseId: z.string().uuid() },
       annotations: {
         readOnlyHint: false,
@@ -369,9 +369,9 @@ export function createBridgeMcpServer(
   server.registerTool(
     "confirm_sequential_interview_schedule",
     {
-      title: "연속 면접 내부 일정 확정",
+      title: "연속 인터뷰 내부 일정 확정",
       description:
-        "단계별 회의실 배정을 하나의 연속 면접 일정으로 내부 확정합니다. 후보자·Slack·나인하이어에는 전송하지 않습니다.",
+        "단계별 회의실 배정을 하나의 연속 인터뷰 일정으로 내부 확정합니다. 후보자·Slack·나인하이어에는 전송하지 않습니다.",
       inputSchema: { caseId: z.string().uuid() },
       annotations: {
         readOnlyHint: false,
@@ -386,9 +386,9 @@ export function createBridgeMcpServer(
   server.registerTool(
     "cancel_interview_room_allocation",
     {
-      title: "면접실 내부 배정 취소",
+      title: "인터뷰 회의실 내부 배정 취소",
       description:
-        "로컬 DB의 면접실 내부 배정만 취소합니다. 다우오피스 예약은 변경하지 않습니다.",
+        "로컬 DB의 인터뷰 회의실 내부 배정만 취소합니다. 다우오피스 예약은 변경하지 않습니다.",
       inputSchema: {
         caseId: z.string().uuid(),
         allocationId: z.string().uuid(),
@@ -430,7 +430,7 @@ export function createBridgeMcpServer(
     {
       title: "인터뷰 조율 취소",
       description:
-        "면접 건을 취소하고 로컬 면접실 배정, 미발송 초안, 미발송 리마인더를 정리합니다. 기존 일정 안내가 발송된 경우 Slack 취소 안내 초안도 생성하지만 자동 발송하지 않습니다. 다우오피스 예약은 변경하지 않습니다.",
+        "인터뷰 건을 취소하고 로컬 인터뷰 회의실 배정, 미발송 초안, 미발송 리마인더를 정리합니다. 기존 일정 안내가 발송된 경우 Slack 취소 안내 초안도 생성하지만 자동 발송하지 않습니다. 다우오피스 예약은 변경하지 않습니다.",
       inputSchema: {
         caseId: z.string().uuid(),
         reason: z.string().min(1).max(500),
@@ -680,7 +680,7 @@ export function createBridgeMcpServer(
   server.registerTool(
     "preview_recruitment_interview_template",
     {
-      title: "채용 면접 단계 템플릿 미리 보기",
+      title: "채용 인터뷰 단계 템플릿 미리 보기",
       description:
         "나인하이어 칸반 단계와 기존 승인 템플릿을 비교합니다. 단계 선택과 승인 전에는 데이터를 변경하지 않습니다.",
       inputSchema: { recruitmentId: z.string().min(1) },
@@ -698,9 +698,9 @@ export function createBridgeMcpServer(
   server.registerTool(
     "approve_recruitment_interview_template",
     {
-      title: "채용 면접 단계 템플릿 승인",
+      title: "채용 인터뷰 단계 템플릿 승인",
       description:
-        "확인한 칸반 단계만 면접 단계로 저장합니다. 기본 시간은 모두 60분이며 COMBINED는 한 시간에 모든 참석자가 함께 진행하는 면접입니다.",
+        "확인한 칸반 단계만 인터뷰 단계로 저장합니다. 기본 시간은 모두 60분이며 COMBINED는 한 시간에 모든 참석자가 함께 진행하는 인터뷰입니다.",
       inputSchema: {
         recruitmentId: z.string().min(1),
         steps: z.array(z.object({
@@ -726,8 +726,8 @@ export function createBridgeMcpServer(
   server.registerTool(
     "get_recruitment_interview_template",
     {
-      title: "승인된 채용 면접 템플릿 조회",
-      description: "로컬에 승인·저장된 채용별 면접 단계 규칙을 조회합니다.",
+      title: "승인된 채용 인터뷰 템플릿 조회",
+      description: "로컬에 승인·저장된 채용별 인터뷰 단계 규칙을 조회합니다.",
       inputSchema: { recruitmentId: z.string().min(1) },
       annotations: {
         readOnlyHint: true,
@@ -784,9 +784,9 @@ export function createBridgeMcpServer(
   server.registerTool(
     "reprocess_interview_arrangement_eligibility_reviews",
     {
-      title: "기존 면접 조율 대상 재판정",
+      title: "기존 인터뷰 조율 대상 재판정",
       description:
-        "기존 면접 조율 시작 검토 건을 최종 평가 항목 기준으로 다시 판정합니다. 합격이 하나라도 있으면 유지하고, 합격 없이 불합격·보류만 있으면 제외합니다. 외부 메시지나 나인하이어 데이터는 변경하지 않습니다.",
+        "기존 인터뷰 조율 시작 검토 건을 최종 평가 항목 기준으로 다시 판정합니다. 합격이 하나라도 있으면 유지하고, 합격 없이 불합격·보류만 있으면 제외합니다. 외부 메시지나 나인하이어 데이터는 변경하지 않습니다.",
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
@@ -832,9 +832,9 @@ export function createBridgeMcpServer(
   server.registerTool(
     "approve_interview_arrangement",
     {
-      title: "면접 조율 시작 승인",
+      title: "인터뷰 조율 시작 승인",
       description:
-        "완료된 나인하이어 평가표 요약을 확인한 뒤 이 지원자의 면접 조율 건을 생성합니다. Slack 메시지는 발송하지 않습니다.",
+        "완료된 나인하이어 평가표 요약을 확인한 뒤 이 지원자의 인터뷰 조율 건을 생성합니다. Slack 메시지는 발송하지 않습니다.",
       inputSchema: {
         reviewId: z.string().uuid(),
       },
@@ -852,9 +852,9 @@ export function createBridgeMcpServer(
   server.registerTool(
     "record_manual_confirmed_interview",
     {
-      title: "수동 최종 확정 면접 기록",
+      title: "수동 최종 확정 인터뷰 기록",
       description:
-        "서버 밖에서 조율되고 후보자 수락까지 끝난 면접을 최종 확정 이력으로 기록합니다. Slack, 나인하이어, 다우오피스에는 변경을 전송하지 않습니다.",
+        "서버 밖에서 조율되고 후보자 수락까지 끝난 인터뷰를 최종 확정 이력으로 기록합니다. Slack, 나인하이어, 다우오피스에는 변경을 전송하지 않습니다.",
       inputSchema: {
         reviewId: z.string().uuid(),
         date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
@@ -948,7 +948,7 @@ export function createBridgeMcpServer(
     {
       title: "면접관 다시 조회",
       description:
-        "나인하이어에서 해당 면접 건의 최신 면접관을 다시 읽고 로컬 스냅샷과 Slack 사용자 매핑을 갱신합니다.",
+        "나인하이어에서 해당 인터뷰 건의 최신 면접관을 다시 읽고 로컬 스냅샷과 Slack 사용자 매핑을 갱신합니다.",
       inputSchema: { caseId: z.string().uuid() },
       annotations: {
         readOnlyHint: false,
@@ -989,9 +989,9 @@ export function createBridgeMcpServer(
   server.registerTool(
     "add_case_interviewer",
     {
-      title: "면접 건에 면접관 추가",
+      title: "인터뷰 건에 면접관 추가",
       description:
-        "이번 면접 건에만 추가 면접관을 넣습니다. 전역 채용 설정은 변경하지 않습니다.",
+        "이번 인터뷰 건에만 추가 면접관을 넣습니다. 전역 채용 설정은 변경하지 않습니다.",
       inputSchema: {
         caseId: z.string().uuid(),
         displayName: z.string().min(1),
@@ -1019,7 +1019,7 @@ export function createBridgeMcpServer(
   server.registerTool(
     "exclude_case_interviewer",
     {
-      title: "면접 건에서 면접관 제외",
+      title: "인터뷰 건에서 면접관 제외",
       description:
         "면접관을 이번 건의 활성 목록에서 제외하되 감사 이력은 보존합니다.",
       inputSchema: {
@@ -1098,9 +1098,9 @@ export function createBridgeMcpServer(
   server.registerTool(
     "set_case_combined_interview_plan",
     {
-      title: "후보자 통합 면접 예외 적용",
+      title: "후보자 통합 인터뷰 예외 적용",
       description:
-        "선택한 두 개 이상 면접 단계를 한 번의 60분 면접으로 묶고, 이번 후보자에게 실제 참석할 면접관만 필수로 설정합니다. 면접관 일정 요청을 발송하기 전 단계에서만 변경할 수 있습니다.",
+        "선택한 두 개 이상 인터뷰 단계를 한 번의 60분 인터뷰로 묶고, 이번 후보자에게 실제 참석할 면접관만 필수로 설정합니다. 면접관 일정 요청을 발송하기 전 단계에서만 변경할 수 있습니다.",
       inputSchema: {
         caseId: z.string().uuid(),
         stepIds: z.array(z.string().min(1)).min(2).max(10),
@@ -1119,9 +1119,9 @@ export function createBridgeMcpServer(
   server.registerTool(
     "set_case_sequential_interview_plan",
     {
-      title: "연속 면접 단계별 계획 적용",
+      title: "연속 인터뷰 단계별 계획 적용",
       description:
-        "같은 날 이어서 진행할 면접 단계를 원래 순서대로 설정하고, 단계별 실제 참석 면접관을 지정합니다. 각 단계의 면접관 가용시간은 서로 독립적으로 계산합니다.",
+        "같은 날 이어서 진행할 인터뷰 단계를 원래 순서대로 설정하고, 단계별 실제 참석 면접관을 지정합니다. 각 단계의 면접관 가용시간은 서로 독립적으로 계산합니다.",
       inputSchema: {
         caseId: z.string().uuid(),
         sessions: z.array(z.object({
@@ -1180,7 +1180,7 @@ export function createBridgeMcpServer(
     {
       title: "워커 중단 후 일정 재제출 요청 초안",
       description:
-        "Slack 워커 중단으로 가용시간 제출이 누락됐을 수 있는 면접 건의 미제출 면접관에게 재제출을 요청하는 Slack 초안을 만듭니다. 발송하지 않습니다.",
+        "Slack 워커 중단으로 가용시간 제출이 누락됐을 수 있는 인터뷰 건의 미제출 면접관에게 재제출을 요청하는 Slack 초안을 만듭니다. 발송하지 않습니다.",
       inputSchema: { reviewId: z.string().uuid() },
       annotations: {
         readOnlyHint: false,
@@ -1215,7 +1215,7 @@ export function createBridgeMcpServer(
     {
       title: "면접관 최종 일정 안내 초안 생성",
       description:
-        "내부 확정된 면접 시간·회의실·면접관을 기존 테스트 채널에 안내하는 Slack 초안을 생성합니다. 발송하지 않습니다.",
+        "내부 확정된 인터뷰 시간·회의실·면접관을 기존 테스트 채널에 안내하는 Slack 초안을 생성합니다. 발송하지 않습니다.",
       inputSchema: { caseId: z.string().uuid() },
       annotations: {
         readOnlyHint: false,
@@ -1335,7 +1335,7 @@ export function createBridgeMcpServer(
     {
       title: "면접관 일정 변경·취소 안내 승인·발송",
       description:
-        "사용자가 검토한 면접 일정 변경 또는 취소 안내 초안을 명시적으로 승인하고 Slack 테스트 채널에 발송합니다.",
+        "사용자가 검토한 인터뷰 일정 변경 또는 취소 안내 초안을 명시적으로 승인하고 Slack 테스트 채널에 발송합니다.",
       inputSchema: { draftId: z.string().uuid() },
       annotations: {
         readOnlyHint: false,

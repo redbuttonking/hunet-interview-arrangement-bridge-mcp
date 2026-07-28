@@ -1,12 +1,22 @@
 import type { KnownBlock, ModalView } from "@slack/types";
 import { defaultHourlySlots, normalizeSlots } from "../domain/calendar.js";
 import type {
+  CaseInterviewPlanRow,
   CaseBundle,
   ConfirmedInterviewScheduleRow,
   InterviewCaseRow,
   InterviewerRow,
 } from "../db/database.js";
 import type { TimeSlot } from "../domain/types.js";
+
+export interface SequentialInterviewScheduleMessageSession {
+  stepId: string;
+  stepName: string;
+  interviewerIds: string[];
+  startTime: string;
+  endTime: string;
+  roomName: string;
+}
 
 export const OPEN_AVAILABILITY_ACTION = "open_interview_availability";
 export const DECLINE_INTERVIEW_ACTION = "decline_interview_participation";
@@ -36,12 +46,28 @@ function candidateLabel(interviewCase: InterviewCaseRow): string {
   return interviewCase.candidateName ?? "이름 미확인 지원자";
 }
 
+function interviewerMentions(
+  bundle: CaseBundle,
+  interviewerIds: string[],
+): string {
+  const selected = new Set(interviewerIds);
+  return bundle.interviewers
+    .filter((interviewer) => interviewer.active && selected.has(interviewer.id))
+    .map((interviewer) =>
+      interviewer.slackUserId
+        ? `<@${interviewer.slackUserId}>`
+        : interviewer.displayName,
+    )
+    .join(", ");
+}
+
 export function buildRequestMessage(
   bundle: CaseBundle,
   options?: {
     title?: string;
     requestText?: string;
     targetInterviewerIds?: string[];
+    plan?: CaseInterviewPlanRow;
   },
 ): {
   text: string;
@@ -69,6 +95,12 @@ export function buildRequestMessage(
     )
     .join(", ");
   const dates = interviewCase.proposalDates.map(dateLabel).join(", ");
+  const sequentialStageLines =
+    options?.plan?.mode === "SEQUENTIAL"
+      ? options.plan.sessions.map((session) =>
+          `• *${session.stepName}:* ${interviewerMentions(bundle, session.interviewerIds) || "면접관 매핑 필요"}`,
+        )
+      : [];
   const text = `${candidateLabel(interviewCase)} 지원자 ${requestTitle}`;
   const blocks: KnownBlock[] = [
     {
@@ -85,6 +117,9 @@ export function buildRequestMessage(
           `*면접관:* ${mentions || "면접관 매핑 필요"}`,
           `*예상 소요시간:* ${interviewCase.durationMinutes}분`,
           `*제안 날짜:* ${dates}`,
+          ...(sequentialStageLines.length > 0
+            ? ["*단계별 인터뷰 및 면접관:*", ...sequentialStageLines]
+            : []),
         ].join("\n"),
       },
     },
@@ -135,7 +170,7 @@ export function buildRequestMessage(
       elements: [
         {
           type: "mrkdwn",
-          text: "기본 시간대 09:00–18:00 · 버튼 응답은 면접 건별로 저장됩니다.",
+          text: "기본 시간대 09:00–18:00 · 버튼 응답은 인터뷰 건별로 저장됩니다.",
         },
       ],
     },
@@ -146,6 +181,7 @@ export function buildRequestMessage(
 export function buildAvailabilityRecoveryMessage(
   bundle: CaseBundle,
   downtime: { startedAt: string; detectedAt: string },
+  plan?: CaseInterviewPlanRow,
 ): { text: string; blocks: KnownBlock[] } {
   const pendingInterviewerIds = bundle.interviewers
     .filter(
@@ -161,12 +197,16 @@ export function buildAvailabilityRecoveryMessage(
       `${dateTimeLabel(downtime.startedAt)}~${dateTimeLabel(downtime.detectedAt)} 사이에 ` +
       "일정 입력을 시도하셨다면 제출 결과를 보장할 수 없습니다. 아래 버튼으로 가능한 시간을 다시 입력해 주세요.",
     targetInterviewerIds: pendingInterviewerIds,
+    plan,
   });
 }
 
 export function buildScheduleConfirmationMessage(
   bundle: CaseBundle,
   schedule: ConfirmedInterviewScheduleRow,
+  options?: {
+    sequentialSessions?: SequentialInterviewScheduleMessageSession[];
+  },
 ): { text: string; blocks: KnownBlock[] } {
   const { interviewCase } = bundle;
   const mentions = bundle.interviewers
@@ -176,6 +216,9 @@ export function buildScheduleConfirmationMessage(
     )
     .join(", ");
   const candidateConfirmed = interviewCase.status === "CONFIRMED";
+  const sequentialSessionLines = options?.sequentialSessions?.map((session) =>
+    `• *${session.stepName}:* ${session.startTime}~${session.endTime} · ${session.roomName} · 면접관: ${interviewerMentions(bundle, session.interviewerIds) || "면접관 매핑 필요"}`,
+  ) ?? [];
   const text = candidateConfirmed
     ? `${candidateLabel(interviewCase)} 지원자 인터뷰 일정 확정 안내`
     : `${candidateLabel(interviewCase)} 지원자 인터뷰 내부 일정 확정 안내`;
@@ -197,8 +240,12 @@ export function buildScheduleConfirmationMessage(
           `*지원자:* ${candidateLabel(interviewCase)}`,
           `*채용:* ${interviewCase.recruitmentName ?? "채용 정보 미확인"}`,
           `*일시:* ${dateLabel(schedule.date)} ${schedule.startTime}~${schedule.endTime}`,
-          `*회의실:* ${schedule.roomName}`,
-          `*면접관:* ${mentions || "면접관 매핑 필요"}`,
+          ...(sequentialSessionLines.length > 0
+            ? ["*단계별 인터뷰 일정:*", ...sequentialSessionLines]
+            : [
+                `*회의실:* ${schedule.roomName}`,
+                `*면접관:* ${mentions || "면접관 매핑 필요"}`,
+              ]),
         ].join("\n"),
       },
     },
