@@ -86,6 +86,15 @@ describe("bridge MCP server", () => {
       "list_in_progress_recruitments",
     );
     expect(tools.tools.map((tool) => tool.name)).toContain(
+      "preview_recruitment_interview_template",
+    );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
+      "approve_recruitment_interview_template",
+    );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
+      "set_case_combined_interview_plan",
+    );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
       "open_daou_office_login",
     );
     expect(tools.tools.map((tool) => tool.name)).toContain(

@@ -200,6 +200,38 @@ export interface CaseBundle {
   drafts: DraftRow[];
 }
 
+export type InterviewPlanMode = "STANDARD" | "COMBINED";
+
+export interface RecruitmentInterviewTemplateStep {
+  stepId: string;
+  title: string;
+  name: string;
+  order: number;
+  mode: InterviewPlanMode;
+  durationMinutes: 60;
+}
+
+export interface RecruitmentInterviewTemplateRow {
+  recruitmentId: string;
+  recruitmentName: string;
+  pipelineHash: string;
+  steps: RecruitmentInterviewTemplateStep[];
+  approvedAt: string;
+  updatedAt: string;
+}
+
+export interface CaseInterviewPlanRow {
+  caseId: string;
+  source: "TEMPLATE" | "CANDIDATE_OVERRIDE";
+  mode: InterviewPlanMode;
+  stepIds: string[];
+  stepNames: string[];
+  interviewerIds: string[];
+  durationMinutes: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 function asString(value: unknown): string {
   return String(value);
 }
@@ -653,6 +685,27 @@ export class BridgeDatabase {
 
       CREATE INDEX IF NOT EXISTS room_allocations_active_block
         ON room_allocations(room_block_id, status, date, start_time, end_time);
+
+      CREATE TABLE IF NOT EXISTS recruitment_interview_templates (
+        recruitment_id TEXT PRIMARY KEY,
+        recruitment_name TEXT NOT NULL,
+        pipeline_hash TEXT NOT NULL,
+        steps_json TEXT NOT NULL,
+        approved_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS case_interview_plans (
+        case_id TEXT PRIMARY KEY REFERENCES interview_cases(id),
+        source TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        step_ids_json TEXT NOT NULL,
+        step_names_json TEXT NOT NULL,
+        interviewer_ids_json TEXT NOT NULL,
+        duration_minutes INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
 
       INSERT OR IGNORE INTO schema_migrations(version, applied_at)
       VALUES (1, datetime('now'));
@@ -1742,6 +1795,139 @@ export class BridgeDatabase {
       .prepare("SELECT * FROM interview_cases WHERE id = ?")
       .get(id) as SqlRow | undefined;
     return row ? toCase(row) : undefined;
+  }
+
+  upsertRecruitmentInterviewTemplate(input: {
+    recruitmentId: string;
+    recruitmentName: string;
+    pipelineHash: string;
+    steps: RecruitmentInterviewTemplateStep[];
+  }): RecruitmentInterviewTemplateRow {
+    const now = new Date().toISOString();
+    this.connection
+      .prepare(`
+        INSERT INTO recruitment_interview_templates(
+          recruitment_id, recruitment_name, pipeline_hash, steps_json, approved_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(recruitment_id) DO UPDATE SET
+          recruitment_name = excluded.recruitment_name,
+          pipeline_hash = excluded.pipeline_hash,
+          steps_json = excluded.steps_json,
+          approved_at = excluded.approved_at,
+          updated_at = excluded.updated_at
+      `)
+      .run(
+        input.recruitmentId,
+        input.recruitmentName,
+        input.pipelineHash,
+        JSON.stringify(input.steps),
+        now,
+        now,
+      );
+    return this.getRecruitmentInterviewTemplate(input.recruitmentId)!;
+  }
+
+  getRecruitmentInterviewTemplate(
+    recruitmentId: string,
+  ): RecruitmentInterviewTemplateRow | undefined {
+    const row = this.connection
+      .prepare("SELECT * FROM recruitment_interview_templates WHERE recruitment_id = ?")
+      .get(recruitmentId) as SqlRow | undefined;
+    if (!row) return undefined;
+    return {
+      recruitmentId: asString(row.recruitment_id),
+      recruitmentName: asString(row.recruitment_name),
+      pipelineHash: asString(row.pipeline_hash),
+      steps: JSON.parse(asString(row.steps_json)) as RecruitmentInterviewTemplateStep[],
+      approvedAt: asString(row.approved_at),
+      updatedAt: asString(row.updated_at),
+    };
+  }
+
+  getCaseInterviewPlan(caseId: string): CaseInterviewPlanRow | undefined {
+    const row = this.connection
+      .prepare("SELECT * FROM case_interview_plans WHERE case_id = ?")
+      .get(caseId) as SqlRow | undefined;
+    if (!row) return undefined;
+    return {
+      caseId: asString(row.case_id),
+      source: asString(row.source) as CaseInterviewPlanRow["source"],
+      mode: asString(row.mode) as InterviewPlanMode,
+      stepIds: JSON.parse(asString(row.step_ids_json)) as string[],
+      stepNames: JSON.parse(asString(row.step_names_json)) as string[],
+      interviewerIds: JSON.parse(asString(row.interviewer_ids_json)) as string[],
+      durationMinutes: Number(row.duration_minutes),
+      createdAt: asString(row.created_at),
+      updatedAt: asString(row.updated_at),
+    };
+  }
+
+  upsertCaseInterviewPlan(input: {
+    caseId: string;
+    source: CaseInterviewPlanRow["source"];
+    mode: InterviewPlanMode;
+    stepIds: string[];
+    stepNames: string[];
+    interviewerIds?: string[];
+    durationMinutes: number;
+  }): CaseInterviewPlanRow {
+    if (input.stepIds.length === 0 || input.stepIds.length !== input.stepNames.length) {
+      throw new Error("Interview plan steps are invalid.");
+    }
+    const now = new Date().toISOString();
+    this.connection
+      .prepare(`
+        INSERT INTO case_interview_plans(
+          case_id, source, mode, step_ids_json, step_names_json, interviewer_ids_json,
+          duration_minutes, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(case_id) DO UPDATE SET
+          source = excluded.source,
+          mode = excluded.mode,
+          step_ids_json = excluded.step_ids_json,
+          step_names_json = excluded.step_names_json,
+          interviewer_ids_json = excluded.interviewer_ids_json,
+          duration_minutes = excluded.duration_minutes,
+          updated_at = excluded.updated_at
+      `)
+      .run(
+        input.caseId,
+        input.source,
+        input.mode,
+        JSON.stringify(input.stepIds),
+        JSON.stringify(input.stepNames),
+        JSON.stringify(input.interviewerIds ?? []),
+        input.durationMinutes,
+        now,
+        now,
+      );
+    this.setCaseDuration(input.caseId, input.durationMinutes);
+    return this.getCaseInterviewPlan(input.caseId)!;
+  }
+
+  setRequiredInterviewers(caseId: string, interviewerIds: string[]): void {
+    const active = this.listInterviewers(caseId).filter((item) => item.active);
+    const availableIds = new Set(active.map((item) => item.id));
+    if (
+      interviewerIds.length === 0 ||
+      interviewerIds.some((interviewerId) => !availableIds.has(interviewerId))
+    ) {
+      throw new Error("Select at least one active interviewer in this case.");
+    }
+    const selected = new Set(interviewerIds);
+    const now = new Date().toISOString();
+    this.transaction(() => {
+      for (const interviewer of active) {
+        this.connection
+          .prepare(`
+            UPDATE case_interviewers
+            SET required = ?, updated_at = ?
+            WHERE id = ? AND case_id = ?
+          `)
+          .run(selected.has(interviewer.id) ? 1 : 0, now, interviewer.id, caseId);
+      }
+    });
+    this.refreshCaseCollectionStatus(caseId);
   }
 
   findAwaitingCandidateConfirmationCases(
@@ -3232,6 +3418,38 @@ export class BridgeDatabase {
         2,
         second.toISOString(),
       );
+    }
+
+    const versionEleven = this.connection
+      .prepare("SELECT version FROM schema_migrations WHERE version = 11")
+      .get() as SqlRow | undefined;
+    if (!versionEleven) {
+      this.connection.exec(`
+        CREATE TABLE IF NOT EXISTS recruitment_interview_templates (
+          recruitment_id TEXT PRIMARY KEY,
+          recruitment_name TEXT NOT NULL,
+          pipeline_hash TEXT NOT NULL,
+          steps_json TEXT NOT NULL,
+          approved_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS case_interview_plans (
+          case_id TEXT PRIMARY KEY REFERENCES interview_cases(id),
+          source TEXT NOT NULL,
+          mode TEXT NOT NULL,
+          step_ids_json TEXT NOT NULL,
+          step_names_json TEXT NOT NULL,
+          interviewer_ids_json TEXT NOT NULL,
+          duration_minutes INTEGER NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+      `);
+      this.connection
+        .prepare(
+          "INSERT INTO schema_migrations(version, applied_at) VALUES (11, datetime('now'))",
+        )
+        .run();
     }
   }
 

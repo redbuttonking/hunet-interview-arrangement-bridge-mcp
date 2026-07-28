@@ -71,6 +71,21 @@ function hashPayload(text: string, blocks: unknown): string {
     .digest("hex");
 }
 
+function pipelineHash(steps: Array<{ stepId: string; title: string; name: string; order: number }>): string {
+  return createHash("sha256")
+    .update(JSON.stringify(steps.map((step) => ({
+      stepId: step.stepId,
+      title: step.title,
+      name: step.name,
+      order: step.order,
+    }))))
+    .digest("hex");
+}
+
+function isSuggestedInterviewStep(step: { title: string; name: string }): boolean {
+  return /면접|인터뷰|시강/u.test(`${step.title} ${step.name}`);
+}
+
 function replaceExactText(
   value: unknown,
   textToReplace: string,
@@ -211,6 +226,111 @@ export class WorkflowService {
     private readonly ninehire: NinehireWorkflowAdapter,
     private readonly identityResolver?: SlackIdentityResolver,
   ) {}
+
+  async previewRecruitmentInterviewTemplate(recruitmentId: string) {
+    if (!this.ninehire.getRecruitmentPipeline) {
+      throw new Error("NineHire recruitment pipeline lookup is not available.");
+    }
+    const pipeline = await this.ninehire.getRecruitmentPipeline(recruitmentId);
+    const hash = pipelineHash(pipeline.steps);
+    const approved = this.db.getRecruitmentInterviewTemplate(pipeline.recruitmentId);
+    return {
+      recruitmentId: pipeline.recruitmentId,
+      recruitmentName: pipeline.recruitmentName,
+      pipelineHash: hash,
+      requiresApproval: !approved || approved.pipelineHash !== hash,
+      approvedTemplate: approved ?? null,
+      steps: pipeline.steps.map((step) => ({
+        ...step,
+        suggestedAsInterview: isSuggestedInterviewStep(step),
+        defaultDurationMinutes: 60,
+      })),
+    };
+  }
+
+  async approveRecruitmentInterviewTemplate(input: {
+    recruitmentId: string;
+    steps: Array<{ stepId: string; mode: "STANDARD" | "COMBINED" }>;
+  }) {
+    if (!this.ninehire.getRecruitmentPipeline) {
+      throw new Error("NineHire recruitment pipeline lookup is not available.");
+    }
+    if (input.steps.length === 0) {
+      throw new Error("Select at least one interview step before approval.");
+    }
+    const pipeline = await this.ninehire.getRecruitmentPipeline(input.recruitmentId);
+    const pipelineById = new Map(pipeline.steps.map((step) => [step.stepId, step]));
+    if (
+      new Set(input.steps.map((step) => step.stepId)).size !== input.steps.length ||
+      input.steps.some((step) => !pipelineById.has(step.stepId))
+    ) {
+      throw new Error("Selected interview steps do not match the current NineHire pipeline.");
+    }
+    const steps = input.steps
+      .map((selection) => {
+        const step = pipelineById.get(selection.stepId)!;
+        return {
+          stepId: step.stepId,
+          title: step.title,
+          name: step.name,
+          order: step.order,
+          mode: selection.mode,
+          durationMinutes: 60 as const,
+        };
+      })
+      .sort((left, right) => left.order - right.order);
+    return this.db.upsertRecruitmentInterviewTemplate({
+      recruitmentId: pipeline.recruitmentId,
+      recruitmentName: pipeline.recruitmentName,
+      pipelineHash: pipelineHash(pipeline.steps),
+      steps,
+    });
+  }
+
+  setCaseCombinedInterviewPlan(input: {
+    caseId: string;
+    stepIds: string[];
+    interviewerIds: string[];
+  }) {
+    const interviewCase = this.db.getCase(input.caseId);
+    if (!interviewCase?.recruitmentRef) {
+      throw new Error("The case is missing its NineHire recruitment ID.");
+    }
+    if (!["READY_FOR_DRAFT", "DRAFT_CREATED"].includes(interviewCase.status)) {
+      throw new Error("Change an interview plan before sending an interviewer request.");
+    }
+    if (input.stepIds.length < 2) {
+      throw new Error("A combined interview requires at least two interview stages.");
+    }
+    const template = this.db.getRecruitmentInterviewTemplate(
+      interviewCase.recruitmentRef,
+    );
+    if (!template) {
+      throw new Error("Approve the recruitment interview template before setting an exception.");
+    }
+    const steps = input.stepIds.map((stepId) =>
+      template.steps.find((step) => step.stepId === stepId),
+    );
+    if (steps.some((step) => !step)) {
+      throw new Error("The selected stages are not configured interview stages.");
+    }
+    this.db.setRequiredInterviewers(input.caseId, input.interviewerIds);
+    const plan = this.db.upsertCaseInterviewPlan({
+      caseId: input.caseId,
+      source: "CANDIDATE_OVERRIDE",
+      mode: "COMBINED",
+      stepIds: input.stepIds,
+      stepNames: steps.map((step) => step!.name),
+      interviewerIds: input.interviewerIds,
+      durationMinutes: 60,
+    });
+    this.db.addEvent(input.caseId, "CANDIDATE_COMBINED_INTERVIEW_CONFIGURED", "USER", {
+      stepIds: plan.stepIds,
+      interviewerIds: plan.interviewerIds,
+      durationMinutes: plan.durationMinutes,
+    });
+    return plan;
+  }
 
   async ingestSlackNotification(input: {
     channelId: string;
@@ -779,7 +899,16 @@ export class WorkflowService {
 
   async approveInterviewArrangement(
     reviewId: string,
-  ): Promise<{ notificationId: string; result: string; caseId: string }> {
+  ): Promise<{
+    notificationId: string;
+    result: string;
+    caseId: string;
+    templateStatus:
+      | "APPLIED"
+      | "UNCONFIGURED"
+      | "STALE"
+      | "CURRENT_STEP_NOT_CONFIGURED";
+  }> {
     const review = this.db.getReview(reviewId);
     if (
       !review ||
@@ -801,12 +930,47 @@ export class WorkflowService {
       recruitmentName: approval.context.recruitmentName,
       proposalDates: proposalDates(todayInKorea()),
     });
+    let template = approval.context.recruitmentRef
+      ? this.db.getRecruitmentInterviewTemplate(approval.context.recruitmentRef)
+      : undefined;
+    let templateStatus: "UNCONFIGURED" | "STALE" | "CURRENT_STEP_NOT_CONFIGURED" =
+      template ? "CURRENT_STEP_NOT_CONFIGURED" : "UNCONFIGURED";
+    if (template && this.ninehire.getRecruitmentPipeline) {
+      try {
+        const pipeline = await this.ninehire.getRecruitmentPipeline(template.recruitmentId);
+        if (pipelineHash(pipeline.steps) !== template.pipelineHash) {
+          template = undefined;
+          templateStatus = "STALE";
+        }
+      } catch {
+        // 나인하이어 조회가 일시적으로 실패해도 이미 승인된 템플릿을 사용합니다.
+      }
+    }
+    const currentStep = approval.evaluation.currentStep;
+    const templateStep = currentStep && template
+      ? template.steps.find((step) => step.stepId === currentStep.stepId)
+      : undefined;
+    if (templateStep) {
+      this.db.upsertCaseInterviewPlan({
+        caseId: interviewCase.id,
+        source: "TEMPLATE",
+        mode: templateStep.mode,
+        stepIds: [templateStep.stepId],
+        stepNames: [templateStep.name],
+        durationMinutes: templateStep.durationMinutes,
+      });
+    }
     this.db.updateNotificationStatus(review.notificationId, "PROCESSED");
     this.db.resolveReview(reviewId, "INTERVIEW_ARRANGEMENT_STARTED");
     return {
       notificationId: review.notificationId,
       result: "INTERVIEW_CASE_CREATED",
       caseId: interviewCase.id,
+      templateStatus: !template
+        ? templateStatus
+        : templateStep
+          ? "APPLIED"
+          : templateStatus,
     };
   }
 
@@ -953,6 +1117,10 @@ export class WorkflowService {
       caseId,
       upstream.interviewers.map((person) => person.ninehireUserId),
     );
+    const plan = this.db.getCaseInterviewPlan(caseId);
+    if (plan?.source === "CANDIDATE_OVERRIDE") {
+      this.db.setRequiredInterviewers(caseId, plan.interviewerIds);
+    }
     return {
       addedOrUpdated: upstream.interviewers.length,
       deactivated,

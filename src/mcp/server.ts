@@ -483,7 +483,10 @@ export function createBridgeMcpServer(
     async ({ caseId }) => {
       const bundle = db.getCaseBundle(caseId);
       if (!bundle) throw new Error(`Case not found: ${caseId}`);
-      return result(bundle);
+      return result({
+        ...bundle,
+        interviewPlan: db.getCaseInterviewPlan(caseId) ?? null,
+      });
     },
   );
 
@@ -585,6 +588,64 @@ export function createBridgeMcpServer(
       },
     },
     async (input) => result(await ninehire.listInProgressRecruitments(input)),
+  );
+
+  server.registerTool(
+    "preview_recruitment_interview_template",
+    {
+      title: "채용 면접 단계 템플릿 미리 보기",
+      description:
+        "나인하이어 칸반 단계와 기존 승인 템플릿을 비교합니다. 단계 선택과 승인 전에는 데이터를 변경하지 않습니다.",
+      inputSchema: { recruitmentId: z.string().min(1) },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ recruitmentId }) =>
+      result(await workflow.previewRecruitmentInterviewTemplate(recruitmentId)),
+  );
+
+  server.registerTool(
+    "approve_recruitment_interview_template",
+    {
+      title: "채용 면접 단계 템플릿 승인",
+      description:
+        "확인한 칸반 단계만 면접 단계로 저장합니다. 기본 시간은 모두 60분이며 COMBINED는 한 시간에 모든 참석자가 함께 진행하는 면접입니다.",
+      inputSchema: {
+        recruitmentId: z.string().min(1),
+        steps: z.array(z.object({
+          stepId: z.string().min(1),
+          mode: z.enum(["STANDARD", "COMBINED"]),
+        })).min(1).max(10),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async (input) => result(await workflow.approveRecruitmentInterviewTemplate(input)),
+  );
+
+  server.registerTool(
+    "get_recruitment_interview_template",
+    {
+      title: "승인된 채용 면접 템플릿 조회",
+      description: "로컬에 승인·저장된 채용별 면접 단계 규칙을 조회합니다.",
+      inputSchema: { recruitmentId: z.string().min(1) },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ recruitmentId }) =>
+      result({ template: db.getRecruitmentInterviewTemplate(recruitmentId) ?? null }),
   );
 
   server.registerTool(
@@ -940,6 +1001,27 @@ export function createBridgeMcpServer(
       if (proposalDates) db.setCaseProposalDates(caseId, proposalDates);
       return result(db.getCase(caseId));
     },
+  );
+
+  server.registerTool(
+    "set_case_combined_interview_plan",
+    {
+      title: "후보자 통합 면접 예외 적용",
+      description:
+        "선택한 두 개 이상 면접 단계를 한 번의 60분 면접으로 묶고, 이번 후보자에게 실제 참석할 면접관만 필수로 설정합니다. 면접관 일정 요청을 발송하기 전 단계에서만 변경할 수 있습니다.",
+      inputSchema: {
+        caseId: z.string().uuid(),
+        stepIds: z.array(z.string().min(1)).min(2).max(10),
+        interviewerIds: z.array(z.string().uuid()).min(1).max(30),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (input) => result(workflow.setCaseCombinedInterviewPlan(input)),
   );
 
   server.registerTool(

@@ -55,6 +55,20 @@ export interface NinehireRecruitmentList {
   recruitments: NinehireRecruitmentSummary[];
 }
 
+export interface RecruitmentPipelineStep {
+  stepId: string;
+  title: string;
+  name: string;
+  order: number;
+  applicantCount: number;
+}
+
+export interface RecruitmentPipeline {
+  recruitmentId: string;
+  recruitmentName: string;
+  steps: RecruitmentPipelineStep[];
+}
+
 export interface EvaluationOptionSummary {
   title: string;
   score?: number;
@@ -87,6 +101,11 @@ export interface EvaluationSummary {
   applicantProgressId: string;
   recruitmentId: string;
   scoreSheets: ScoreSheetSummary[];
+  currentStep?: {
+    stepId: string;
+    name: string;
+    order?: number;
+  };
 }
 
 export interface EvaluationLookup {

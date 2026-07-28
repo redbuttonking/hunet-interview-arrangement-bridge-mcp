@@ -5,6 +5,7 @@ import type {
   InterviewerLookup,
   NinehireInterviewer,
   NinehireRecruitmentList,
+  RecruitmentPipeline,
 } from "../domain/types.js";
 import { NinehireMcpGateway } from "./gateway.js";
 
@@ -18,6 +19,7 @@ export interface NinehireWorkflowAdapter {
     limit: number;
     offset: number;
   }): Promise<NinehireRecruitmentList>;
+  getRecruitmentPipeline?(recruitmentId: string): Promise<RecruitmentPipeline>;
 }
 
 export function upstreamPayload(result: Record<string, unknown>): unknown {
@@ -191,7 +193,24 @@ function summarizeCompletedScoreSheets(
       };
     });
   if (scoreSheets.length === 0) return undefined;
-  return { applicantProgressId, recruitmentId, scoreSheets };
+  const stepId = text(detail.stepId);
+  const stepName = text(detail.stepName);
+  return {
+    applicantProgressId,
+    recruitmentId,
+    scoreSheets,
+    ...(stepId && stepName
+      ? {
+          currentStep: {
+            stepId,
+            name: stepName,
+            ...(typeof detail.stepOrder === "number"
+              ? { order: detail.stepOrder }
+              : {}),
+          },
+        }
+      : {}),
+  };
 }
 
 export class NinehireRecruitmentWorkflowAdapter
@@ -252,6 +271,43 @@ export class NinehireRecruitmentWorkflowAdapter
       offset:
         typeof payload?.offset === "number" ? payload.offset : input.offset,
       recruitments,
+    };
+  }
+
+  async getRecruitmentPipeline(recruitmentId: string): Promise<RecruitmentPipeline> {
+    const recruitment = asRecord(
+      upstreamPayload(
+        await this.gateway.callTool("get_recruitment", { recruitmentId }),
+      ),
+    );
+    if (!recruitment) {
+      throw new Error("NineHire recruitment result format is invalid.");
+    }
+    const resolvedRecruitmentId = text(recruitment.recruitmentId);
+    const recruitmentName = text(recruitment.title);
+    if (!resolvedRecruitmentId || !recruitmentName) {
+      throw new Error("NineHire recruitment is missing its ID or title.");
+    }
+    return {
+      recruitmentId: resolvedRecruitmentId,
+      recruitmentName,
+      steps: records(recruitment.steps)
+        .flatMap((step) => {
+          const stepId = text(step.stepId);
+          const title = text(step.title);
+          const name = text(step.name);
+          const order = step.order;
+          if (!stepId || !title || !name || typeof order !== "number") return [];
+          return [{
+            stepId,
+            title,
+            name,
+            order,
+            applicantCount:
+              typeof step.applicantCount === "number" ? step.applicantCount : 0,
+          }];
+        })
+        .sort((left, right) => left.order - right.order),
     };
   }
 

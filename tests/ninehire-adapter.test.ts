@@ -257,4 +257,56 @@ describe("NineHire approval adapter", () => {
     ]);
     expect(lookup.unresolvedUserGroups).toEqual(["개발팀"]);
   });
+
+  it("reads an ordered recruitment pipeline from NineHire", async () => {
+    const adapter = new NinehireRecruitmentWorkflowAdapter({
+      async callTool(name, args) {
+        expect(name).toBe("get_recruitment");
+        expect(args).toEqual({ recruitmentId: "R1" });
+        return {
+          structuredContent: {
+            recruitmentId: "R1",
+            title: "Recruitment",
+            steps: [
+              {
+                stepId: "S2",
+                title: "Second interview",
+                name: "Second interview",
+                order: 2,
+                applicantCount: 3,
+              },
+              {
+                stepId: "S1",
+                title: "First interview",
+                name: "First interview",
+                order: 1,
+                applicantCount: 4,
+              },
+            ],
+          },
+        };
+      },
+    });
+
+    await expect(adapter.getRecruitmentPipeline("R1")).resolves.toEqual({
+      recruitmentId: "R1",
+      recruitmentName: "Recruitment",
+      steps: [
+        {
+          stepId: "S1",
+          title: "First interview",
+          name: "First interview",
+          order: 1,
+          applicantCount: 4,
+        },
+        {
+          stepId: "S2",
+          title: "Second interview",
+          name: "Second interview",
+          order: 2,
+          applicantCount: 3,
+        },
+      ],
+    });
+  });
 });

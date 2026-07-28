@@ -115,6 +115,16 @@ Codex는 이 서버의 MCP 도구를 호출하고, 로컬 백그라운드 워커
 - 중복 이벤트 방지, 상태 이력, 검토 대기 사유, 메시지 발송 상태 저장
 - 워커 중단 감지와 미제출 면접관 대상 재제출 요청 초안
 
+## 채용별 면접 단계 템플릿
+
+나인하이어의 채용 칸반 단계는 `get_recruitment.steps`에서 제목·순서·현재 인원 수와 함께 읽는다. `preview_recruitment_interview_template`로 초안을 확인한 뒤 `approve_recruitment_interview_template`에서 실제 면접 단계만 승인한다.
+
+- 승인된 모든 기본 면접 시간은 60분이다. CEO 인터뷰도 60분으로 동일하게 적용한다.
+- 칸반 단계가 `실무자, 임원 면접`처럼 통합 면접인 경우 `COMBINED`로 승인한다. 이는 1차·2차 면접관이 한 시간에 모두 참석하는 단일 면접이다.
+- 템플릿은 나인하이어 채용 ID에 연결한다. 칸반 구성이 바뀌면 미리 보기 결과가 `requiresApproval: true`가 되어 재승인을 요구한다.
+- 후보자별 긴급 예외는 `set_case_combined_interview_plan`으로 설정한다. 두 단계 이상을 60분으로 통합하고, 이번 후보자에게 실제로 참석할 면접관만 필수로 지정한다.
+- 통합 예외는 면접관 일정 요청을 보내기 전까지만 변경할 수 있으며, 나인하이어의 단계 이동이나 합격 처리는 자동으로 변경하지 않는다.
+
 ## 중요한 범위 구분
 
 나인하이어 공식 설명에 따르면 지원자 단계 이동, 불합격 처리, 안내 메일 발송, 면접 일정 조율 같은 규칙 기반 작업은 나인하이어 MCP가 아니라 나인하이어 워크플로우 자동화의 범위입니다. 따라서 이 프로젝트는 다음처럼 역할을 나눕니다.
@@ -319,6 +329,9 @@ tool_timeout_sec = 60.0
 | `suggest_common_interview_slots` | 필수 면접관 공통 가능시간 계산 | 없음 |
 | `list_workflow_reviews` | 사람 판단이 필요한 항목 | 없음 |
 | `list_in_progress_recruitments` | 진행 중인 나인하이어 채용 목록과 마감 정보 조회 | 외부 읽기 |
+| `preview_recruitment_interview_template` | 나인하이어 칸반 단계와 승인 필요 여부 확인 | 외부 읽기 |
+| `approve_recruitment_interview_template` | 채용별 면접 단계·통합 여부·기본 60분 규칙 저장 | 로컬 상태 갱신 |
+| `get_recruitment_interview_template` | 승인된 채용별 면접 단계 규칙 조회 | 없음 |
 | `inspect_ninehire_tools` | 나인하이어 도구 스키마 조회 | 읽기 |
 | `sync_slack_notifications` | Slack 원본 채널 즉시 재확인 | 외부 읽기, 로컬 상태 갱신 |
 | `list_integration_retry_jobs` | Slack·나인하이어 재시도 대기·실패 현황 조회 | 없음 |
@@ -333,6 +346,7 @@ tool_timeout_sec = 60.0
 | `exclude_case_interviewer` | 이번 건에서 면접관 제외 | 로컬 상태 갱신, 이력 보존 |
 | `set_interviewer_required` | 필수/선택 면접관 변경 | 로컬 상태 갱신 |
 | `set_case_schedule_rules` | 소요시간·제안 날짜 변경 | 로컬 상태 갱신 |
+| `set_case_combined_interview_plan` | 후보자별 통합 면접과 실제 참석 면접관 지정 | 로컬 상태 갱신 |
 | `record_manual_availability` | 예외 시간 직접 기록 | 로컬 상태 갱신 |
 | `create_availability_recovery_draft` | 워커 중단 후 미제출 면접관 재요청 초안 생성 | 발송 없음 |
 | `create_interviewer_request_draft` | Slack 메시지 초안 생성 | 발송 없음 |

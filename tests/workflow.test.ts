@@ -65,6 +65,74 @@ function createAwaitingCandidateConfirmationCase(
 }
 
 describe("evaluation approval workflow", () => {
+  it("stores a candidate-specific combined interview with selected interviewers", () => {
+    db = new BridgeDatabase(":memory:");
+    const ninehire: NinehireWorkflowAdapter = {
+      async lookupCompletedEvaluation() {
+        return { reason: "Not used in this test." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    };
+    const workflow = new WorkflowService(db, config, ninehire);
+    const interviewCase = db.createInterviewCase({
+      candidateName: "Candidate",
+      recruitmentRef: "R1",
+      proposalDates: ["2026-07-30"],
+    });
+    db.upsertRecruitmentInterviewTemplate({
+      recruitmentId: "R1",
+      recruitmentName: "Recruitment",
+      pipelineHash: "pipeline-hash",
+      steps: [
+        {
+          stepId: "S1",
+          title: "First interview",
+          name: "First interview",
+          order: 1,
+          mode: "STANDARD",
+          durationMinutes: 60,
+        },
+        {
+          stepId: "S2",
+          title: "Second interview",
+          name: "Second interview",
+          order: 2,
+          mode: "STANDARD",
+          durationMinutes: 60,
+        },
+      ],
+    });
+    const first = db.addOrUpdateInterviewer({
+      caseId: interviewCase.id,
+      displayName: "First interviewer",
+      source: "MANUAL",
+    });
+    const second = db.addOrUpdateInterviewer({
+      caseId: interviewCase.id,
+      displayName: "Second interviewer",
+      source: "MANUAL",
+    });
+
+    const plan = workflow.setCaseCombinedInterviewPlan({
+      caseId: interviewCase.id,
+      stepIds: ["S1", "S2"],
+      interviewerIds: [first.id, second.id],
+    });
+
+    expect(plan).toMatchObject({
+      source: "CANDIDATE_OVERRIDE",
+      mode: "COMBINED",
+      durationMinutes: 60,
+      interviewerIds: [first.id, second.id],
+    });
+    expect(db.getCase(interviewCase.id)?.durationMinutes).toBe(60);
+  });
+
   it("waits for user approval before creating an interview case", async () => {
     db = new BridgeDatabase(":memory:");
     const ninehire: NinehireWorkflowAdapter = {

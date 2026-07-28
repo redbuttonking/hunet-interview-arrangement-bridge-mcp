@@ -5,6 +5,66 @@ let db: BridgeDatabase | undefined;
 afterEach(() => db?.close());
 
 describe("BridgeDatabase", () => {
+  it("stores a recruitment template and a candidate-specific combined plan", () => {
+    db = new BridgeDatabase(":memory:");
+    const interviewCase = db.createInterviewCase({
+      candidateName: "Candidate",
+      recruitmentRef: "R1",
+      proposalDates: ["2026-07-30"],
+    });
+    const first = db.addOrUpdateInterviewer({
+      caseId: interviewCase.id,
+      displayName: "First interviewer",
+      source: "MANUAL",
+    });
+    const second = db.addOrUpdateInterviewer({
+      caseId: interviewCase.id,
+      displayName: "Second interviewer",
+      source: "MANUAL",
+    });
+    db.upsertRecruitmentInterviewTemplate({
+      recruitmentId: "R1",
+      recruitmentName: "Recruitment",
+      pipelineHash: "pipeline-hash",
+      steps: [
+        {
+          stepId: "S1",
+          title: "First interview",
+          name: "First interview",
+          order: 1,
+          mode: "STANDARD",
+          durationMinutes: 60,
+        },
+        {
+          stepId: "S2",
+          title: "Second interview",
+          name: "Second interview",
+          order: 2,
+          mode: "STANDARD",
+          durationMinutes: 60,
+        },
+      ],
+    });
+    db.setRequiredInterviewers(interviewCase.id, [first.id]);
+    const plan = db.upsertCaseInterviewPlan({
+      caseId: interviewCase.id,
+      source: "CANDIDATE_OVERRIDE",
+      mode: "COMBINED",
+      stepIds: ["S1", "S2"],
+      stepNames: ["First interview", "Second interview"],
+      interviewerIds: [first.id, second.id],
+      durationMinutes: 60,
+    });
+
+    expect(db.getRecruitmentInterviewTemplate("R1")?.steps).toHaveLength(2);
+    expect(plan).toMatchObject({
+      mode: "COMBINED",
+      durationMinutes: 60,
+      interviewerIds: [first.id, second.id],
+    });
+    expect(db.getCase(interviewCase.id)?.durationMinutes).toBe(60);
+  });
+
   it("deduplicates Slack messages and preserves excluded interviewer history", () => {
     db = new BridgeDatabase(":memory:");
     const input = {
