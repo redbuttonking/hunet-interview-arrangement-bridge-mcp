@@ -19,6 +19,7 @@ import type {
   CandidateContext,
   EvaluationSummary,
   RescheduleAvailabilityPolicy,
+  ScoreSheetSummary,
   SlackNotificationInput,
 } from "../domain/types.js";
 import type { NinehireWorkflowAdapter } from "../ninehire/adapter.js";
@@ -258,25 +259,51 @@ function evaluationApprovalPayload(
   return { context: candidateContext, evaluation: evaluationSummary };
 }
 
+function finalDecisionTitles(scoreSheet: ScoreSheetSummary): string[] {
+  return scoreSheet.evaluators.flatMap((evaluator) =>
+    evaluator.items
+      .filter((item) => item.finalEvaluation)
+      .flatMap((item) => item.selectedOptions.map((option) => option.title.trim())),
+  );
+}
+
+function latestFinalScoreSheet(
+  evaluation: EvaluationSummary,
+): ScoreSheetSummary | undefined {
+  const scoreSheets = evaluation.scoreSheets
+    .map((scoreSheet) => ({
+      scoreSheet,
+      completedAt: Date.parse(scoreSheet.completedAt ?? ""),
+    }))
+    .filter(({ scoreSheet }) => finalDecisionTitles(scoreSheet).length > 0);
+
+  if (scoreSheets.length === 0) return undefined;
+  if (scoreSheets.length === 1) return scoreSheets[0]!.scoreSheet;
+  if (scoreSheets.some(({ completedAt }) => !Number.isFinite(completedAt))) {
+    return undefined;
+  }
+
+  scoreSheets.sort((left, right) => right.completedAt - left.completedAt);
+  if (scoreSheets[0]!.completedAt === scoreSheets[1]!.completedAt) {
+    return undefined;
+  }
+  return scoreSheets[0]!.scoreSheet;
+}
+
 function classifyInterviewArrangementEligibility(
   evaluation: EvaluationSummary,
 ): InterviewArrangementEligibility {
-  const finalDecisionTitles = evaluation.scoreSheets.flatMap((scoreSheet) =>
-    scoreSheet.evaluators.flatMap((evaluator) =>
-      evaluator.items
-        .filter((item) => item.finalEvaluation)
-        .flatMap((item) => item.selectedOptions.map((option) => option.title.trim())),
-    ),
-  );
+  const scoreSheet = latestFinalScoreSheet(evaluation);
+  if (!scoreSheet) return "REVIEW_REQUIRED";
 
-  if (finalDecisionTitles.length === 0) return "REVIEW_REQUIRED";
+  const decisions = finalDecisionTitles(scoreSheet);
 
-  const hasPass = finalDecisionTitles.some(
+  const hasPass = decisions.some(
     (title) => title.includes("합격") && !title.includes("불합격"),
   );
   if (hasPass) return "ELIGIBLE";
 
-  const hasOnlyRejectOrHold = finalDecisionTitles.every(
+  const hasOnlyRejectOrHold = decisions.every(
     (title) => title.includes("불합격") || title.includes("보류"),
   );
   return hasOnlyRejectOrHold ? "NOT_ELIGIBLE" : "REVIEW_REQUIRED";

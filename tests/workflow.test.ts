@@ -859,6 +859,96 @@ describe("evaluation approval workflow", () => {
     expect(db.listOpenReviews()).toHaveLength(0);
   });
 
+  it("excludes a candidate when the latest final score sheet is rejected", () => {
+    db = new BridgeDatabase(":memory:");
+    const ninehire: NinehireWorkflowAdapter = {
+      async lookupCompletedEvaluation() {
+        return { reason: "이 테스트에서는 사용하지 않습니다." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    };
+    const workflow = new WorkflowService(db, config, ninehire);
+    const notification = db.insertNotification({
+      channelId: "C1",
+      messageTs: "1.3",
+      eventType: "EVALUATION_COMPLETED",
+      title: "평가가 완료되었습니다.",
+      payloadHash: "latest-reject-hash",
+      payloadJson: "{}",
+    }, "AWAITING_START_APPROVAL");
+    const reviewId = db.createReview({
+      notificationId: notification.id,
+      reviewType: "INTERVIEW_ARRANGEMENT_START_REQUIRED",
+      reason: "기존 검토 건",
+      summary: {
+        context: {
+          candidateRef: "A126",
+          candidateName: "지원자 2",
+          recruitmentRef: "J457",
+          recruitmentName: "테스트 채용",
+        },
+        evaluation: {
+          applicantProgressId: "A126",
+          recruitmentId: "J457",
+          scoreSheets: [
+            {
+              scoreSheetId: "S4",
+              title: "서류전형 평가표",
+              completedAt: "2026-07-06T04:34:25.000Z",
+              participants: ["평가자 1"],
+              evaluators: [
+                {
+                  name: "평가자 1",
+                  items: [
+                    {
+                      title: "최종 평가",
+                      finalEvaluation: true,
+                      selectedOptions: [{ title: "합격" }],
+                    },
+                  ],
+                },
+              ],
+            },
+            {
+              scoreSheetId: "S5",
+              title: "2차 인터뷰 전형 평가표",
+              completedAt: "2026-07-28T08:01:26.000Z",
+              participants: ["평가자 2"],
+              evaluators: [
+                {
+                  name: "평가자 2",
+                  items: [
+                    {
+                      title: "최종 평가",
+                      finalEvaluation: true,
+                      selectedOptions: [{ title: "불합격" }],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      },
+    });
+
+    expect(workflow.reprocessInterviewArrangementEligibilityReviews()).toEqual({
+      scanned: 1,
+      eligible: 0,
+      excluded: 1,
+      decisionRequired: 0,
+    });
+    expect(db.getReview(reviewId)).toMatchObject({
+      status: "RESOLVED",
+      resolution: "AUTO_EXCLUDED_NO_PASS",
+    });
+  });
+
   it("creates a recovery draft only for pending interviewers after worker downtime", () => {
     db = new BridgeDatabase(":memory:");
     const ninehire: NinehireWorkflowAdapter = {
