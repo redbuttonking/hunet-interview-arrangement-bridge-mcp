@@ -216,7 +216,7 @@ export interface RecruitmentInterviewTemplateStep {
   name: string;
   order: number;
   mode: InterviewPlanMode;
-  durationMinutes: 60;
+  durationMinutes: number;
 }
 
 export interface RecruitmentInterviewRoute {

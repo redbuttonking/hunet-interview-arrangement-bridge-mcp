@@ -65,6 +65,141 @@ function createAwaitingCandidateConfirmationCase(
 }
 
 describe("evaluation approval workflow", () => {
+  it("suggests CEO conversation and combined interview stages from the pipeline", async () => {
+    db = new BridgeDatabase(":memory:");
+    const ninehire: NinehireWorkflowAdapter = {
+      async lookupCompletedEvaluation() {
+        return { reason: "테스트에서는 사용하지 않습니다." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+      async getRecruitmentPipeline() {
+        return {
+          recruitmentId: "R1",
+          recruitmentName: "Recruitment",
+          steps: [
+            { stepId: "S0", title: "접수", name: "접수", order: 1, applicantCount: 0 },
+            {
+              stepId: "S1",
+              title: "실무자 + HR 인터뷰",
+              name: "실무자 + HR 인터뷰",
+              order: 2,
+              applicantCount: 0,
+            },
+            {
+              stepId: "S2",
+              title: "CEO와의 대화",
+              name: "CEO와의 대화",
+              order: 3,
+              applicantCount: 0,
+            },
+          ],
+        };
+      },
+    };
+    const workflow = new WorkflowService(db, config, ninehire);
+
+    const preview = await workflow.previewRecruitmentInterviewTemplate("R1");
+
+    expect(preview.steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        stepId: "S1",
+        suggestedAsInterview: true,
+        suggestedMode: "COMBINED",
+        defaultDurationMinutes: 60,
+      }),
+      expect.objectContaining({
+        stepId: "S2",
+        suggestedAsInterview: true,
+        suggestedMode: "STANDARD",
+        defaultDurationMinutes: 60,
+      }),
+    ]));
+    expect(preview.suggestedRoutes).toEqual([
+      { triggerStepId: "S1", mode: "COMBINED", stepIds: ["S1"] },
+      { triggerStepId: "S2", mode: "STANDARD", stepIds: ["S2"] },
+    ]);
+  });
+
+  it("applies an approved 30-minute standard interview template", async () => {
+    db = new BridgeDatabase(":memory:");
+    const ninehire: NinehireWorkflowAdapter = {
+      async lookupCompletedEvaluation() {
+        return { reason: "테스트에서는 사용하지 않습니다." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+      async getRecruitmentPipeline() {
+        return {
+          recruitmentId: "R1",
+          recruitmentName: "Recruitment",
+          steps: [
+            {
+              stepId: "S1",
+              title: "면접 및 시강",
+              name: "면접 및 시강",
+              order: 1,
+              applicantCount: 0,
+            },
+          ],
+        };
+      },
+    };
+    const workflow = new WorkflowService(db, config, ninehire);
+    await workflow.approveRecruitmentInterviewTemplate({
+      recruitmentId: "R1",
+      steps: [{ stepId: "S1", mode: "STANDARD", durationMinutes: 30 }],
+    });
+    const notification = db.insertNotification(
+      {
+        channelId: "C1",
+        messageTs: "30.0",
+        eventType: "EVALUATION_COMPLETED",
+        title: "Evaluation completed",
+        payloadHash: "30-minute-hash",
+        payloadJson: "{}",
+      },
+      "EVALUATION_READY_FOR_APPROVAL",
+    );
+    const reviewId = db.createReview({
+      notificationId: notification.id,
+      reviewType: "INTERVIEW_ARRANGEMENT_START_REQUIRED",
+      reason: "Approval required.",
+      summary: {
+        context: {
+          candidateRef: "A1",
+          candidateName: "Candidate",
+          recruitmentRef: "R1",
+          recruitmentName: "Recruitment",
+        },
+        evaluation: {
+          applicantProgressId: "A1",
+          recruitmentId: "R1",
+          scoreSheets: [],
+          currentStep: { stepId: "S1", name: "면접 및 시강", order: 1 },
+        },
+      },
+    });
+
+    const approved = await workflow.approveInterviewArrangement(reviewId);
+
+    expect(db.getRecruitmentInterviewTemplate("R1")?.steps).toMatchObject([
+      { stepId: "S1", mode: "STANDARD", durationMinutes: 30 },
+    ]);
+    expect(db.getCaseInterviewPlan(approved.caseId)).toMatchObject({
+      mode: "STANDARD",
+      durationMinutes: 30,
+    });
+  });
+
   it("stores a candidate-specific combined interview with selected interviewers", () => {
     db = new BridgeDatabase(":memory:");
     const ninehire: NinehireWorkflowAdapter = {

@@ -700,12 +700,13 @@ export function createBridgeMcpServer(
     {
       title: "채용 인터뷰 단계 템플릿 승인",
       description:
-        "확인한 칸반 단계만 인터뷰 단계로 저장합니다. 기본 시간은 모두 60분이며 COMBINED는 한 시간에 모든 참석자가 함께 진행하는 인터뷰입니다.",
+        "확인한 칸반 단계만 인터뷰 단계로 저장합니다. 기본 시간은 60분이며 단계별 소요시간을 명시적으로 바꿀 수 있습니다. COMBINED는 한 시간에 모든 참석자가 함께 진행하는 인터뷰입니다.",
       inputSchema: {
         recruitmentId: z.string().min(1),
         steps: z.array(z.object({
           stepId: z.string().min(1),
           mode: z.enum(["STANDARD", "COMBINED"]),
+          durationMinutes: z.number().int().positive().optional(),
         })).min(1).max(10),
         routes: z.array(z.object({
           triggerStepId: z.string().min(1),

@@ -87,7 +87,19 @@ function pipelineHash(steps: Array<{ stepId: string; title: string; name: string
 }
 
 function isSuggestedInterviewStep(step: { title: string; name: string }): boolean {
-  return /면접|인터뷰|시강/u.test(`${step.title} ${step.name}`);
+  const text = `${step.title} ${step.name}`;
+  return /면접|인터뷰|시강|CEO\s*와의\s*대화/ui.test(text);
+}
+
+function suggestedInterviewMode(
+  step: { title: string; name: string },
+): "STANDARD" | "COMBINED" {
+  const normalized = `${step.title} ${step.name}`.replace(/\s/gu, "").toLowerCase();
+  return normalized.includes("실무자+hr") ||
+    normalized.includes("실무자+임원") ||
+    normalized.includes("실무자,임원")
+    ? "COMBINED"
+    : "STANDARD";
 }
 
 type RecruitmentInterviewRouteSelection = {
@@ -135,6 +147,12 @@ function resolveTemplateRoutes(
     }
     if (selection.mode === "SEQUENTIAL" && orderedStepIds.length < 2) {
       throw new Error("A sequential interview route needs at least two stages.");
+    }
+    if (
+      selection.mode === "SEQUENTIAL" &&
+      orderedStepIds.some((stepId) => byId.get(stepId)!.durationMinutes !== 60)
+    ) {
+      throw new Error("Every sequential interview stage must be 60 minutes.");
     }
     return {
       triggerStepId: selection.triggerStepId,
@@ -317,13 +335,16 @@ export class WorkflowService {
           .filter((step) => isSuggestedInterviewStep(step))
           .map((step) => ({
             ...step,
-            mode: "STANDARD" as const,
-            durationMinutes: 60 as const,
+            mode: suggestedInterviewMode(step),
+            durationMinutes: 60,
           })),
       ),
       steps: pipeline.steps.map((step) => ({
         ...step,
         suggestedAsInterview: isSuggestedInterviewStep(step),
+        suggestedMode: isSuggestedInterviewStep(step)
+          ? suggestedInterviewMode(step)
+          : null,
         defaultDurationMinutes: 60,
       })),
     };
@@ -331,7 +352,11 @@ export class WorkflowService {
 
   async approveRecruitmentInterviewTemplate(input: {
     recruitmentId: string;
-    steps: Array<{ stepId: string; mode: "STANDARD" | "COMBINED" }>;
+    steps: Array<{
+      stepId: string;
+      mode: "STANDARD" | "COMBINED";
+      durationMinutes?: number;
+    }>;
     routes?: RecruitmentInterviewRouteSelection[];
   }) {
     if (!this.ninehire.getRecruitmentPipeline) {
@@ -339,6 +364,21 @@ export class WorkflowService {
     }
     if (input.steps.length === 0) {
       throw new Error("Select at least one interview step before approval.");
+    }
+    if (
+      input.steps.some((step) =>
+        step.durationMinutes !== undefined &&
+        (!Number.isInteger(step.durationMinutes) || step.durationMinutes <= 0),
+      )
+    ) {
+      throw new Error("Interview step duration must be a positive whole number of minutes.");
+    }
+    if (
+      input.steps.some(
+        (step) => step.mode === "COMBINED" && step.durationMinutes !== undefined && step.durationMinutes !== 60,
+      )
+    ) {
+      throw new Error("A combined interview template must be 60 minutes.");
     }
     const pipeline = await this.ninehire.getRecruitmentPipeline(input.recruitmentId);
     const pipelineById = new Map(pipeline.steps.map((step) => [step.stepId, step]));
@@ -357,7 +397,7 @@ export class WorkflowService {
           name: step.name,
           order: step.order,
           mode: selection.mode,
-          durationMinutes: 60 as const,
+          durationMinutes: selection.durationMinutes ?? 60,
         };
       })
       .sort((left, right) => left.order - right.order);
@@ -1115,7 +1155,9 @@ export class WorkflowService {
         stepIds: resolvedSteps.map((step) => step.stepId),
         stepNames: resolvedSteps.map((step) => step.name),
         sessions,
-        durationMinutes: mode === "SEQUENTIAL" ? resolvedSteps.length * 60 : 60,
+        durationMinutes: mode === "SEQUENTIAL"
+          ? resolvedSteps.reduce((total, step) => total + step.durationMinutes, 0)
+          : resolvedSteps[0]!.durationMinutes,
       });
       this.db.addEvent(interviewCase.id, "TEMPLATE_INTERVIEW_ROUTE_APPLIED", "SYSTEM", {
         triggerStepId: templateRoute.triggerStepId,
