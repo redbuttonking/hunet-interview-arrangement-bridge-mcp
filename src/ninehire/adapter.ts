@@ -76,9 +76,58 @@ function identifierFromReference(reference?: string): string | undefined {
   if (!reference) return undefined;
   try {
     const url = new URL(reference);
-    return url.pathname.split("/").filter(Boolean).at(-1);
+    const identifier = url.pathname.split("/").filter(Boolean).at(-1);
+    return identifier === "applicants" || identifier === "recruitment"
+      ? undefined
+      : identifier;
   } catch {
     return reference.includes("/") ? undefined : reference;
+  }
+}
+
+function identifierAfterPathSegment(
+  reference: string | undefined,
+  segment: string,
+): string | undefined {
+  if (!reference) return undefined;
+  try {
+    const url = new URL(reference);
+    const segments = url.pathname.split("/").filter(Boolean);
+    const segmentIndex = segments.lastIndexOf(segment);
+    return segmentIndex >= 0 ? segments[segmentIndex + 1] : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function recruitmentIdFromReference(reference?: string): string | undefined {
+  if (!reference) return undefined;
+  try {
+    const url = new URL(reference);
+    return (
+      url.searchParams.get("recruitmentId") ??
+      identifierAfterPathSegment(reference, "recruitment") ??
+      identifierAfterPathSegment(reference, "recruitments") ??
+      identifierFromReference(reference)
+    );
+  } catch {
+    return identifierFromReference(reference);
+  }
+}
+
+function applicantProgressIdFromReference(
+  reference?: string,
+): string | undefined {
+  if (!reference) return undefined;
+  try {
+    const url = new URL(reference);
+    return (
+      url.searchParams.get("applicantProgressId") ??
+      identifierAfterPathSegment(reference, "applicants") ??
+      identifierFromReference(reference)
+    );
+  } catch {
+    return identifierFromReference(reference);
   }
 }
 
@@ -256,7 +305,9 @@ export class NinehireRecruitmentWorkflowAdapter
   private async findRecruitment(
     context: CandidateContext,
   ): Promise<{ value?: Record<string, unknown>; reason?: string }> {
-    const referencedId = identifierFromReference(context.recruitmentRef);
+    const referencedId =
+      recruitmentIdFromReference(context.recruitmentRef) ??
+      recruitmentIdFromReference(context.candidateRef);
     if (referencedId) {
       try {
         const result = asRecord(
@@ -266,11 +317,7 @@ export class NinehireRecruitmentWorkflowAdapter
             }),
           ),
         );
-        if (
-          result &&
-          (sameText(result.title, context.recruitmentName) ||
-            sameText(result.externalTitle, context.recruitmentName))
-        ) {
+        if (result) {
           return { value: result };
         }
       } catch {
@@ -297,7 +344,7 @@ export class NinehireRecruitmentWorkflowAdapter
     context: CandidateContext,
     recruitmentId: string,
   ): Promise<{ value?: Record<string, unknown>; reason?: string }> {
-    const referencedId = identifierFromReference(context.candidateRef);
+    const referencedId = applicantProgressIdFromReference(context.candidateRef);
     if (referencedId) {
       try {
         const detail = asRecord(

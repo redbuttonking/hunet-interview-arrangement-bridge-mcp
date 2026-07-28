@@ -159,6 +159,61 @@ describe("NineHire approval adapter", () => {
     });
   });
 
+  it("uses recruitment and applicant IDs embedded in a NineHire applicant link", async () => {
+    const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+    const adapter = new NinehireRecruitmentWorkflowAdapter({
+      async callTool(name, args) {
+        calls.push({ name, args });
+        if (name === "get_recruitment") {
+          return {
+            structuredContent: {
+              recruitmentId: "R1",
+              title: "Duplicate recruitment title",
+            },
+          };
+        }
+        if (name === "get_applicant_progress") {
+          return {
+            structuredContent: {
+              applicantProgressId: "A1",
+              name: "Candidate",
+              scoreSheets: [
+                {
+                  scoreSheetId: "S1",
+                  title: "Document review",
+                  status: { code: "done", name: "Done" },
+                  participants: [],
+                  scorings: [],
+                },
+              ],
+            },
+          };
+        }
+        throw new Error(`Unexpected tool: ${name}`);
+      },
+    });
+
+    await expect(
+      adapter.lookupCompletedEvaluation({
+        candidateRef:
+          "https://app.ninehire.com/workspace/recruitment/R1/applicants?applicantProgressId=A1",
+        candidateName: "Candidate",
+        recruitmentName: "Duplicate recruitment title",
+      }),
+    ).resolves.toMatchObject({
+      context: {
+        candidateRef: "A1",
+        recruitmentRef: "R1",
+      },
+    });
+
+    expect(calls).toEqual([
+      { name: "get_recruitment", args: { recruitmentId: "R1" } },
+      { name: "get_applicant_progress", args: { applicantProgressId: "A1" } },
+      { name: "get_applicant_progress", args: { applicantProgressId: "A1" } },
+    ]);
+  });
+
   it("uses direct recruitment participants and leaves user groups unresolved", async () => {
     const adapter = new NinehireRecruitmentWorkflowAdapter({
       async callTool(name) {
