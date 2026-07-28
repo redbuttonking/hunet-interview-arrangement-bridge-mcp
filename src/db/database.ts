@@ -1390,6 +1390,32 @@ export class BridgeDatabase {
     return rows.map(toCase);
   }
 
+  listOperationalCases(limit = 100): InterviewCaseRow[] {
+    const rows = this.connection
+      .prepare(`
+        SELECT * FROM interview_cases AS interview_case
+        WHERE ${this.operationalCasePredicate("interview_case")}
+        ORDER BY created_at DESC LIMIT ?
+      `)
+      .all(limit) as SqlRow[];
+    return rows.map(toCase);
+  }
+
+  private operationalCasePredicate(tableAlias: string): string {
+    return `
+      ${tableAlias}.status != 'CLOSED'
+      AND (
+        ${tableAlias}.status != 'CANCELLED'
+        OR EXISTS (
+          SELECT 1 FROM cancellation_external_follow_ups AS follow_up
+          WHERE follow_up.case_id = ${tableAlias}.id
+            AND follow_up.follow_up_type = 'NINEHIRE_CANDIDATE_SCHEDULE'
+            AND follow_up.status = 'PENDING'
+        )
+      )
+    `;
+  }
+
   listCasesWithPendingRequiredInterviewers(): InterviewCaseRow[] {
     const rows = this.connection
       .prepare(`
@@ -1410,6 +1436,7 @@ export class BridgeDatabase {
     caseId?: string;
     status?: CancellationExternalFollowUpStatus;
     limit?: number;
+    includeDaouOffice?: boolean;
   }): CancellationExternalFollowUpRow[] {
     const conditions: string[] = [];
     const values: Array<string | number> = [];
@@ -1420,6 +1447,9 @@ export class BridgeDatabase {
     if (input?.status) {
       conditions.push("status = ?");
       values.push(input.status);
+    }
+    if (!input?.includeDaouOffice) {
+      conditions.push("follow_up_type = 'NINEHIRE_CANDIDATE_SCHEDULE'");
     }
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
     values.push(input?.limit ?? 100);
@@ -1529,9 +1559,10 @@ export class BridgeDatabase {
         },
       );
     });
-    return this.listCancellationExternalFollowUps({ caseId: followUp.caseId }).find(
-      (item) => item.id === input.followUpId,
-    )!;
+    return this.listCancellationExternalFollowUps({
+      caseId: followUp.caseId,
+      includeDaouOffice: true,
+    }).find((item) => item.id === input.followUpId)!;
   }
 
   getOperationsDashboard(limit = 100): Record<string, unknown> {
@@ -1548,7 +1579,12 @@ export class BridgeDatabase {
       CLOSED: 0,
     };
     const countRows = this.connection
-      .prepare("SELECT status, COUNT(*) AS count FROM interview_cases GROUP BY status")
+      .prepare(`
+        SELECT status, COUNT(*) AS count
+        FROM interview_cases AS interview_case
+        WHERE ${this.operationalCasePredicate("interview_case")}
+        GROUP BY status
+      `)
       .all() as SqlRow[];
     for (const row of countRows) {
       const status = asString(row.status) as InterviewCaseStatus;
@@ -1556,7 +1592,7 @@ export class BridgeDatabase {
     }
     const scalar = (sql: string): number =>
       Number((this.connection.prepare(sql).get() as SqlRow).count);
-    const cases = this.listCases(undefined, limit);
+    const cases = this.listOperationalCases(limit);
     const reviews = this.listOpenReviews(limit);
     const reviewCountByCase = new Map<string, number>();
     for (const review of reviews) {
@@ -1595,7 +1631,11 @@ export class BridgeDatabase {
           "SELECT COUNT(*) AS count FROM workflow_reviews WHERE status = 'OPEN'",
         ),
         pendingCancellationExternalFollowUps: scalar(
-          "SELECT COUNT(*) AS count FROM cancellation_external_follow_ups WHERE status = 'PENDING'",
+          `
+            SELECT COUNT(*) AS count FROM cancellation_external_follow_ups
+            WHERE status = 'PENDING'
+              AND follow_up_type = 'NINEHIRE_CANDIDATE_SCHEDULE'
+          `,
         ),
         pendingRequiredInterviewerResponses: scalar(`
           SELECT COUNT(*) AS count

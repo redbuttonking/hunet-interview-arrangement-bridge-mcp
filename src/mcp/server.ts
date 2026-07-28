@@ -431,7 +431,8 @@ export function createBridgeMcpServer(
     "list_interview_cases",
     {
       title: "인터뷰 건 목록",
-      description: "로컬에 생성된 인터뷰 조율 건을 조회합니다.",
+      description:
+        "진행 중이거나 예정된 인터뷰 조율 건을 조회합니다. 취소 이력은 status에 CANCELLED를 지정한 경우에만 조회합니다.",
       inputSchema: {
         status: z
           .enum([
@@ -458,7 +459,10 @@ export function createBridgeMcpServer(
     },
     async ({ status, limit }) =>
       result({
-        cases: db.listCases(status, limit).map(caseSummary),
+        cases: (status
+          ? db.listCases(status, limit)
+          : db.listOperationalCases(limit)
+        ).map(caseSummary),
       }),
   );
 

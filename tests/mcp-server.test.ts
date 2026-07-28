@@ -160,6 +160,35 @@ describe("bridge MCP server", () => {
       recruitments: [{ recruitmentId: "R1", title: "진행 중 채용" }],
     });
 
+    const confirmedCase = db.createInterviewCase({
+      candidateName: "운영 현황 후보자",
+      proposalDates: ["2026-08-04"],
+    });
+    db.setCaseStatus(confirmedCase.id, "CONFIRMED");
+    const cancelledCase = db.createInterviewCase({
+      candidateName: "취소 이력 후보자",
+      proposalDates: ["2026-08-04"],
+    });
+    db.cancelInterviewArrangement({
+      caseId: cancelledCase.id,
+      reason: "테스트 취소",
+    });
+
+    const defaultCases = await client.callTool({
+      name: "list_interview_cases",
+      arguments: {},
+    });
+    expect(defaultCases.structuredContent).toMatchObject({
+      cases: [{ id: confirmedCase.id, status: "CONFIRMED" }],
+    });
+    const cancelledCases = await client.callTool({
+      name: "list_interview_cases",
+      arguments: { status: "CANCELLED" },
+    });
+    expect(cancelledCases.structuredContent).toMatchObject({
+      cases: [{ id: cancelledCase.id, status: "CANCELLED" }],
+    });
+
     await client.close();
     await server.close();
   });

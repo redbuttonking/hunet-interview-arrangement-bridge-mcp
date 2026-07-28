@@ -353,20 +353,30 @@ describe("BridgeDatabase", () => {
         resolutionNote: "나인하이어 후보자 일정을 취소했습니다.",
       }),
     ).toMatchObject({ status: "CONFIRMED" });
+
+    db.connection
+      .prepare(`
+        INSERT INTO cancellation_external_follow_ups(
+          id, case_id, follow_up_type, status, created_at
+        ) VALUES (?, ?, 'DAOU_ROOM_RESERVATION', 'NOT_REQUIRED', ?)
+      `)
+      .run("legacy-daou-follow-up", interviewCase.id, new Date().toISOString());
+    expect(db.listCancellationExternalFollowUps({ caseId: interviewCase.id })).toEqual([
+      expect.objectContaining({
+        followUpType: "NINEHIRE_CANDIDATE_SCHEDULE",
+        status: "CONFIRMED",
+      }),
+    ]);
     expect(db.getOperationsDashboard()).toMatchObject({
       summary: {
-        caseCountsByStatus: { CANCELLED: 1 },
+        caseCountsByStatus: { CANCELLED: 0 },
         pendingCancellationExternalFollowUps: 0,
       },
-      cases: [
-        {
-          candidateName: "테스트1",
-          status: "CANCELLED",
-          cancellationExternalFollowUps: [
-            { status: "CONFIRMED" },
-          ],
-        },
-      ],
+      cases: [],
     });
+    expect(db.listOperationalCases()).toEqual([]);
+    expect(db.listCases("CANCELLED")).toMatchObject([
+      { candidateName: "테스트1", status: "CANCELLED" },
+    ]);
   });
 });
