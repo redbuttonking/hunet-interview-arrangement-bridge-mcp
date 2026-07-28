@@ -954,6 +954,103 @@ export class BridgeDatabase {
         )
         .run();
     }
+
+    const versionEleven = this.connection
+      .prepare("SELECT version FROM schema_migrations WHERE version = 11")
+      .get() as SqlRow | undefined;
+    if (!versionEleven) {
+      this.connection.exec(`
+        CREATE TABLE IF NOT EXISTS recruitment_interview_templates (
+          recruitment_id TEXT PRIMARY KEY,
+          recruitment_name TEXT NOT NULL,
+          pipeline_hash TEXT NOT NULL,
+          steps_json TEXT NOT NULL,
+          approved_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS case_interview_plans (
+          case_id TEXT PRIMARY KEY REFERENCES interview_cases(id),
+          source TEXT NOT NULL,
+          mode TEXT NOT NULL,
+          step_ids_json TEXT NOT NULL,
+          step_names_json TEXT NOT NULL,
+          interviewer_ids_json TEXT NOT NULL,
+          duration_minutes INTEGER NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+      `);
+      this.connection
+        .prepare(
+          "INSERT INTO schema_migrations(version, applied_at) VALUES (11, datetime('now'))",
+        )
+        .run();
+    }
+
+    const versionTwelve = this.connection
+      .prepare("SELECT version FROM schema_migrations WHERE version = 12")
+      .get() as SqlRow | undefined;
+    if (!versionTwelve) {
+      const allocationColumns = this.connection
+        .prepare("PRAGMA table_info(room_allocations)")
+        .all() as SqlRow[];
+      if (!allocationColumns.some((column) => asString(column.name) === "sequence_index")) {
+        this.connection.exec(
+          "ALTER TABLE room_allocations ADD COLUMN sequence_index INTEGER NOT NULL DEFAULT 0",
+        );
+      }
+      const planColumns = this.connection
+        .prepare("PRAGMA table_info(case_interview_plans)")
+        .all() as SqlRow[];
+      if (!planColumns.some((column) => asString(column.name) === "sessions_json")) {
+        this.connection.exec(
+          "ALTER TABLE case_interview_plans ADD COLUMN sessions_json TEXT NOT NULL DEFAULT '[]'",
+        );
+      }
+      this.connection
+        .prepare(
+          "INSERT INTO schema_migrations(version, applied_at) VALUES (12, datetime('now'))",
+        )
+        .run();
+    }
+
+    const versionThirteen = this.connection
+      .prepare("SELECT version FROM schema_migrations WHERE version = 13")
+      .get() as SqlRow | undefined;
+    if (!versionThirteen) {
+      const allocationColumns = this.connection
+        .prepare("PRAGMA table_info(room_allocations)")
+        .all() as SqlRow[];
+      if (!allocationColumns.some((column) => asString(column.name) === "interview_step_id")) {
+        this.connection.exec(
+          "ALTER TABLE room_allocations ADD COLUMN interview_step_id TEXT",
+        );
+      }
+      this.connection
+        .prepare(
+          "INSERT INTO schema_migrations(version, applied_at) VALUES (13, datetime('now'))",
+        )
+        .run();
+    }
+
+    const versionFourteen = this.connection
+      .prepare("SELECT version FROM schema_migrations WHERE version = 14")
+      .get() as SqlRow | undefined;
+    if (!versionFourteen) {
+      const templateColumns = this.connection
+        .prepare("PRAGMA table_info(recruitment_interview_templates)")
+        .all() as SqlRow[];
+      if (!templateColumns.some((column) => asString(column.name) === "routes_json")) {
+        this.connection.exec(
+          "ALTER TABLE recruitment_interview_templates ADD COLUMN routes_json TEXT NOT NULL DEFAULT '[]'",
+        );
+      }
+      this.connection
+        .prepare(
+          "INSERT INTO schema_migrations(version, applied_at) VALUES (14, datetime('now'))",
+        )
+        .run();
+    }
   }
 
   transaction<T>(operation: () => T): T {
@@ -3653,103 +3750,6 @@ export class BridgeDatabase {
         2,
         second.toISOString(),
       );
-    }
-
-    const versionEleven = this.connection
-      .prepare("SELECT version FROM schema_migrations WHERE version = 11")
-      .get() as SqlRow | undefined;
-    if (!versionEleven) {
-      this.connection.exec(`
-        CREATE TABLE IF NOT EXISTS recruitment_interview_templates (
-          recruitment_id TEXT PRIMARY KEY,
-          recruitment_name TEXT NOT NULL,
-          pipeline_hash TEXT NOT NULL,
-          steps_json TEXT NOT NULL,
-          approved_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS case_interview_plans (
-          case_id TEXT PRIMARY KEY REFERENCES interview_cases(id),
-          source TEXT NOT NULL,
-          mode TEXT NOT NULL,
-          step_ids_json TEXT NOT NULL,
-          step_names_json TEXT NOT NULL,
-          interviewer_ids_json TEXT NOT NULL,
-          duration_minutes INTEGER NOT NULL,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        );
-      `);
-      this.connection
-        .prepare(
-          "INSERT INTO schema_migrations(version, applied_at) VALUES (11, datetime('now'))",
-        )
-        .run();
-    }
-
-    const versionTwelve = this.connection
-      .prepare("SELECT version FROM schema_migrations WHERE version = 12")
-      .get() as SqlRow | undefined;
-    if (!versionTwelve) {
-      const allocationColumns = this.connection
-        .prepare("PRAGMA table_info(room_allocations)")
-        .all() as SqlRow[];
-      if (!allocationColumns.some((column) => asString(column.name) === "sequence_index")) {
-        this.connection.exec(
-          "ALTER TABLE room_allocations ADD COLUMN sequence_index INTEGER NOT NULL DEFAULT 0",
-        );
-      }
-      const planColumns = this.connection
-        .prepare("PRAGMA table_info(case_interview_plans)")
-        .all() as SqlRow[];
-      if (!planColumns.some((column) => asString(column.name) === "sessions_json")) {
-        this.connection.exec(
-          "ALTER TABLE case_interview_plans ADD COLUMN sessions_json TEXT NOT NULL DEFAULT '[]'",
-        );
-      }
-      this.connection
-        .prepare(
-          "INSERT INTO schema_migrations(version, applied_at) VALUES (12, datetime('now'))",
-        )
-        .run();
-    }
-
-    const versionThirteen = this.connection
-      .prepare("SELECT version FROM schema_migrations WHERE version = 13")
-      .get() as SqlRow | undefined;
-    if (!versionThirteen) {
-      const allocationColumns = this.connection
-        .prepare("PRAGMA table_info(room_allocations)")
-        .all() as SqlRow[];
-      if (!allocationColumns.some((column) => asString(column.name) === "interview_step_id")) {
-        this.connection.exec(
-          "ALTER TABLE room_allocations ADD COLUMN interview_step_id TEXT",
-        );
-      }
-      this.connection
-        .prepare(
-          "INSERT INTO schema_migrations(version, applied_at) VALUES (13, datetime('now'))",
-        )
-        .run();
-    }
-
-    const versionFourteen = this.connection
-      .prepare("SELECT version FROM schema_migrations WHERE version = 14")
-      .get() as SqlRow | undefined;
-    if (!versionFourteen) {
-      const templateColumns = this.connection
-        .prepare("PRAGMA table_info(recruitment_interview_templates)")
-        .all() as SqlRow[];
-      if (!templateColumns.some((column) => asString(column.name) === "routes_json")) {
-        this.connection.exec(
-          "ALTER TABLE recruitment_interview_templates ADD COLUMN routes_json TEXT NOT NULL DEFAULT '[]'",
-        );
-      }
-      this.connection
-        .prepare(
-          "INSERT INTO schema_migrations(version, applied_at) VALUES (14, datetime('now'))",
-        )
-        .run();
     }
   }
 

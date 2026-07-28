@@ -5,6 +5,12 @@ let db: BridgeDatabase | undefined;
 afterEach(() => db?.close());
 
 describe("BridgeDatabase", () => {
+  it("applies every schema migration when the database opens", () => {
+    db = new BridgeDatabase(":memory:");
+
+    expect(db.getLatestSchemaVersion()).toBe(14);
+  });
+
   it("stores a recruitment template and a candidate-specific combined plan", () => {
     db = new BridgeDatabase(":memory:");
     const interviewCase = db.createInterviewCase({
