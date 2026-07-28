@@ -8,6 +8,9 @@ import {
   type DraftRow,
   type InterviewCaseRow,
   type IntegrationRetryJobRow,
+  type InterviewPlanMode,
+  type RecruitmentInterviewRoute,
+  type RecruitmentInterviewTemplateStep,
   type ScheduleTransitionResult,
   type WorkerDowntime,
 } from "../db/database.js";
@@ -84,6 +87,74 @@ function pipelineHash(steps: Array<{ stepId: string; title: string; name: string
 
 function isSuggestedInterviewStep(step: { title: string; name: string }): boolean {
   return /면접|인터뷰|시강/u.test(`${step.title} ${step.name}`);
+}
+
+type RecruitmentInterviewRouteSelection = {
+  triggerStepId: string;
+  mode: InterviewPlanMode;
+  stepIds: string[];
+};
+
+function defaultRoutes(
+  steps: RecruitmentInterviewTemplateStep[],
+): RecruitmentInterviewRoute[] {
+  return steps.map((step) => ({
+    triggerStepId: step.stepId,
+    mode: step.mode,
+    stepIds: [step.stepId],
+  }));
+}
+
+function resolveTemplateRoutes(
+  steps: RecruitmentInterviewTemplateStep[],
+  selections: RecruitmentInterviewRouteSelection[] | undefined,
+): RecruitmentInterviewRoute[] {
+  if (!selections || selections.length === 0) return defaultRoutes(steps);
+
+  const byId = new Map(steps.map((step) => [step.stepId, step]));
+  if (new Set(selections.map((route) => route.triggerStepId)).size !== selections.length) {
+    throw new Error("Each interview route needs a unique trigger step.");
+  }
+  const explicitRoutes = selections.map((selection) => {
+    const uniqueStepIds = [...new Set(selection.stepIds)];
+    if (
+      !byId.has(selection.triggerStepId) ||
+      uniqueStepIds.length === 0 ||
+      uniqueStepIds.some((stepId) => !byId.has(stepId))
+    ) {
+      throw new Error("Interview routes must use configured interview steps.");
+    }
+    const orderedStepIds = uniqueStepIds
+      .sort((left, right) => byId.get(left)!.order - byId.get(right)!.order);
+    if (orderedStepIds[0] !== selection.triggerStepId) {
+      throw new Error("An interview route must start with its trigger step.");
+    }
+    if (selection.mode === "STANDARD" && orderedStepIds.length !== 1) {
+      throw new Error("A standard interview route must contain exactly one step.");
+    }
+    if (selection.mode === "SEQUENTIAL" && orderedStepIds.length < 2) {
+      throw new Error("A sequential interview route needs at least two stages.");
+    }
+    return {
+      triggerStepId: selection.triggerStepId,
+      mode: selection.mode,
+      stepIds: orderedStepIds,
+    };
+  });
+  const coveredStepIds = new Set(explicitRoutes.flatMap((route) => route.stepIds));
+  return [
+    ...explicitRoutes,
+    ...steps
+      .filter((step) => !coveredStepIds.has(step.stepId))
+      .map((step) => ({
+        triggerStepId: step.stepId,
+        mode: step.mode,
+        stepIds: [step.stepId],
+      })),
+  ].sort(
+    (left, right) =>
+      byId.get(left.triggerStepId)!.order - byId.get(right.triggerStepId)!.order,
+  );
 }
 
 function replaceExactText(
@@ -240,6 +311,15 @@ export class WorkflowService {
       pipelineHash: hash,
       requiresApproval: !approved || approved.pipelineHash !== hash,
       approvedTemplate: approved ?? null,
+      suggestedRoutes: defaultRoutes(
+        pipeline.steps
+          .filter((step) => isSuggestedInterviewStep(step))
+          .map((step) => ({
+            ...step,
+            mode: "STANDARD" as const,
+            durationMinutes: 60 as const,
+          })),
+      ),
       steps: pipeline.steps.map((step) => ({
         ...step,
         suggestedAsInterview: isSuggestedInterviewStep(step),
@@ -251,6 +331,7 @@ export class WorkflowService {
   async approveRecruitmentInterviewTemplate(input: {
     recruitmentId: string;
     steps: Array<{ stepId: string; mode: "STANDARD" | "COMBINED" }>;
+    routes?: RecruitmentInterviewRouteSelection[];
   }) {
     if (!this.ninehire.getRecruitmentPipeline) {
       throw new Error("NineHire recruitment pipeline lookup is not available.");
@@ -279,11 +360,13 @@ export class WorkflowService {
         };
       })
       .sort((left, right) => left.order - right.order);
+    const routes = resolveTemplateRoutes(steps, input.routes);
     return this.db.upsertRecruitmentInterviewTemplate({
       recruitmentId: pipeline.recruitmentId,
       recruitmentName: pipeline.recruitmentName,
       pipelineHash: pipelineHash(pipeline.steps),
       steps,
+      routes,
     });
   }
 
@@ -1000,10 +1083,45 @@ export class WorkflowService {
       }
     }
     const currentStep = approval.evaluation.currentStep;
-    const templateStep = currentStep && template
+    const templateRoute = currentStep && template
+      ? template.routes.find((route) => route.triggerStepId === currentStep.stepId)
+      : undefined;
+    const currentStepIsCoveredByRoute = Boolean(
+      currentStep && template?.routes.some((route) => route.stepIds.includes(currentStep.stepId)),
+    );
+    const templateSteps = templateRoute && template
+      ? templateRoute.stepIds.map((stepId) =>
+          template.steps.find((step) => step.stepId === stepId),
+        )
+      : [];
+    const templateStep = currentStep && template && !currentStepIsCoveredByRoute
       ? template.steps.find((step) => step.stepId === currentStep.stepId)
       : undefined;
-    if (templateStep) {
+    if (templateRoute && templateSteps.every((step) => step)) {
+      const resolvedSteps = templateSteps as RecruitmentInterviewTemplateStep[];
+      const mode = templateRoute.mode;
+      const sessions = mode === "SEQUENTIAL"
+        ? resolvedSteps.map((step) => ({
+            stepId: step.stepId,
+            stepName: step.name,
+            interviewerIds: [],
+          }))
+        : [];
+      this.db.upsertCaseInterviewPlan({
+        caseId: interviewCase.id,
+        source: "TEMPLATE",
+        mode,
+        stepIds: resolvedSteps.map((step) => step.stepId),
+        stepNames: resolvedSteps.map((step) => step.name),
+        sessions,
+        durationMinutes: mode === "SEQUENTIAL" ? resolvedSteps.length * 60 : 60,
+      });
+      this.db.addEvent(interviewCase.id, "TEMPLATE_INTERVIEW_ROUTE_APPLIED", "SYSTEM", {
+        triggerStepId: templateRoute.triggerStepId,
+        mode,
+        stepIds: templateRoute.stepIds,
+      });
+    } else if (templateStep) {
       this.db.upsertCaseInterviewPlan({
         caseId: interviewCase.id,
         source: "TEMPLATE",
@@ -1021,7 +1139,7 @@ export class WorkflowService {
       caseId: interviewCase.id,
       templateStatus: !template
         ? templateStatus
-        : templateStep
+        : templateRoute || templateStep
           ? "APPLIED"
           : templateStatus,
     };
@@ -1189,6 +1307,15 @@ export class WorkflowService {
     await this.syncCaseInterviewers(caseId);
     const bundle = this.db.getCaseBundle(caseId);
     if (!bundle) throw new Error(`Case not found: ${caseId}`);
+    const plan = this.db.getCaseInterviewPlan(caseId);
+    if (
+      plan?.mode === "SEQUENTIAL" &&
+      plan.sessions.some((session) => session.interviewerIds.length === 0)
+    ) {
+      throw new Error(
+        "Assign the actual interviewer for every sequential stage before creating a Slack request draft.",
+      );
+    }
     const missing = bundle.interviewers.filter(
       (person) => person.active && person.required && !person.slackUserId,
     );

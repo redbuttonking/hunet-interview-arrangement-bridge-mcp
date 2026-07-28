@@ -44,6 +44,9 @@ describe("BridgeDatabase", () => {
           durationMinutes: 60,
         },
       ],
+      routes: [
+        { triggerStepId: "S1", mode: "SEQUENTIAL", stepIds: ["S1", "S2"] },
+      ],
     });
     db.setRequiredInterviewers(interviewCase.id, [first.id]);
     const plan = db.upsertCaseInterviewPlan({
@@ -57,6 +60,9 @@ describe("BridgeDatabase", () => {
     });
 
     expect(db.getRecruitmentInterviewTemplate("R1")?.steps).toHaveLength(2);
+    expect(db.getRecruitmentInterviewTemplate("R1")?.routes).toEqual([
+      { triggerStepId: "S1", mode: "SEQUENTIAL", stepIds: ["S1", "S2"] },
+    ]);
     expect(plan).toMatchObject({
       mode: "COMBINED",
       durationMinutes: 60,
@@ -438,5 +444,84 @@ describe("BridgeDatabase", () => {
     expect(db.listCases("CANCELLED")).toMatchObject([
       { candidateName: "테스트1", status: "CANCELLED" },
     ]);
+  });
+
+  it("returns recruitment, interview-plan, and meeting-room metrics for a future dashboard", () => {
+    db = new BridgeDatabase(":memory:");
+    const standard = db.createInterviewCase({
+      candidateName: "Candidate 1",
+      recruitmentRef: "R1",
+      recruitmentName: "Recruitment",
+      proposalDates: ["2026-08-10"],
+    });
+    const sequential = db.createInterviewCase({
+      candidateName: "Candidate 2",
+      recruitmentRef: "R1",
+      recruitmentName: "Recruitment",
+      proposalDates: ["2026-08-10"],
+    });
+    db.upsertCaseInterviewPlan({
+      caseId: standard.id,
+      source: "TEMPLATE",
+      mode: "STANDARD",
+      stepIds: ["S1"],
+      stepNames: ["First"],
+      durationMinutes: 60,
+    });
+    db.upsertCaseInterviewPlan({
+      caseId: sequential.id,
+      source: "TEMPLATE",
+      mode: "SEQUENTIAL",
+      stepIds: ["S1", "S2"],
+      stepNames: ["First", "Second"],
+      sessions: [
+        { stepId: "S1", stepName: "First", interviewerIds: [] },
+        { stepId: "S2", stepName: "Second", interviewerIds: [] },
+      ],
+      durationMinutes: 120,
+    });
+    const [block] = db.syncMeetingRoomBlocks(
+      ["2026-08-10"],
+      [
+        {
+          sourceKey: "DAOU:dashboard",
+          roomId: "A",
+          roomName: "Room A",
+          reservedBy: "Recruiter",
+          purpose: "Interview",
+          date: "2026-08-10",
+          startTime: "09:00",
+          endTime: "12:00",
+          sourcePayloadHash: "dashboard-hash",
+        },
+      ],
+    );
+    db.allocateRoomBlock({
+      caseId: standard.id,
+      roomBlockId: block!.id,
+      startTime: "09:00",
+      endTime: "10:00",
+    });
+
+    expect(db.getOperationsDashboard()).toMatchObject({
+      metrics: {
+        interviewPlans: {
+          caseCountsByMode: { STANDARD: 1, SEQUENTIAL: 1 },
+          sequentialPlansNeedingInterviewerAssignment: 1,
+        },
+        recruitments: [
+          {
+            recruitmentRef: "R1",
+            caseCount: 2,
+            planCounts: { STANDARD: 1, SEQUENTIAL: 1 },
+          },
+        ],
+        meetingRooms: {
+          activeAllocations: [
+            { roomName: "Room A", activeAllocationCount: 1, allocatedMinutes: 60 },
+          ],
+        },
+      },
+    });
   });
 });

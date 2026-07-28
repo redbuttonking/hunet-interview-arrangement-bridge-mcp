@@ -21,6 +21,7 @@ import {
 } from "../services/workflow.js";
 import { suggestInterviewSlotsWithRooms } from "../services/room-scheduling.js";
 import { suggestSequentialInterviewSlotsWithRooms } from "../services/sequential-scheduling.js";
+import { OperationalReadinessService } from "../services/operational-readiness.js";
 import { SlackReconciler } from "../slack/reconciler.js";
 
 function result(value: unknown) {
@@ -101,6 +102,13 @@ export function createBridgeMcpServer(
   const daouOffice =
     dependencies?.daouOffice ??
     new BrowserDaouOfficeReservationAdapter(config.daouOffice);
+  const readiness = new OperationalReadinessService(
+    config,
+    db,
+    gateway,
+    daouOfficeBrowser,
+    slackClient,
+  );
 
   const server = new McpServer({
     name: "interview-arrangement-bridge",
@@ -137,6 +145,25 @@ export function createBridgeMcpServer(
           },
         },
       }),
+  );
+
+  server.registerTool(
+    "get_operational_readiness",
+    {
+      title: "인터뷰 브릿지 운영 사전점검",
+      description:
+        "로컬 DB, 워커, Slack 설정, 나인하이어 설정, 다우오피스 전용 브라우저와 마지막 동기화 상태를 점검합니다. checkExternal이 true일 때만 Slack 인증과 나인하이어 도구 목록을 읽기 전용으로 확인합니다.",
+      inputSchema: {
+        checkExternal: z.boolean().default(false),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ checkExternal }) => result(await readiness.inspect({ checkExternal })),
   );
 
   server.registerTool(
@@ -680,6 +707,11 @@ export function createBridgeMcpServer(
           stepId: z.string().min(1),
           mode: z.enum(["STANDARD", "COMBINED"]),
         })).min(1).max(10),
+        routes: z.array(z.object({
+          triggerStepId: z.string().min(1),
+          mode: z.enum(["STANDARD", "COMBINED", "SEQUENTIAL"]),
+          stepIds: z.array(z.string().min(1)).min(1).max(10),
+        })).max(10).optional(),
       },
       annotations: {
         readOnlyHint: false,

@@ -68,6 +68,9 @@ describe("bridge MCP server", () => {
     const tools = await client.listTools();
     expect(tools.tools.map((tool) => tool.name)).toContain("bridge_status");
     expect(tools.tools.map((tool) => tool.name)).toContain(
+      "get_operational_readiness",
+    );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
       "approve_and_send_interviewer_request",
     );
     expect(tools.tools.map((tool) => tool.name)).toContain(

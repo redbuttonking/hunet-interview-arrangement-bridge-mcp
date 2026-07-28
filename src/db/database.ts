@@ -219,11 +219,18 @@ export interface RecruitmentInterviewTemplateStep {
   durationMinutes: 60;
 }
 
+export interface RecruitmentInterviewRoute {
+  triggerStepId: string;
+  mode: InterviewPlanMode;
+  stepIds: string[];
+}
+
 export interface RecruitmentInterviewTemplateRow {
   recruitmentId: string;
   recruitmentName: string;
   pipelineHash: string;
   steps: RecruitmentInterviewTemplateStep[];
+  routes: RecruitmentInterviewRoute[];
   approvedAt: string;
   updatedAt: string;
 }
@@ -704,6 +711,7 @@ export class BridgeDatabase {
         recruitment_name TEXT NOT NULL,
         pipeline_hash TEXT NOT NULL,
         steps_json TEXT NOT NULL,
+        routes_json TEXT NOT NULL DEFAULT '[]',
         approved_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -1689,6 +1697,79 @@ export class BridgeDatabase {
       items.push(followUp);
       followUpsByCase.set(followUp.caseId, items);
     }
+    const planCounts: Record<InterviewPlanMode | "UNCONFIGURED", number> = {
+      STANDARD: 0,
+      COMBINED: 0,
+      SEQUENTIAL: 0,
+      UNCONFIGURED: 0,
+    };
+    const recruitmentMetrics = new Map<
+      string,
+      {
+        recruitmentRef: string | null;
+        recruitmentName: string | null;
+        caseCount: number;
+        planCounts: Record<InterviewPlanMode | "UNCONFIGURED", number>;
+        statusCounts: Partial<Record<InterviewCaseStatus, number>>;
+        pendingRequiredInterviewerResponses: number;
+      }
+    >();
+    let sequentialPlansNeedingInterviewerAssignment = 0;
+    for (const interviewCase of cases) {
+      const plan = this.getCaseInterviewPlan(interviewCase.id);
+      const mode = plan?.mode ?? "UNCONFIGURED";
+      planCounts[mode] += 1;
+      if (
+        plan?.mode === "SEQUENTIAL" &&
+        plan.sessions.some((session) => session.interviewerIds.length === 0)
+      ) {
+        sequentialPlansNeedingInterviewerAssignment += 1;
+      }
+      const key = interviewCase.recruitmentRef ?? interviewCase.recruitmentName ?? "UNASSIGNED";
+      const current = recruitmentMetrics.get(key) ?? {
+        recruitmentRef: interviewCase.recruitmentRef,
+        recruitmentName: interviewCase.recruitmentName,
+        caseCount: 0,
+        planCounts: { STANDARD: 0, COMBINED: 0, SEQUENTIAL: 0, UNCONFIGURED: 0 },
+        statusCounts: {},
+        pendingRequiredInterviewerResponses: 0,
+      };
+      current.caseCount += 1;
+      current.planCounts[mode] += 1;
+      current.statusCounts[interviewCase.status] =
+        (current.statusCounts[interviewCase.status] ?? 0) + 1;
+      current.pendingRequiredInterviewerResponses += this.listInterviewers(interviewCase.id)
+        .filter((interviewer) => interviewer.required && interviewer.status === "PENDING")
+        .length;
+      recruitmentMetrics.set(key, current);
+    }
+    const blockById = new Map(
+      this.listMeetingRoomBlocks(undefined, false).map((block) => [block.id, block]),
+    );
+    const roomMetrics = new Map<
+      string,
+      {
+        roomId: string;
+        roomName: string;
+        activeAllocationCount: number;
+        allocatedMinutes: number;
+      }
+    >();
+    for (const allocation of this.listRoomAllocations().filter((item) => item.status === "ACTIVE")) {
+      const block = blockById.get(allocation.roomBlockId);
+      if (!block) continue;
+      const key = `${block.roomId}:${block.roomName}`;
+      const current = roomMetrics.get(key) ?? {
+        roomId: block.roomId,
+        roomName: block.roomName,
+        activeAllocationCount: 0,
+        allocatedMinutes: 0,
+      };
+      current.activeAllocationCount += 1;
+      current.allocatedMinutes +=
+        timeMinutes(allocation.endTime) - timeMinutes(allocation.startTime);
+      roomMetrics.set(key, current);
+    }
 
     return {
       generatedAt: new Date().toISOString(),
@@ -1760,7 +1841,22 @@ export class BridgeDatabase {
             lastError: job.lastError,
             status: job.status,
             createdAt: job.createdAt,
-          })),
+        })),
+      },
+      metrics: {
+        interviewPlans: {
+          caseCountsByMode: planCounts,
+          sequentialPlansNeedingInterviewerAssignment,
+        },
+        recruitments: [...recruitmentMetrics.values()].sort(
+          (left, right) => right.caseCount - left.caseCount,
+        ),
+        meetingRooms: {
+          activeBlocks: this.listMeetingRoomBlocks().length,
+          activeAllocations: [...roomMetrics.values()].sort(
+            (left, right) => right.allocatedMinutes - left.allocatedMinutes,
+          ),
+        },
       },
       cases: cases.map((interviewCase) => {
         const requiredInterviewers = this.listInterviewers(interviewCase.id).filter(
@@ -1816,17 +1912,19 @@ export class BridgeDatabase {
     recruitmentName: string;
     pipelineHash: string;
     steps: RecruitmentInterviewTemplateStep[];
+    routes?: RecruitmentInterviewRoute[];
   }): RecruitmentInterviewTemplateRow {
     const now = new Date().toISOString();
     this.connection
       .prepare(`
         INSERT INTO recruitment_interview_templates(
-          recruitment_id, recruitment_name, pipeline_hash, steps_json, approved_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?)
+          recruitment_id, recruitment_name, pipeline_hash, steps_json, routes_json, approved_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(recruitment_id) DO UPDATE SET
           recruitment_name = excluded.recruitment_name,
           pipeline_hash = excluded.pipeline_hash,
           steps_json = excluded.steps_json,
+          routes_json = excluded.routes_json,
           approved_at = excluded.approved_at,
           updated_at = excluded.updated_at
       `)
@@ -1835,6 +1933,7 @@ export class BridgeDatabase {
         input.recruitmentName,
         input.pipelineHash,
         JSON.stringify(input.steps),
+        JSON.stringify(input.routes ?? []),
         now,
         now,
       );
@@ -1853,6 +1952,7 @@ export class BridgeDatabase {
       recruitmentName: asString(row.recruitment_name),
       pipelineHash: asString(row.pipeline_hash),
       steps: JSON.parse(asString(row.steps_json)) as RecruitmentInterviewTemplateStep[],
+      routes: JSON.parse(asString(row.routes_json ?? "[]")) as RecruitmentInterviewRoute[],
       approvedAt: asString(row.approved_at),
       updatedAt: asString(row.updated_at),
     };
@@ -3632,6 +3732,25 @@ export class BridgeDatabase {
         )
         .run();
     }
+
+    const versionFourteen = this.connection
+      .prepare("SELECT version FROM schema_migrations WHERE version = 14")
+      .get() as SqlRow | undefined;
+    if (!versionFourteen) {
+      const templateColumns = this.connection
+        .prepare("PRAGMA table_info(recruitment_interview_templates)")
+        .all() as SqlRow[];
+      if (!templateColumns.some((column) => asString(column.name) === "routes_json")) {
+        this.connection.exec(
+          "ALTER TABLE recruitment_interview_templates ADD COLUMN routes_json TEXT NOT NULL DEFAULT '[]'",
+        );
+      }
+      this.connection
+        .prepare(
+          "INSERT INTO schema_migrations(version, applied_at) VALUES (14, datetime('now'))",
+        )
+        .run();
+    }
   }
 
   listDueReminders(now = new Date()): Array<{
@@ -3694,6 +3813,29 @@ export class BridgeDatabase {
       .prepare("SELECT cursor_value FROM sync_cursors WHERE cursor_key = ?")
       .get(key) as SqlRow | undefined;
     return row ? asString(row.cursor_value) : undefined;
+  }
+
+  getCursorInfo(key: string): { value: string; updatedAt: string } | undefined {
+    const row = this.connection
+      .prepare("SELECT cursor_value, updated_at FROM sync_cursors WHERE cursor_key = ?")
+      .get(key) as SqlRow | undefined;
+    return row
+      ? { value: asString(row.cursor_value), updatedAt: asString(row.updated_at) }
+      : undefined;
+  }
+
+  getLatestMeetingRoomSyncAt(): string | undefined {
+    const row = this.connection
+      .prepare("SELECT MAX(synced_at) AS synced_at FROM meeting_room_sync_dates")
+      .get() as SqlRow;
+    return nullableString(row.synced_at) ?? undefined;
+  }
+
+  getLatestSchemaVersion(): number {
+    const row = this.connection
+      .prepare("SELECT MAX(version) AS version FROM schema_migrations")
+      .get() as SqlRow;
+    return Number(row.version ?? 0);
   }
 
   setCursor(key: string, value: string): void {

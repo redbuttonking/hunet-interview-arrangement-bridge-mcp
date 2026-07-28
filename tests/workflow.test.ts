@@ -191,6 +191,86 @@ describe("evaluation approval workflow", () => {
     expect(db.getCase(interviewCase.id)?.durationMinutes).toBe(120);
   });
 
+  it("applies a recruitment-level sequential route without duplicating its second stage", async () => {
+    db = new BridgeDatabase(":memory:");
+    const ninehire: NinehireWorkflowAdapter = {
+      async lookupCompletedEvaluation() {
+        return { reason: "Not used in this test." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+      async getRecruitmentPipeline() {
+        return {
+          recruitmentId: "R1",
+          recruitmentName: "Recruitment",
+          steps: [
+            { stepId: "S1", title: "First", name: "First", order: 1, applicantCount: 0 },
+            { stepId: "S2", title: "Second", name: "Second", order: 2, applicantCount: 0 },
+          ],
+        };
+      },
+    };
+    const workflow = new WorkflowService(db, config, ninehire);
+    await workflow.approveRecruitmentInterviewTemplate({
+      recruitmentId: "R1",
+      steps: [
+        { stepId: "S1", mode: "STANDARD" },
+        { stepId: "S2", mode: "STANDARD" },
+      ],
+      routes: [
+        { triggerStepId: "S1", mode: "SEQUENTIAL", stepIds: ["S1", "S2"] },
+      ],
+    });
+    const notification = db.insertNotification(
+      {
+        channelId: "C1",
+        messageTs: "2.0",
+        eventType: "EVALUATION_COMPLETED",
+        title: "Evaluation completed",
+        payloadHash: "route-hash",
+        payloadJson: "{}",
+      },
+      "EVALUATION_READY_FOR_APPROVAL",
+    );
+    const reviewId = db.createReview({
+      notificationId: notification.id,
+      reviewType: "INTERVIEW_ARRANGEMENT_START_REQUIRED",
+      reason: "Approval required.",
+      summary: {
+        context: {
+          candidateRef: "A1",
+          candidateName: "Candidate",
+          recruitmentRef: "R1",
+          recruitmentName: "Recruitment",
+        },
+        evaluation: {
+          applicantProgressId: "A1",
+          recruitmentId: "R1",
+          scoreSheets: [],
+          currentStep: { stepId: "S1", name: "First", order: 1 },
+        },
+      },
+    });
+
+    const approved = await workflow.approveInterviewArrangement(reviewId);
+
+    expect(approved.templateStatus).toBe("APPLIED");
+    expect(db.getCaseInterviewPlan(approved.caseId)).toMatchObject({
+      source: "TEMPLATE",
+      mode: "SEQUENTIAL",
+      stepIds: ["S1", "S2"],
+      durationMinutes: 120,
+      sessions: [
+        { stepId: "S1", interviewerIds: [] },
+        { stepId: "S2", interviewerIds: [] },
+      ],
+    });
+  });
+
   it("waits for user approval before creating an interview case", async () => {
     db = new BridgeDatabase(":memory:");
     const ninehire: NinehireWorkflowAdapter = {
