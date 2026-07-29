@@ -484,6 +484,115 @@ describe("evaluation approval workflow", () => {
     });
   });
 
+  it("requires a template update review when the recruitment pipeline changes", async () => {
+    db = new BridgeDatabase(":memory:");
+    db.upsertRecruitmentInterviewTemplate({
+      recruitmentId: "J456",
+      recruitmentName: "백엔드 엔지니어",
+      pipelineHash: "outdated-pipeline-hash",
+      steps: [
+        {
+          stepId: "S1",
+          title: "1차 인터뷰",
+          name: "1차 인터뷰",
+          order: 2,
+          mode: "STANDARD",
+          durationMinutes: 60,
+        },
+      ],
+    });
+    const ninehire: NinehireWorkflowAdapter = {
+      async lookupCompletedEvaluation() {
+        return {
+          context: {
+            candidateRef: "A127",
+            candidateName: "템플릿 변경 지원자",
+            recruitmentRef: "J456",
+            recruitmentName: "백엔드 엔지니어",
+          },
+          summary: {
+            applicantProgressId: "A127",
+            recruitmentId: "J456",
+            scoreSheets: [
+              {
+                scoreSheetId: "S1",
+                title: "서류전형 평가표",
+                participants: ["평가자"],
+                evaluators: [
+                  {
+                    name: "평가자",
+                    items: [
+                      {
+                        title: "최종 평가",
+                        finalEvaluation: true,
+                        selectedOptions: [{ title: "합격" }],
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+      async getRecruitmentPipeline() {
+        return {
+          recruitmentId: "J456",
+          recruitmentName: "백엔드 엔지니어",
+          steps: [
+            {
+              stepId: "S1",
+              title: "1차 인터뷰",
+              name: "1차 인터뷰",
+              order: 2,
+              applicantCount: 0,
+            },
+            {
+              stepId: "S2",
+              title: "CEO 인터뷰",
+              name: "CEO 인터뷰",
+              order: 3,
+              applicantCount: 0,
+            },
+          ],
+        };
+      },
+    };
+    const workflow = new WorkflowService(db, config, ninehire);
+
+    const ingested = await workflow.ingestSlackNotification({
+      channelId: "C1",
+      messageTs: "1.16",
+      parsed: {
+        eventType: "EVALUATION_COMPLETED",
+        title: "서류 평가가 완료되었습니다.",
+        text: "서류 평가가 완료되었습니다.",
+        links: [],
+        payloadHash: "template-change-hash",
+        payloadJson: "{}",
+        candidateName: "템플릿 변경 지원자",
+        recruitmentName: "백엔드 엔지니어",
+      },
+    });
+
+    expect(ingested.result).toBe("RECRUITMENT_TEMPLATE_UPDATE_REQUIRED");
+    expect(db.listOpenReviews()).toMatchObject([
+      {
+        reviewType: "RECRUITMENT_TEMPLATE_UPDATE_REQUIRED",
+        summary: expect.objectContaining({
+          currentPipeline: expect.objectContaining({ recruitmentId: "J456" }),
+        }),
+      },
+    ]);
+    expect(db.listCases()).toHaveLength(0);
+  });
+
   it("records a manually confirmed interview without external messages", () => {
     db = new BridgeDatabase(":memory:");
     const notification = db.insertNotification(

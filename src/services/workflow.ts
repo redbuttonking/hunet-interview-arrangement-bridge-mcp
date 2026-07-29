@@ -309,6 +309,24 @@ function classifyInterviewArrangementEligibility(
   return hasOnlyRejectOrHold ? "NOT_ELIGIBLE" : "REVIEW_REQUIRED";
 }
 
+type RecruitmentTemplateCheck =
+  | { status: "NOT_CONFIGURED" }
+  | { status: "MATCHED" }
+  | {
+      status: "CHANGED";
+      template: ReturnType<BridgeDatabase["getRecruitmentInterviewTemplate"]>;
+      pipeline: {
+        recruitmentId: string;
+        recruitmentName: string;
+        pipelineHash: string;
+        steps: Array<{ stepId: string; title: string; name: string; order: number }>;
+      };
+    }
+  | {
+      status: "UNAVAILABLE";
+      template: ReturnType<BridgeDatabase["getRecruitmentInterviewTemplate"]>;
+    };
+
 function evaluationRetryPayload(
   payload: Record<string, unknown>,
 ): { notificationId: string; parsed: ParsedSlackNotification } | undefined {
@@ -436,6 +454,36 @@ export class WorkflowService {
       steps,
       routes,
     });
+  }
+
+  private async checkRecruitmentTemplate(
+    evaluation: EvaluationSummary,
+  ): Promise<RecruitmentTemplateCheck> {
+    const template = this.db.getRecruitmentInterviewTemplate(
+      evaluation.recruitmentId,
+    );
+    if (!template) return { status: "NOT_CONFIGURED" };
+    if (!this.ninehire.getRecruitmentPipeline) {
+      return { status: "UNAVAILABLE", template };
+    }
+
+    const pipeline = await this.ninehire.getRecruitmentPipeline(
+      evaluation.recruitmentId,
+    );
+    const currentPipelineHash = pipelineHash(pipeline.steps);
+    if (template.pipelineHash === currentPipelineHash) {
+      return { status: "MATCHED" };
+    }
+    return {
+      status: "CHANGED",
+      template,
+      pipeline: {
+        recruitmentId: pipeline.recruitmentId,
+        recruitmentName: pipeline.recruitmentName,
+        pipelineHash: currentPipelineHash,
+        steps: pipeline.steps,
+      },
+    };
   }
 
   setCaseCombinedInterviewPlan(input: {
@@ -664,6 +712,40 @@ export class WorkflowService {
         },
       });
       return { notificationId, result: "EVALUATION_DECISION_REQUIRED" };
+    }
+
+    const templateCheck = await this.checkRecruitmentTemplate(evaluation.summary);
+    if (templateCheck.status === "CHANGED") {
+      this.db.updateNotificationStatus(notificationId, "REVIEW_REQUIRED");
+      this.db.createReview({
+        notificationId,
+        reviewType: "RECRUITMENT_TEMPLATE_UPDATE_REQUIRED",
+        reason:
+          "나인하이어의 현재 채용 단계가 저장된 인터뷰 템플릿과 다릅니다. 템플릿을 확인·갱신한 뒤 인터뷰 조율을 시작하세요.",
+        summary: {
+          context: evaluation.context,
+          evaluation: evaluation.summary,
+          template: templateCheck.template,
+          currentPipeline: templateCheck.pipeline,
+        },
+      });
+      return { notificationId, result: "RECRUITMENT_TEMPLATE_UPDATE_REQUIRED" };
+    }
+
+    if (templateCheck.status === "UNAVAILABLE") {
+      this.db.updateNotificationStatus(notificationId, "REVIEW_REQUIRED");
+      this.db.createReview({
+        notificationId,
+        reviewType: "RECRUITMENT_TEMPLATE_CHECK_REQUIRED",
+        reason:
+          "저장된 인터뷰 템플릿이 있지만 현재 채용 단계를 확인할 수 없습니다. 템플릿을 확인한 뒤 인터뷰 조율을 시작하세요.",
+        summary: {
+          context: evaluation.context,
+          evaluation: evaluation.summary,
+          template: templateCheck.template,
+        },
+      });
+      return { notificationId, result: "RECRUITMENT_TEMPLATE_CHECK_REQUIRED" };
     }
 
     this.db.updateNotificationStatus(notificationId, "AWAITING_START_APPROVAL");
