@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { DatabaseSync } from "node:sqlite";
+import { backup as backupDatabase, DatabaseSync } from "node:sqlite";
 import {
   INTERVIEW_BRIDGE_WORKER_KEY,
   WORKER_DOWNTIME_THRESHOLD_MS,
@@ -547,6 +547,10 @@ export class BridgeDatabase {
 
   close(): void {
     this.connection.close();
+  }
+
+  backupTo(path: string): Promise<number> {
+    return backupDatabase(this.connection, path);
   }
 
   private migrate(): void {

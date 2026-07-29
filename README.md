@@ -441,7 +441,13 @@ data/bridge.db
 
 원본 Slack 이벤트 전체를 장기 보관하지 않고, 파싱에 필요한 텍스트와 링크만 축약 저장합니다. 그래도 지원자 이름 등 개인정보가 포함될 수 있으므로 DB를 Git·공유 폴더·개인 클라우드 동기화 대상에 넣지 마세요.
 
-백업하려면 워커와 Codex MCP를 종료한 뒤 `data/bridge.db`를 암호화된 안전한 위치에 복사합니다.
+워커가 실행 중인 날에는 SQLite 안전 백업 방식으로 하루 한 번 `data/backups/bridge-YYYY-MM-DD.db`를 생성하고, 최근 14개만 유지합니다. WAL 모드 DB를 파일 복사로 백업하면 데이터가 일관되지 않을 수 있으므로 이 방식을 사용합니다.
+
+필요하면 아래 명령으로 수동 백업도 만들 수 있습니다.
+
+```powershell
+npm run backup:db
+```
 
 ## Windows에서 워커 자동 시작
 
@@ -489,6 +495,7 @@ Slack 평가 완료 알림
 ```powershell
 npm run dev:mcp
 npm run dev:worker
+npm run backup:db
 npm run inspect:ninehire
 npm run inspect:slack-source
 npm run typecheck

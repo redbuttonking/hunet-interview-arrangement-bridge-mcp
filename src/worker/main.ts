@@ -15,6 +15,7 @@ import {
 } from "../ninehire/adapter.js";
 import { NinehireMcpGateway } from "../ninehire/gateway.js";
 import { WorkflowService, type SlackIdentityResolver } from "../services/workflow.js";
+import { LocalDatabaseBackupService } from "../services/database-backup.js";
 import {
   AVAILABILITY_VIEW_CALLBACK,
   DECLINE_INTERVIEW_ACTION,
@@ -62,6 +63,9 @@ const workflow = new WorkflowService(
   ninehire,
   identityResolver,
 );
+const databaseBackup = new LocalDatabaseBackupService(db, config.dbPath, {
+  timeZone: config.timeZone,
+});
 const reconciler = new SlackReconciler(db, config, app.client, workflow);
 
 function actionContext(body: unknown): {
@@ -248,6 +252,17 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.stack ?? error.message : String(error);
 }
 
+async function ensureDailyDatabaseBackup(): Promise<void> {
+  try {
+    const result = await databaseBackup.ensureDailyBackup();
+    if (result.created) {
+      process.stdout.write(`Database backup created: ${result.backupPath}\n`);
+    }
+  } catch (error) {
+    process.stderr.write(`[Database backup] ${errorMessage(error)}\n`);
+  }
+}
+
 async function reconcileSlackNotifications(): Promise<void> {
   try {
     await reconciler.reconcile();
@@ -308,6 +323,7 @@ async function runCycle(): Promise<void> {
   if (cycleRunning || retryCycleRunning) return;
   cycleRunning = true;
   try {
+    await ensureDailyDatabaseBackup();
     await reconcileSlackNotifications();
     const dueBeforeRefresh = db.listDueReminders();
     const caseIds = [...new Set(dueBeforeRefresh.map((item) => item.caseId))];

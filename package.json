@@ -11,6 +11,7 @@
     "build": "tsc -p tsconfig.json",
     "dev:mcp": "tsx src/mcp/main.ts",
     "dev:worker": "tsx src/worker/main.ts",
+    "backup:db": "tsx src/cli/backup-database.ts",
     "inspect:ninehire": "tsx src/cli/inspect-ninehire.ts",
     "inspect:slack-source": "tsx src/cli/inspect-slack-source.ts",
     "daou:login": "tsx src/cli/open-daou-office.ts",
