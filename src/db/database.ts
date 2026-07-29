@@ -16,6 +16,13 @@ import type {
   SlackNotificationInput,
   TimeSlot,
 } from "../domain/types.js";
+import type {
+  InterviewSkillDecisionInput,
+  InterviewSkillDecisionOption,
+  InterviewSkillDecisionStatus,
+  InterviewSkillKey,
+  InterviewSkillSelectionMode,
+} from "../domain/skills.js";
 import type { MeetingRoomBlockInput } from "../domain/daou-office.js";
 import { firstReminderAt, secondReminderAt } from "../domain/calendar.js";
 
@@ -89,6 +96,16 @@ export interface ReviewRow {
   status: "OPEN" | "RESOLVED";
   resolution: string | null;
   createdAt: string;
+  resolvedAt: string | null;
+}
+
+export interface InterviewSkillDecisionRow extends InterviewSkillDecisionInput {
+  id: string;
+  status: InterviewSkillDecisionStatus;
+  selectedOptionId: string | null;
+  resolution: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
   resolvedAt: string | null;
 }
 
@@ -391,6 +408,64 @@ function toReview(row: SqlRow): ReviewRow {
     status: asString(row.status) as ReviewRow["status"],
     resolution: nullableString(row.resolution),
     createdAt: asString(row.created_at),
+    resolvedAt: nullableString(row.resolved_at),
+  };
+}
+
+function jsonRecord(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== "string") return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function skillDecisionOptions(value: unknown): InterviewSkillDecisionOption[] {
+  if (typeof value !== "string") return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((option) => {
+      if (typeof option !== "object" || option === null || Array.isArray(option)) {
+        return [];
+      }
+      const record = option as Record<string, unknown>;
+      if (
+        typeof record.id !== "string" ||
+        typeof record.label !== "string" ||
+        typeof record.description !== "string"
+      ) {
+        return [];
+      }
+      return [{ id: record.id, label: record.label, description: record.description }];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function toInterviewSkillDecision(row: SqlRow): InterviewSkillDecisionRow {
+  return {
+    id: asString(row.id),
+    skillKey: asString(row.skill_key) as InterviewSkillKey,
+    decisionType: asString(row.decision_type),
+    fingerprint: asString(row.fingerprint),
+    title: asString(row.title),
+    prompt: asString(row.prompt),
+    selectionMode: asString(row.selection_mode) as InterviewSkillSelectionMode,
+    options: skillDecisionOptions(row.options_json),
+    context: jsonRecord(row.context_json) ?? {},
+    caseId: nullableString(row.case_id) ?? undefined,
+    reviewId: nullableString(row.review_id) ?? undefined,
+    status: asString(row.status) as InterviewSkillDecisionStatus,
+    selectedOptionId: nullableString(row.selected_option_id),
+    resolution: jsonRecord(row.resolution_json),
+    createdAt: asString(row.created_at),
+    updatedAt: asString(row.updated_at),
     resolvedAt: nullableString(row.resolved_at),
   };
 }
@@ -1051,6 +1126,43 @@ export class BridgeDatabase {
         )
         .run();
     }
+
+    const versionFifteen = this.connection
+      .prepare("SELECT version FROM schema_migrations WHERE version = 15")
+      .get() as SqlRow | undefined;
+    if (!versionFifteen) {
+      this.connection.exec(`
+        CREATE TABLE IF NOT EXISTS interview_skill_decisions (
+          id TEXT PRIMARY KEY,
+          skill_key TEXT NOT NULL,
+          decision_type TEXT NOT NULL,
+          fingerprint TEXT NOT NULL,
+          case_id TEXT REFERENCES interview_cases(id),
+          review_id TEXT REFERENCES workflow_reviews(id),
+          title TEXT NOT NULL,
+          prompt TEXT NOT NULL,
+          selection_mode TEXT NOT NULL,
+          options_json TEXT NOT NULL,
+          context_json TEXT NOT NULL,
+          status TEXT NOT NULL,
+          selected_option_id TEXT,
+          resolution_json TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          resolved_at TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS interview_skill_decisions_pending_unique
+          ON interview_skill_decisions(skill_key, fingerprint)
+          WHERE status = 'PENDING';
+        CREATE INDEX IF NOT EXISTS interview_skill_decisions_status
+          ON interview_skill_decisions(status, created_at);
+      `);
+      this.connection
+        .prepare(
+          "INSERT INTO schema_migrations(version, applied_at) VALUES (15, datetime('now'))",
+        )
+        .run();
+    }
   }
 
   transaction<T>(operation: () => T): T {
@@ -1093,6 +1205,9 @@ export class BridgeDatabase {
       ),
       pendingIntegrationRetries: scalar(
         "SELECT COUNT(*) AS count FROM integration_retry_jobs WHERE status = 'PENDING'",
+      ),
+      pendingSkillDecisions: scalar(
+        "SELECT COUNT(*) AS count FROM interview_skill_decisions WHERE status = 'PENDING'",
       ),
       failedIntegrationRetries: scalar(
         "SELECT COUNT(*) AS count FROM integration_retry_jobs WHERE status = 'FAILED'",
@@ -1499,6 +1614,112 @@ export class BridgeDatabase {
     if (Number(result.changes) !== 1) {
       throw new Error(`Open review not found: ${id}`);
     }
+  }
+
+  createOrGetPendingInterviewSkillDecision(
+    input: InterviewSkillDecisionInput,
+  ): InterviewSkillDecisionRow {
+    if (input.options.length === 0) {
+      throw new Error("An interview skill decision needs at least one option.");
+    }
+    if (new Set(input.options.map((option) => option.id)).size !== input.options.length) {
+      throw new Error("Interview skill decision option IDs must be unique.");
+    }
+    const existing = this.connection
+      .prepare(`
+        SELECT * FROM interview_skill_decisions
+        WHERE skill_key = ? AND fingerprint = ? AND status = 'PENDING'
+      `)
+      .get(input.skillKey, input.fingerprint) as SqlRow | undefined;
+    if (existing) return toInterviewSkillDecision(existing);
+
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.connection
+      .prepare(`
+        INSERT INTO interview_skill_decisions(
+          id, skill_key, decision_type, fingerprint, case_id, review_id,
+          title, prompt, selection_mode, options_json, context_json,
+          status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
+      `)
+      .run(
+        id,
+        input.skillKey,
+        input.decisionType,
+        input.fingerprint,
+        input.caseId ?? null,
+        input.reviewId ?? null,
+        input.title,
+        input.prompt,
+        input.selectionMode,
+        JSON.stringify(input.options),
+        JSON.stringify(input.context),
+        now,
+        now,
+      );
+    return this.getInterviewSkillDecision(id)!;
+  }
+
+  getInterviewSkillDecision(id: string): InterviewSkillDecisionRow | undefined {
+    const row = this.connection
+      .prepare("SELECT * FROM interview_skill_decisions WHERE id = ?")
+      .get(id) as SqlRow | undefined;
+    return row ? toInterviewSkillDecision(row) : undefined;
+  }
+
+  listInterviewSkillDecisions(input: {
+    status?: InterviewSkillDecisionStatus;
+    limit?: number;
+  } = {}): InterviewSkillDecisionRow[] {
+    const limit = input.limit ?? 100;
+    const rows = input.status
+      ? (this.connection
+          .prepare(`
+            SELECT * FROM interview_skill_decisions
+            WHERE status = ?
+            ORDER BY created_at ASC
+            LIMIT ?
+          `)
+          .all(input.status, limit) as SqlRow[])
+      : (this.connection
+          .prepare(`
+            SELECT * FROM interview_skill_decisions
+            ORDER BY created_at ASC
+            LIMIT ?
+          `)
+          .all(limit) as SqlRow[]);
+    return rows.map(toInterviewSkillDecision);
+  }
+
+  resolveInterviewSkillDecision(input: {
+    decisionId: string;
+    optionId: string;
+    resolution?: Record<string, unknown>;
+  }): InterviewSkillDecisionRow {
+    const decision = this.getInterviewSkillDecision(input.decisionId);
+    if (!decision || decision.status !== "PENDING") {
+      throw new Error(`Pending interview skill decision not found: ${input.decisionId}`);
+    }
+    if (!decision.options.some((option) => option.id === input.optionId)) {
+      throw new Error(`Invalid interview skill decision option: ${input.optionId}`);
+    }
+    const now = new Date().toISOString();
+    this.connection
+      .prepare(`
+        UPDATE interview_skill_decisions
+        SET status = 'RESOLVED', selected_option_id = ?, resolution_json = ?,
+            updated_at = ?, resolved_at = ?
+        WHERE id = ? AND status = 'PENDING'
+      `)
+      .run(
+        input.optionId,
+        input.resolution ? JSON.stringify(input.resolution) : null,
+        now,
+        now,
+        input.decisionId,
+      );
+    return this.getInterviewSkillDecision(input.decisionId)!;
   }
 
   createInterviewCase(input: {

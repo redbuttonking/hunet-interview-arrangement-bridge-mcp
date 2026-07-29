@@ -183,6 +183,27 @@ describe("bridge MCP server", () => {
       "get_interview_operations_dashboard",
     );
     expect(tools.tools.map((tool) => tool.name)).toContain(
+      "get_interview_skill_operations",
+    );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
+      "create_candidate_triage_decision",
+    );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
+      "create_availability_collection_decision",
+    );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
+      "create_interview_scheduling_decision",
+    );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
+      "create_candidate_schedule_response_decision",
+    );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
+      "list_pending_interview_skill_decisions",
+    );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
+      "resolve_interview_skill_decision",
+    );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
       "list_integration_retry_jobs",
     );
 
@@ -191,6 +212,16 @@ describe("bridge MCP server", () => {
     expect(status.structuredContent).toMatchObject({
       database: { activeCases: 0 },
       integrations: { daouOffice: { mode: "DEDICATED_EDGE_PROFILE" } },
+    });
+
+    const skillOperations = await client.callTool({
+      name: "get_interview_skill_operations",
+      arguments: {},
+    });
+    expect(skillOperations.isError).not.toBe(true);
+    expect(skillOperations.structuredContent).toMatchObject({
+      skillKey: "OPERATIONS_CONTROL",
+      pendingDecisions: [],
     });
 
     const recruitments = await client.callTool({

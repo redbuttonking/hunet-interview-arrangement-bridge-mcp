@@ -22,6 +22,7 @@ import {
 import { suggestInterviewSlotsWithRooms } from "../services/room-scheduling.js";
 import { suggestSequentialInterviewSlotsWithRooms } from "../services/sequential-scheduling.js";
 import { OperationalReadinessService } from "../services/operational-readiness.js";
+import { InterviewArrangementSkills } from "../skills/interview-arrangement.js";
 import { SlackReconciler } from "../slack/reconciler.js";
 
 function result(value: unknown) {
@@ -109,6 +110,7 @@ export function createBridgeMcpServer(
     daouOfficeBrowser,
     slackClient,
   );
+  const interviewSkills = new InterviewArrangementSkills(db, workflow, readiness);
 
   const server = new McpServer({
     name: "interview-arrangement-bridge",
@@ -594,6 +596,133 @@ export function createBridgeMcpServer(
       },
     },
     async ({ limit }) => result(db.getOperationsDashboard(limit)),
+  );
+
+  server.registerTool(
+    "get_interview_skill_operations",
+    {
+      title: "인터뷰 업무 스킬 운영 현황",
+      description:
+        "대시보드와 MCP가 함께 쓰는 운영 현황, 준비 상태, 사용자 선택 대기 목록을 읽기 전용으로 조회합니다.",
+      inputSchema: {
+        limit: z.number().int().min(1).max(200).default(100),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ limit }) => result(await interviewSkills.getOperationsControl(limit)),
+  );
+
+  server.registerTool(
+    "create_candidate_triage_decision",
+    {
+      title: "후보자 인터뷰 조율 시작 선택 만들기",
+      description:
+        "평가 완료 또는 채용 단계 검토 건을 사용자 선택 가능한 인터뷰 조율 시작 결정으로 만듭니다. 외부 메시지나 일정은 변경하지 않습니다.",
+      inputSchema: { reviewId: z.string().uuid() },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ reviewId }) => result(interviewSkills.createCandidateTriageDecision(reviewId)),
+  );
+
+  server.registerTool(
+    "create_availability_collection_decision",
+    {
+      title: "면접관 일정 수집 선택 만들기",
+      description:
+        "면접관 조회, Slack 연결, 일정 요청 초안, 제출 대기 중 현재 필요한 다음 선택을 만듭니다. 메시지는 발송하지 않습니다.",
+      inputSchema: { caseId: z.string().uuid() },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ caseId }) => result(interviewSkills.createAvailabilityCollectionDecision(caseId)),
+  );
+
+  server.registerTool(
+    "create_interview_scheduling_decision",
+    {
+      title: "인터뷰 일정과 회의실 선택 만들기",
+      description:
+        "면접관 가능 일정과 동기화된 회의실 블록을 조합해 내부 확정 전 사용자 선택지를 만듭니다. 메시지는 발송하지 않습니다.",
+      inputSchema: { caseId: z.string().uuid() },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ caseId }) => result(interviewSkills.createInterviewSchedulingDecision(caseId)),
+  );
+
+  server.registerTool(
+    "create_candidate_schedule_response_decision",
+    {
+      title: "후보자 불참·일정 변경 선택 만들기",
+      description:
+        "후보자 불참 또는 일정 변경 가능성 메시지를 재조율, 취소, 보류 중 하나로 처리하기 위한 선택지를 만듭니다.",
+      inputSchema: { reviewId: z.string().uuid() },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ reviewId }) => result(interviewSkills.createCandidateScheduleResponseDecision(reviewId)),
+  );
+
+  server.registerTool(
+    "list_pending_interview_skill_decisions",
+    {
+      title: "인터뷰 업무 스킬 선택 대기 목록",
+      description:
+        "사용자 선택이 필요한 인터뷰 업무 스킬 결정을 조회합니다.",
+      inputSchema: {
+        limit: z.number().int().min(1).max(200).default(100),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ limit }) => result({ decisions: interviewSkills.listPendingDecisions(limit) }),
+  );
+
+  server.registerTool(
+    "resolve_interview_skill_decision",
+    {
+      title: "인터뷰 업무 스킬 선택 처리",
+      description:
+        "사용자가 고른 하나의 선택지를 처리합니다. 내부 일정 확정·재조율·취소 등 로컬 상태 변경이 있을 수 있지만 Slack 메시지는 자동 발송하지 않습니다.",
+      inputSchema: {
+        decisionId: z.string().uuid(),
+        optionId: z.string().trim().min(1).max(100),
+        note: z.string().trim().min(1).max(500).optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    async (input) => result(await interviewSkills.resolveDecision(input)),
   );
 
   server.registerTool(

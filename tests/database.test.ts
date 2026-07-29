@@ -8,7 +8,43 @@ describe("BridgeDatabase", () => {
   it("applies every schema migration when the database opens", () => {
     db = new BridgeDatabase(":memory:");
 
-    expect(db.getLatestSchemaVersion()).toBe(14);
+    expect(db.getLatestSchemaVersion()).toBe(15);
+  });
+
+  it("stores one pending interview skill decision and records the selected option", () => {
+    db = new BridgeDatabase(":memory:");
+    const input = {
+      skillKey: "CANDIDATE_TRIAGE" as const,
+      decisionType: "START_INTERVIEW_ARRANGEMENT",
+      fingerprint: "review:R1:start",
+      title: "Start interview arrangement",
+      prompt: "Choose the next action.",
+      selectionMode: "SINGLE" as const,
+      options: [
+        { id: "START", label: "Start", description: "Create a case." },
+        { id: "HOLD", label: "Hold", description: "Keep the review open." },
+      ],
+      context: { reviewId: "R1" },
+    };
+
+    const first = db.createOrGetPendingInterviewSkillDecision(input);
+    const duplicate = db.createOrGetPendingInterviewSkillDecision(input);
+
+    expect(duplicate.id).toBe(first.id);
+    expect(db.listInterviewSkillDecisions({ status: "PENDING" })).toHaveLength(1);
+
+    const resolved = db.resolveInterviewSkillDecision({
+      decisionId: first.id,
+      optionId: "START",
+      resolution: { caseId: "C1" },
+    });
+
+    expect(resolved).toMatchObject({
+      status: "RESOLVED",
+      selectedOptionId: "START",
+      resolution: { caseId: "C1" },
+    });
+    expect(db.listInterviewSkillDecisions({ status: "PENDING" })).toEqual([]);
   });
 
   it("stores a recruitment template and a candidate-specific combined plan", () => {
