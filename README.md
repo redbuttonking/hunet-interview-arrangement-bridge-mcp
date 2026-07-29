@@ -361,6 +361,7 @@ tool_timeout_sec = 60.0
 | `suggest_common_interview_slots` | 필수 면접관 공통 가능시간 계산 | 없음 |
 | `list_workflow_reviews` | 사람 판단이 필요한 항목 | 없음 |
 | `list_in_progress_recruitments` | 진행 중인 나인하이어 채용 목록과 마감 정보 조회 | 외부 읽기 |
+| `list_closed_recruitments` | 종료된 나인하이어 채용 목록과 종료 시각 조회 | 외부 읽기 |
 | `preview_recruitment_interview_template` | 나인하이어 칸반 단계와 승인 필요 여부 확인 | 외부 읽기 |
 | `approve_recruitment_interview_template` | 채용별 인터뷰 단계·통합 여부·기본 60분 규칙 저장 | 로컬 상태 갱신 |
 | `get_recruitment_interview_template` | 승인된 채용별 인터뷰 단계 규칙 조회 | 없음 |

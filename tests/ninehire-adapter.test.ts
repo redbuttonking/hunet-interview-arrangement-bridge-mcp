@@ -72,6 +72,74 @@ describe("NineHire approval adapter", () => {
     ]);
   });
 
+  it("lists only closed recruitments with their close time", async () => {
+    const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+    const adapter = new NinehireRecruitmentWorkflowAdapter({
+      async callTool(name, args) {
+        calls.push({ name, args });
+        if (name !== "get_recruitments") {
+          throw new Error(`Unexpected tool: ${name}`);
+        }
+        return {
+          structuredContent: {
+            count: 2,
+            limit: 100,
+            offset: 0,
+            results: [
+              {
+                recruitmentId: "R1",
+                title: "Closed recruitment",
+                status: { code: "closed", name: "Closed" },
+                closedAt: "2026-07-29T04:16:16.000Z",
+                deadlineType: { code: "until_filled", name: "Until filled" },
+                isPrivate: false,
+              },
+              {
+                recruitmentId: "R2",
+                title: "In-progress recruitment",
+                status: { code: "in_progress", name: "In progress" },
+                isPrivate: true,
+              },
+            ],
+          },
+        };
+      },
+    });
+
+    await expect(
+      adapter.listClosedRecruitments({
+        keyword: "closed",
+        limit: 100,
+        offset: 0,
+      }),
+    ).resolves.toEqual({
+      count: 1,
+      limit: 100,
+      offset: 0,
+      recruitments: [
+        {
+          recruitmentId: "R1",
+          title: "Closed recruitment",
+          status: "Closed",
+          closedAt: "2026-07-29T04:16:16.000Z",
+          deadlineType: "Until filled",
+          isPrivate: false,
+        },
+      ],
+    });
+    expect(calls).toEqual([
+      {
+        name: "get_recruitments",
+        args: {
+          status: "closed",
+          keyword: "closed",
+          limit: 100,
+          offset: 0,
+        },
+      },
+    ]);
+  });
+
   it("builds an approval summary from completed score sheets", async () => {
     const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
     const adapter = new NinehireRecruitmentWorkflowAdapter({

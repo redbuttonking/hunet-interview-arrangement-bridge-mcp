@@ -43,6 +43,7 @@ export interface NinehireRecruitmentSummary {
   title: string;
   externalTitle?: string;
   status: string;
+  closedAt?: string;
   deadlineType?: string;
   deadlineValue?: string;
   isPrivate: boolean;

@@ -19,6 +19,11 @@ export interface NinehireWorkflowAdapter {
     limit: number;
     offset: number;
   }): Promise<NinehireRecruitmentList>;
+  listClosedRecruitments?(input: {
+    keyword?: string;
+    limit: number;
+    offset: number;
+  }): Promise<NinehireRecruitmentList>;
   getRecruitmentPipeline?(recruitmentId: string): Promise<RecruitmentPipeline>;
 }
 
@@ -250,6 +255,63 @@ export class NinehireRecruitmentWorkflowAdapter
               ? { externalTitle: text(recruitment.externalTitle) }
               : {}),
             status: nameOf(recruitment.status) ?? "진행 중",
+            ...(nameOf(recruitment.deadlineType)
+              ? { deadlineType: nameOf(recruitment.deadlineType) }
+              : {}),
+            ...(text(recruitment.deadlineValue)
+              ? { deadlineValue: text(recruitment.deadlineValue) }
+              : {}),
+            isPrivate: recruitment.isPrivate === true,
+          },
+        ];
+      });
+    return {
+      count:
+        upstreamRecruitments.length === recruitments.length &&
+        typeof payload?.count === "number"
+          ? payload.count
+          : recruitments.length,
+      limit:
+        typeof payload?.limit === "number" ? payload.limit : input.limit,
+      offset:
+        typeof payload?.offset === "number" ? payload.offset : input.offset,
+      recruitments,
+    };
+  }
+
+  async listClosedRecruitments(input: {
+    keyword?: string;
+    limit: number;
+    offset: number;
+  }): Promise<NinehireRecruitmentList> {
+    const payload = asRecord(
+      upstreamPayload(
+        await this.gateway.callTool("get_recruitments", {
+          status: "closed",
+          limit: input.limit,
+          offset: input.offset,
+          ...(input.keyword ? { keyword: input.keyword } : {}),
+        }),
+      ),
+    );
+    const upstreamRecruitments = records(payload?.results);
+    const recruitments = upstreamRecruitments
+      .filter((recruitment) => codeOf(recruitment.status) === "closed")
+      .flatMap((recruitment) => {
+        const recruitmentId = text(recruitment.recruitmentId);
+        const title = text(recruitment.title);
+        if (!recruitmentId || !title) return [];
+        return [
+          {
+            recruitmentId,
+            title,
+            ...(text(recruitment.externalTitle)
+              ? { externalTitle: text(recruitment.externalTitle) }
+              : {}),
+            status: nameOf(recruitment.status) ?? "종료",
+            ...(text(recruitment.closedAt)
+              ? { closedAt: text(recruitment.closedAt) }
+              : {}),
             ...(nameOf(recruitment.deadlineType)
               ? { deadlineType: nameOf(recruitment.deadlineType) }
               : {}),

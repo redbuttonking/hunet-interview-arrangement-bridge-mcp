@@ -37,6 +37,22 @@ describe("bridge MCP server", () => {
       async listInterviewers() {
         return { interviewers: [], unresolvedUserGroups: [] };
       },
+      async listClosedRecruitments() {
+        return {
+          count: 1,
+          limit: 100,
+          offset: 0,
+          recruitments: [
+            {
+              recruitmentId: "R2",
+              title: "Closed recruitment",
+              status: "Closed",
+              closedAt: "2026-07-29T04:16:16.000Z",
+              isPrivate: false,
+            },
+          ],
+        };
+      },
       async listInProgressRecruitments() {
         return {
           count: 1,
@@ -87,6 +103,9 @@ describe("bridge MCP server", () => {
     );
     expect(tools.tools.map((tool) => tool.name)).toContain(
       "list_in_progress_recruitments",
+    );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
+      "list_closed_recruitments",
     );
     expect(tools.tools.map((tool) => tool.name)).toContain(
       "preview_recruitment_interview_template",
@@ -182,6 +201,22 @@ describe("bridge MCP server", () => {
     expect(recruitments.structuredContent).toMatchObject({
       count: 1,
       recruitments: [{ recruitmentId: "R1", title: "진행 중 채용" }],
+    });
+
+    const closedRecruitments = await client.callTool({
+      name: "list_closed_recruitments",
+      arguments: {},
+    });
+    expect(closedRecruitments.isError).not.toBe(true);
+    expect(closedRecruitments.structuredContent).toMatchObject({
+      count: 1,
+      recruitments: [
+        {
+          recruitmentId: "R2",
+          title: "Closed recruitment",
+          closedAt: "2026-07-29T04:16:16.000Z",
+        },
+      ],
     });
 
     const confirmedCase = db.createInterviewCase({

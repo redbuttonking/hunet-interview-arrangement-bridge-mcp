@@ -678,6 +678,32 @@ export function createBridgeMcpServer(
   );
 
   server.registerTool(
+    "list_closed_recruitments",
+    {
+      title: "종료된 나인하이어 채용 목록",
+      description:
+        "나인하이어에서 상태가 종료인 채용만 읽기 전용으로 조회합니다. 지원자와 참여자 정보는 반환하지 않습니다.",
+      inputSchema: {
+        keyword: z.string().trim().min(1).max(100).optional(),
+        limit: z.number().int().min(1).max(100).default(100),
+        offset: z.number().int().min(0).default(0),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async (input) => {
+      if (!ninehire.listClosedRecruitments) {
+        throw new Error("The configured NineHire adapter does not support closed recruitment lookup.");
+      }
+      return result(await ninehire.listClosedRecruitments(input));
+    },
+  );
+
+  server.registerTool(
     "preview_recruitment_interview_template",
     {
       title: "채용 인터뷰 단계 템플릿 미리 보기",
