@@ -189,7 +189,10 @@ describe("evaluation approval workflow", () => {
       },
     });
 
-    const approved = await workflow.approveInterviewArrangement(reviewId);
+    const approved = await workflow.approveInterviewArrangement({
+      reviewId,
+      routeTriggerStepId: "S1",
+    });
 
     expect(db.getRecruitmentInterviewTemplate("R1")?.steps).toMatchObject([
       { stepId: "S1", mode: "STANDARD", durationMinutes: 30 },
@@ -198,6 +201,62 @@ describe("evaluation approval workflow", () => {
       mode: "STANDARD",
       durationMinutes: 30,
     });
+  });
+
+  it("applies a selected template route to an existing unplanned interview case", async () => {
+    db = new BridgeDatabase(":memory:");
+    const ninehire: NinehireWorkflowAdapter = {
+      async lookupCompletedEvaluation() {
+        return { reason: "Not used in this test." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    };
+    const workflow = new WorkflowService(db, config, ninehire);
+    const interviewCase = db.createInterviewCase({
+      candidateName: "접수 단계 지원자",
+      recruitmentRef: "R1",
+      recruitmentName: "Recruitment",
+      proposalDates: ["2026-08-10"],
+    });
+    db.upsertRecruitmentInterviewTemplate({
+      recruitmentId: "R1",
+      recruitmentName: "Recruitment",
+      pipelineHash: "pipeline-hash",
+      steps: [
+        {
+          stepId: "S1",
+          title: "1차 인터뷰",
+          name: "1차 인터뷰",
+          order: 2,
+          mode: "STANDARD",
+          durationMinutes: 60,
+        },
+      ],
+      routes: [{ triggerStepId: "S1", mode: "STANDARD", stepIds: ["S1"] }],
+    });
+
+    const plan = await workflow.applyTemplateInterviewRouteToCase({
+      caseId: interviewCase.id,
+      routeTriggerStepId: "S1",
+    });
+
+    expect(plan).toMatchObject({
+      caseId: interviewCase.id,
+      source: "TEMPLATE",
+      stepIds: ["S1"],
+      durationMinutes: 60,
+    });
+    await expect(
+      workflow.applyTemplateInterviewRouteToCase({
+        caseId: interviewCase.id,
+        routeTriggerStepId: "S1",
+      }),
+    ).resolves.toMatchObject({ caseId: interviewCase.id, stepIds: ["S1"] });
   });
 
   it("stores a candidate-specific combined interview with selected interviewers", () => {
@@ -391,9 +450,15 @@ describe("evaluation approval workflow", () => {
       },
     });
 
-    const approved = await workflow.approveInterviewArrangement(reviewId);
+    const approved = await workflow.approveInterviewArrangement({
+      reviewId,
+      routeTriggerStepId: "S1",
+    });
 
-    expect(approved.templateStatus).toBe("APPLIED");
+    expect(approved.interviewPlan).toMatchObject({
+      mode: "SEQUENTIAL",
+      durationMinutes: 120,
+    });
     expect(db.getCaseInterviewPlan(approved.caseId)).toMatchObject({
       source: "TEMPLATE",
       mode: "SEQUENTIAL",
@@ -474,13 +539,36 @@ describe("evaluation approval workflow", () => {
     expect(review?.summary).toMatchObject({
       evaluation: { scoreSheets: [{ title: "서류 평가표" }] },
     });
+    db.upsertRecruitmentInterviewTemplate({
+      recruitmentId: "J456",
+      recruitmentName: "백엔드 엔지니어",
+      pipelineHash: "pipeline-hash",
+      steps: [
+        {
+          stepId: "S1",
+          title: "1차 인터뷰",
+          name: "1차 인터뷰",
+          order: 2,
+          mode: "STANDARD",
+          durationMinutes: 60,
+        },
+      ],
+      routes: [{ triggerStepId: "S1", mode: "STANDARD", stepIds: ["S1"] }],
+    });
 
-    const approved = await workflow.approveInterviewArrangement(review!.id);
+    const approved = await workflow.approveInterviewArrangement({
+      reviewId: review!.id,
+      routeTriggerStepId: "S1",
+    });
     expect(approved.result).toBe("INTERVIEW_CASE_CREATED");
     expect(db.getCase(approved.caseId)).toMatchObject({
       candidateRef: "A123",
       recruitmentRef: "J456",
       status: "READY_FOR_DRAFT",
+    });
+    expect(db.getCaseInterviewPlan(approved.caseId)).toMatchObject({
+      stepIds: ["S1"],
+      durationMinutes: 60,
     });
   });
 

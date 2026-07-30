@@ -118,6 +118,43 @@ function reviewContext(review: ReviewRow): Record<string, unknown> {
   };
 }
 
+function interviewRouteChoices(
+  db: BridgeDatabase,
+  review: ReviewRow,
+): Array<{
+  optionId: string;
+  routeTriggerStepId: string;
+  label: string;
+  description: string;
+}> {
+  const sourceContext = asRecord(review.summary?.context);
+  const recruitmentRef = text(sourceContext?.recruitmentRef);
+  if (!recruitmentRef) return [];
+  const template = db.getRecruitmentInterviewTemplate(recruitmentRef);
+  if (!template) return [];
+  const stepsById = new Map(template.steps.map((step) => [step.stepId, step]));
+  return template.routes.flatMap((route) => {
+    const steps = route.stepIds.map((stepId) => stepsById.get(stepId));
+    if (steps.some((step) => !step)) return [];
+    const resolvedSteps = steps.filter((step): step is NonNullable<typeof step> => Boolean(step));
+    const names = resolvedSteps.map((step) => step.name);
+    const durationMinutes = route.mode === "SEQUENTIAL"
+      ? resolvedSteps.reduce((total, step) => total + step.durationMinutes, 0)
+      : resolvedSteps[0]!.durationMinutes;
+    const label = route.mode === "COMBINED" && names.length > 1
+      ? `${names.join(" + ")} 통합 인터뷰`
+      : route.mode === "SEQUENTIAL"
+        ? `${names.join(" → ")} 연속 인터뷰`
+        : names.join(" + ");
+    return [{
+      optionId: `ROUTE:${route.triggerStepId}`,
+      routeTriggerStepId: route.triggerStepId,
+      label,
+      description: `${durationMinutes}분 인터뷰 계획으로 조율 건을 만들고 면접관 확인 단계로 이동합니다.`,
+    }];
+  });
+}
+
 function pendingDecision(
   db: BridgeDatabase,
   input: Parameters<BridgeDatabase["createOrGetPendingInterviewSkillDecision"]>[0],
@@ -151,16 +188,50 @@ export class InterviewArrangementSkills {
     }
     const context = reviewContext(review);
     if (review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED") {
+      const routes = interviewRouteChoices(this.db, review);
+      if (routes.length === 0) {
+        return pendingDecision(this.db, {
+          skillKey: "CANDIDATE_TRIAGE",
+          decisionType: "REVIEW_RECRUITMENT_TEMPLATE",
+          fingerprint: `review:${review.id}:missing-template`,
+          reviewId: review.id,
+          title: "인터뷰 계획 설정 필요",
+          prompt: "인터뷰 조율을 시작하기 전에 이 채용의 인터뷰 유형과 소요시간 규칙을 승인하세요.",
+          selectionMode: "SINGLE",
+          options: decisionOptions([
+            ["OPEN_TEMPLATE", "채용 인터뷰 규칙 확인", "채용별 인터뷰 유형과 시간을 확인·승인합니다."],
+            ["HOLD", "보류", "조율을 시작하지 않고 현재 검토 건을 유지합니다."],
+          ]),
+          context,
+        });
+      }
+      if (routes.length === 1) {
+        const route = routes[0]!;
+        return pendingDecision(this.db, {
+          skillKey: "CANDIDATE_TRIAGE",
+          decisionType: "START_INTERVIEW_ARRANGEMENT",
+          fingerprint: `review:${review.id}:start:${route.routeTriggerStepId}`,
+          reviewId: review.id,
+          title: "인터뷰 조율 시작 여부",
+          prompt: `승인된 ${route.label} 계획으로 인터뷰 조율을 시작할지 선택하세요.`,
+          selectionMode: "SINGLE",
+          options: decisionOptions([
+            ["START", "인터뷰 조율 시작", route.description],
+            ["HOLD", "보류", "원래 검토 건을 유지하고 조율을 시작하지 않습니다."],
+          ]),
+          context: { ...context, routeTriggerStepId: route.routeTriggerStepId },
+        });
+      }
       return pendingDecision(this.db, {
         skillKey: "CANDIDATE_TRIAGE",
-        decisionType: "START_INTERVIEW_ARRANGEMENT",
-        fingerprint: `review:${review.id}:start`,
+        decisionType: "SELECT_INTERVIEW_ROUTE",
+        fingerprint: `review:${review.id}:route`,
         reviewId: review.id,
-        title: "인터뷰 조율 시작 여부",
-        prompt: "평가표와 현재 채용 단계를 확인한 뒤 인터뷰 조율 시작 여부를 선택하세요.",
+        title: "인터뷰 유형 선택",
+        prompt: "승인할 인터뷰 유형을 선택하세요. 선택한 유형으로만 인터뷰 조율을 시작합니다.",
         selectionMode: "SINGLE",
         options: decisionOptions([
-          ["START", "인터뷰 조율 시작", "로컬 인터뷰 조율 건을 만들고 면접관 확인 단계로 이동합니다."],
+          ...routes.map((route) => [route.optionId, route.label, route.description] as [string, string, string]),
           ["HOLD", "보류", "원래 검토 건을 유지하고 조율을 시작하지 않습니다."],
         ]),
         context,
@@ -456,7 +527,32 @@ export class InterviewArrangementSkills {
     }
     if (decision.decisionType === "START_INTERVIEW_ARRANGEMENT") {
       if (optionId !== "START") throw new Error(`Unsupported triage option: ${optionId}`);
-      return { action: optionId, result: await this.workflow.approveInterviewArrangement(requiredReviewId(decision)) };
+      const routeTriggerStepId = text(decision.context.routeTriggerStepId);
+      if (!routeTriggerStepId) {
+        throw new Error("The interview route selection is missing from this decision.");
+      }
+      return {
+        action: optionId,
+        result: await this.workflow.approveInterviewArrangement({
+          reviewId: requiredReviewId(decision),
+          routeTriggerStepId,
+        }),
+      };
+    }
+    if (decision.decisionType === "SELECT_INTERVIEW_ROUTE") {
+      const routeTriggerStepId = optionId.startsWith("ROUTE:")
+        ? optionId.slice("ROUTE:".length)
+        : "";
+      if (!routeTriggerStepId) {
+        throw new Error(`Unsupported interview route option: ${optionId}`);
+      }
+      return {
+        action: optionId,
+        result: await this.workflow.approveInterviewArrangement({
+          reviewId: requiredReviewId(decision),
+          routeTriggerStepId,
+        }),
+      };
     }
     if (decision.decisionType === "REVIEW_RECRUITMENT_TEMPLATE") {
       return {

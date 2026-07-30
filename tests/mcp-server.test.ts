@@ -99,6 +99,9 @@ describe("bridge MCP server", () => {
       "approve_interview_arrangement",
     );
     expect(tools.tools.map((tool) => tool.name)).toContain(
+      "apply_case_interview_template_route",
+    );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
       "record_manual_confirmed_interview",
     );
     expect(tools.tools.map((tool) => tool.name)).toContain(

@@ -1184,117 +1184,173 @@ export class WorkflowService {
   }
 
   async approveInterviewArrangement(
-    reviewId: string,
+    input: {
+      reviewId: string;
+      routeTriggerStepId: string;
+    },
   ): Promise<{
     notificationId: string;
     result: string;
     caseId: string;
-    templateStatus:
-      | "APPLIED"
-      | "UNCONFIGURED"
-      | "STALE"
-      | "CURRENT_STEP_NOT_CONFIGURED";
+    interviewPlan: ReturnType<BridgeDatabase["getCaseInterviewPlan"]>;
   }> {
-    const review = this.db.getReview(reviewId);
+    const review = this.db.getReview(input.reviewId);
     if (
       !review ||
       review.status !== "OPEN" ||
       !review.notificationId ||
       review.reviewType !== "INTERVIEW_ARRANGEMENT_START_REQUIRED"
     ) {
-      throw new Error(`Open interview-arrangement approval not found: ${reviewId}`);
+      throw new Error(`Open interview-arrangement approval not found: ${input.reviewId}`);
     }
     const approval = evaluationApprovalPayload(review.summary);
     if (!approval) {
       throw new Error("Evaluation approval summary is missing or invalid.");
     }
-    const interviewCase = this.db.createInterviewCase({
-      notificationId: review.notificationId,
-      candidateRef: approval.context.candidateRef,
-      candidateName: approval.context.candidateName,
-      recruitmentRef: approval.context.recruitmentRef,
-      recruitmentName: approval.context.recruitmentName,
-      proposalDates: proposalDates(todayInKorea()),
-    });
-    let template = approval.context.recruitmentRef
-      ? this.db.getRecruitmentInterviewTemplate(approval.context.recruitmentRef)
-      : undefined;
-    let templateStatus: "UNCONFIGURED" | "STALE" | "CURRENT_STEP_NOT_CONFIGURED" =
-      template ? "CURRENT_STEP_NOT_CONFIGURED" : "UNCONFIGURED";
-    if (template && this.ninehire.getRecruitmentPipeline) {
-      try {
-        const pipeline = await this.ninehire.getRecruitmentPipeline(template.recruitmentId);
-        if (pipelineHash(pipeline.steps) !== template.pipelineHash) {
-          template = undefined;
-          templateStatus = "STALE";
-        }
-      } catch {
-        // 나인하이어 조회가 일시적으로 실패해도 이미 승인된 템플릿을 사용합니다.
-      }
+    if (!approval.context.recruitmentRef) {
+      throw new Error("The evaluation approval is missing its NineHire recruitment ID.");
     }
-    const currentStep = approval.evaluation.currentStep;
-    const templateRoute = currentStep && template
-      ? template.routes.find((route) => route.triggerStepId === currentStep.stepId)
-      : undefined;
-    const currentStepIsCoveredByRoute = Boolean(
-      currentStep && template?.routes.some((route) => route.stepIds.includes(currentStep.stepId)),
+    const notificationId = review.notificationId;
+    const template = await this.getCurrentRecruitmentInterviewTemplate(
+      approval.context.recruitmentRef,
     );
-    const templateSteps = templateRoute && template
-      ? templateRoute.stepIds.map((stepId) =>
-          template.steps.find((step) => step.stepId === stepId),
-        )
-      : [];
-    const templateStep = currentStep && template && !currentStepIsCoveredByRoute
-      ? template.steps.find((step) => step.stepId === currentStep.stepId)
-      : undefined;
-    if (templateRoute && templateSteps.every((step) => step)) {
-      const resolvedSteps = templateSteps as RecruitmentInterviewTemplateStep[];
-      const mode = templateRoute.mode;
-      const sessions = mode === "SEQUENTIAL"
-        ? resolvedSteps.map((step) => ({
-            stepId: step.stepId,
-            stepName: step.name,
-            interviewerIds: [],
-          }))
-        : [];
-      this.db.upsertCaseInterviewPlan({
-        caseId: interviewCase.id,
-        source: "TEMPLATE",
-        mode,
-        stepIds: resolvedSteps.map((step) => step.stepId),
-        stepNames: resolvedSteps.map((step) => step.name),
-        sessions,
-        durationMinutes: mode === "SEQUENTIAL"
-          ? resolvedSteps.reduce((total, step) => total + step.durationMinutes, 0)
-          : resolvedSteps[0]!.durationMinutes,
-      });
-      this.db.addEvent(interviewCase.id, "TEMPLATE_INTERVIEW_ROUTE_APPLIED", "SYSTEM", {
-        triggerStepId: templateRoute.triggerStepId,
-        mode,
-        stepIds: templateRoute.stepIds,
-      });
-    } else if (templateStep) {
-      this.db.upsertCaseInterviewPlan({
-        caseId: interviewCase.id,
-        source: "TEMPLATE",
-        mode: templateStep.mode,
-        stepIds: [templateStep.stepId],
-        stepNames: [templateStep.name],
-        durationMinutes: templateStep.durationMinutes,
-      });
+    const route = template.routes.find(
+      (item) => item.triggerStepId === input.routeTriggerStepId,
+    );
+    if (!route) {
+      throw new Error("The selected interview route is not configured for this recruitment.");
     }
-    this.db.updateNotificationStatus(review.notificationId, "PROCESSED");
-    this.db.resolveReview(reviewId, "INTERVIEW_ARRANGEMENT_STARTED");
+    const steps = route.stepIds.map((stepId) =>
+      template.steps.find((step) => step.stepId === stepId),
+    );
+    if (steps.some((step) => !step)) {
+      throw new Error("The selected interview route contains an unconfigured interview step.");
+    }
+    const resolvedSteps = steps as RecruitmentInterviewTemplateStep[];
+    const interviewCase = this.db.transaction(() => {
+      const created = this.db.createInterviewCase({
+        notificationId,
+        candidateRef: approval.context.candidateRef ?? undefined,
+        candidateName: approval.context.candidateName ?? undefined,
+        recruitmentRef: approval.context.recruitmentRef ?? undefined,
+        recruitmentName: approval.context.recruitmentName ?? undefined,
+        proposalDates: proposalDates(todayInKorea()),
+      });
+      this.applyTemplateInterviewRoute({
+        caseId: created.id,
+        route,
+        steps: resolvedSteps,
+        source: "USER",
+      });
+      this.db.updateNotificationStatus(notificationId, "PROCESSED");
+      this.db.resolveReview(input.reviewId, "INTERVIEW_ARRANGEMENT_STARTED");
+      return created;
+    });
     return {
-      notificationId: review.notificationId,
+      notificationId,
       result: "INTERVIEW_CASE_CREATED",
       caseId: interviewCase.id,
-      templateStatus: !template
-        ? templateStatus
-        : templateRoute || templateStep
-          ? "APPLIED"
-          : templateStatus,
+      interviewPlan: this.db.getCaseInterviewPlan(interviewCase.id),
     };
+  }
+
+  async applyTemplateInterviewRouteToCase(input: {
+    caseId: string;
+    routeTriggerStepId: string;
+  }) {
+    const interviewCase = this.db.getCase(input.caseId);
+    if (!interviewCase?.recruitmentRef) {
+      throw new Error("The case is missing its NineHire recruitment ID.");
+    }
+    const template = await this.getCurrentRecruitmentInterviewTemplate(
+      interviewCase.recruitmentRef,
+    );
+    const route = template.routes.find(
+      (item) => item.triggerStepId === input.routeTriggerStepId,
+    );
+    if (!route) {
+      throw new Error("The selected interview route is not configured for this recruitment.");
+    }
+    const steps = route.stepIds.map((stepId) =>
+      template.steps.find((step) => step.stepId === stepId),
+    );
+    if (steps.some((step) => !step)) {
+      throw new Error("The selected interview route contains an unconfigured interview step.");
+    }
+    const existingPlan = this.db.getCaseInterviewPlan(input.caseId);
+    if (existingPlan) {
+      const sameRoute =
+        existingPlan.source === "TEMPLATE" &&
+        existingPlan.mode === route.mode &&
+        existingPlan.stepIds.length === route.stepIds.length &&
+        existingPlan.stepIds.every((stepId, index) => stepId === route.stepIds[index]);
+      if (sameRoute) return existingPlan;
+      throw new Error("This case already has a different interview plan.");
+    }
+    if (interviewCase.status !== "READY_FOR_DRAFT") {
+      throw new Error("Apply an interview route before creating an interviewer request draft.");
+    }
+    return this.db.transaction(() =>
+      this.applyTemplateInterviewRoute({
+        caseId: input.caseId,
+        route,
+        steps: steps as RecruitmentInterviewTemplateStep[],
+        source: "USER",
+      }),
+    );
+  }
+
+  private async getCurrentRecruitmentInterviewTemplate(recruitmentId: string) {
+    const template = this.db.getRecruitmentInterviewTemplate(recruitmentId);
+    if (!template) {
+      throw new Error("Approve the recruitment interview template before starting arrangement.");
+    }
+    if (!this.ninehire.getRecruitmentPipeline) return template;
+    let currentPipelineHash: string | undefined;
+    try {
+      const pipeline = await this.ninehire.getRecruitmentPipeline(template.recruitmentId);
+      currentPipelineHash = pipelineHash(pipeline.steps);
+    } catch {
+      // 나인하이어 조회가 일시적으로 실패해도 이미 승인된 템플릿을 사용합니다.
+    }
+    if (currentPipelineHash && currentPipelineHash !== template.pipelineHash) {
+      throw new Error(
+        "The recruitment interview template is outdated. Preview and approve the current pipeline before starting arrangement.",
+      );
+    }
+    return template;
+  }
+
+  private applyTemplateInterviewRoute(input: {
+    caseId: string;
+    route: RecruitmentInterviewRoute;
+    steps: RecruitmentInterviewTemplateStep[];
+    source: "SYSTEM" | "USER";
+  }) {
+    const sessions = input.route.mode === "SEQUENTIAL"
+      ? input.steps.map((step) => ({
+          stepId: step.stepId,
+          stepName: step.name,
+          interviewerIds: [],
+        }))
+      : [];
+    const plan = this.db.upsertCaseInterviewPlan({
+      caseId: input.caseId,
+      source: "TEMPLATE",
+      mode: input.route.mode,
+      stepIds: input.steps.map((step) => step.stepId),
+      stepNames: input.steps.map((step) => step.name),
+      sessions,
+      durationMinutes: input.route.mode === "SEQUENTIAL"
+        ? input.steps.reduce((total, step) => total + step.durationMinutes, 0)
+        : input.steps[0]!.durationMinutes,
+    });
+    this.db.addEvent(input.caseId, "TEMPLATE_INTERVIEW_ROUTE_APPLIED", input.source, {
+      triggerStepId: input.route.triggerStepId,
+      mode: input.route.mode,
+      stepIds: input.route.stepIds,
+    });
+    return plan;
   }
 
   recordManualConfirmedInterview(input: {

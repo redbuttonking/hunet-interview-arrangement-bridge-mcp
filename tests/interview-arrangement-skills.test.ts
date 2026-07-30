@@ -10,7 +10,10 @@ let db: BridgeDatabase | undefined;
 afterEach(() => db?.close());
 
 function createSkills(input: {
-  approveInterviewArrangement?: (reviewId: string) => Promise<unknown>;
+  approveInterviewArrangement?: (input: {
+    reviewId: string;
+    routeTriggerStepId: string;
+  }) => Promise<unknown>;
   syncCaseInterviewers?: (caseId: string) => Promise<unknown>;
   createRequestDraft?: (caseId: string) => Promise<unknown>;
   resolveCandidateInterviewAbsenceReview?: (input: Record<string, unknown>) => unknown;
@@ -36,15 +39,37 @@ function createSkills(input: {
 describe("interview arrangement skills", () => {
   it("creates and resolves a candidate triage decision without sending a message", async () => {
     db = new BridgeDatabase(":memory:");
+    db.upsertRecruitmentInterviewTemplate({
+      recruitmentId: "R1",
+      recruitmentName: "Recruitment",
+      pipelineHash: "pipeline-hash",
+      steps: [
+        {
+          stepId: "S1",
+          title: "1차 인터뷰",
+          name: "1차 인터뷰",
+          order: 2,
+          mode: "STANDARD",
+          durationMinutes: 60,
+        },
+      ],
+      routes: [{ triggerStepId: "S1", mode: "STANDARD", stepIds: ["S1"] }],
+    });
     const reviewId = db.createReview({
       reviewType: "INTERVIEW_ARRANGEMENT_START_REQUIRED",
       reason: "Completed evaluation requires approval.",
-      summary: { context: { candidateName: "Candidate", recruitmentName: "Recruitment" } },
+      summary: {
+        context: {
+          candidateName: "Candidate",
+          recruitmentName: "Recruitment",
+          recruitmentRef: "R1",
+        },
+      },
     });
-    const calls: string[] = [];
+    const calls: Array<{ reviewId: string; routeTriggerStepId: string }> = [];
     const skills = createSkills({
-      async approveInterviewArrangement(id) {
-        calls.push(id);
+      async approveInterviewArrangement(input) {
+        calls.push(input);
         return { caseId: "created-case" };
       },
     });
@@ -55,11 +80,43 @@ describe("interview arrangement skills", () => {
       optionId: "START",
     });
 
-    expect(calls).toEqual([reviewId]);
+    expect(calls).toEqual([{ reviewId, routeTriggerStepId: "S1" }]);
     expect(resolved).toMatchObject({
       decision: { status: "RESOLVED", selectedOptionId: "START" },
       outcome: { result: { caseId: "created-case" } },
     });
+  });
+
+  it("requires an explicit route selection when a recruitment has multiple interview routes", () => {
+    db = new BridgeDatabase(":memory:");
+    db.upsertRecruitmentInterviewTemplate({
+      recruitmentId: "R1",
+      recruitmentName: "Recruitment",
+      pipelineHash: "pipeline-hash",
+      steps: [
+        { stepId: "S1", title: "1차", name: "1차 인터뷰", order: 2, mode: "STANDARD", durationMinutes: 60 },
+        { stepId: "S2", title: "2차", name: "2차 인터뷰", order: 3, mode: "STANDARD", durationMinutes: 60 },
+      ],
+      routes: [
+        { triggerStepId: "S1", mode: "STANDARD", stepIds: ["S1"] },
+        { triggerStepId: "S2", mode: "STANDARD", stepIds: ["S2"] },
+      ],
+    });
+    const reviewId = db.createReview({
+      reviewType: "INTERVIEW_ARRANGEMENT_START_REQUIRED",
+      reason: "Completed evaluation requires approval.",
+      summary: { context: { recruitmentRef: "R1", recruitmentName: "Recruitment" } },
+    });
+    const skills = createSkills();
+
+    const decision = skills.createCandidateTriageDecision(reviewId);
+
+    expect(decision.decisionType).toBe("SELECT_INTERVIEW_ROUTE");
+    expect(decision.options.map((option) => option.id)).toEqual([
+      "ROUTE:S1",
+      "ROUTE:S2",
+      "HOLD",
+    ]);
   });
 
   it("uses a decision to request interviewer synchronization before availability collection", async () => {

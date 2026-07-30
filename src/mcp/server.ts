@@ -990,9 +990,10 @@ export function createBridgeMcpServer(
     {
       title: "인터뷰 조율 시작 승인",
       description:
-        "완료된 나인하이어 평가표 요약을 확인한 뒤 이 지원자의 인터뷰 조율 건을 생성합니다. Slack 메시지는 발송하지 않습니다.",
+        "완료된 나인하이어 평가표 요약과 승인된 인터뷰 유형을 확인한 뒤 이 지원자의 인터뷰 조율 건을 생성합니다. 나인하이어 칸반과 Slack 메시지는 변경하지 않습니다.",
       inputSchema: {
         reviewId: z.string().uuid(),
+        routeTriggerStepId: z.string().min(1),
       },
       annotations: {
         readOnlyHint: false,
@@ -1001,8 +1002,28 @@ export function createBridgeMcpServer(
         openWorldHint: false,
       },
     },
-    async ({ reviewId }) =>
-      result(await workflow.approveInterviewArrangement(reviewId)),
+    async (input) =>
+      result(await workflow.approveInterviewArrangement(input)),
+  );
+
+  server.registerTool(
+    "apply_case_interview_template_route",
+    {
+      title: "기존 인터뷰 건에 승인 템플릿 경로 적용",
+      description:
+        "인터뷰 계획 없이 생성된 기존 로컬 조율 건에 승인된 채용 템플릿 경로를 적용합니다. 면접관 요청 초안이 만들어지기 전의 건에만 적용되며 나인하이어와 Slack은 변경하지 않습니다.",
+      inputSchema: {
+        caseId: z.string().uuid(),
+        routeTriggerStepId: z.string().min(1),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (input) => result(await workflow.applyTemplateInterviewRouteToCase(input)),
   );
 
   server.registerTool(
