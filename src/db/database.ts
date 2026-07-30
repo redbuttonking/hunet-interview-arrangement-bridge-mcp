@@ -2386,6 +2386,22 @@ export class BridgeDatabase {
     return rows.map(toCase);
   }
 
+  findReadyToScheduleCandidateCases(
+    candidateName: string,
+    recruitmentName: string,
+  ): InterviewCaseRow[] {
+    const rows = this.connection
+      .prepare(`
+        SELECT * FROM interview_cases
+        WHERE status = 'READY_TO_SCHEDULE'
+          AND candidate_name = ?
+          AND recruitment_name = ?
+        ORDER BY created_at ASC
+      `)
+      .all(candidateName, recruitmentName) as SqlRow[];
+    return rows.map(toCase);
+  }
+
   findScheduledCandidateCases(
     candidateName: string,
     recruitmentName: string,
@@ -2424,6 +2440,105 @@ export class BridgeDatabase {
       });
     });
     return this.getCase(input.caseId)!;
+  }
+
+  recordExternallyConfirmedSchedule(input: {
+    caseId: string;
+    notificationId: string;
+    date: string;
+    startTime: string;
+    endTime: string;
+    sourceLocation?: string;
+  }): InterviewCaseRow {
+    const interviewCase = this.getCase(input.caseId);
+    if (!interviewCase) throw new Error(`Case not found: ${input.caseId}`);
+    if (interviewCase.status !== "READY_TO_SCHEDULE") {
+      throw new Error("Only a ready interview can be recorded from an external confirmation.");
+    }
+    if (
+      !isDate(input.date) ||
+      timeMinutes(input.startTime) >= timeMinutes(input.endTime) ||
+      timeMinutes(input.endTime) - timeMinutes(input.startTime) !== interviewCase.durationMinutes
+    ) {
+      throw new Error("The externally confirmed schedule does not match the interview duration.");
+    }
+
+    const now = new Date().toISOString();
+    this.transaction(() => {
+      this.connection
+        .prepare(`
+          UPDATE interview_cases
+          SET status = 'CONFIRMED', scheduled_room_allocation_id = NULL,
+              scheduled_room_name = NULL, scheduled_date = ?, scheduled_start_time = ?,
+              scheduled_end_time = ?, internal_schedule_confirmed_at = ?, updated_at = ?
+          WHERE id = ?
+        `)
+        .run(
+          input.date,
+          input.startTime,
+          input.endTime,
+          now,
+          now,
+          input.caseId,
+        );
+      this.addEvent(input.caseId, "CANDIDATE_SCHEDULE_CONFIRMED", "NINEHIRE_SLACK", {
+        notificationId: input.notificationId,
+        date: input.date,
+        startTime: input.startTime,
+        endTime: input.endTime,
+        sourceLocation: input.sourceLocation ?? null,
+        externalSchedule: true,
+      });
+    });
+    return this.getCase(input.caseId)!;
+  }
+
+  setConfirmedScheduleRoomAllocation(input: {
+    caseId: string;
+    roomAllocationId: string;
+    actor: "SYSTEM" | "USER";
+  }): ConfirmedInterviewScheduleRow {
+    const interviewCase = this.getCase(input.caseId);
+    if (!interviewCase || interviewCase.status !== "CONFIRMED") {
+      throw new Error("Only a confirmed interview can receive a meeting room.");
+    }
+    const allocationRow = this.connection
+      .prepare(`
+        SELECT allocation.*, block.room_name
+        FROM room_allocations allocation
+        JOIN meeting_room_blocks block ON block.id = allocation.room_block_id
+        WHERE allocation.id = ?
+          AND allocation.case_id = ?
+          AND allocation.status = 'ACTIVE'
+      `)
+      .get(input.roomAllocationId, input.caseId) as SqlRow | undefined;
+    if (!allocationRow) {
+      throw new Error("An active meeting room allocation is required.");
+    }
+    const allocation = toRoomAllocation(allocationRow);
+    const roomName = asString(allocationRow.room_name);
+    if (
+      allocation.date !== interviewCase.scheduledDate ||
+      allocation.startTime !== interviewCase.scheduledStartTime ||
+      allocation.endTime !== interviewCase.scheduledEndTime
+    ) {
+      throw new Error("The meeting room allocation does not match the confirmed schedule.");
+    }
+
+    this.transaction(() => {
+      this.connection
+        .prepare(`
+          UPDATE interview_cases
+          SET scheduled_room_allocation_id = ?, scheduled_room_name = ?, updated_at = ?
+          WHERE id = ?
+        `)
+        .run(allocation.id, roomName, new Date().toISOString(), input.caseId);
+      this.addEvent(input.caseId, "CONFIRMED_SCHEDULE_ROOM_RECORDED", input.actor, {
+        allocationId: allocation.id,
+        roomName,
+      });
+    });
+    return this.getConfirmedInterviewSchedule(input.caseId)!;
   }
 
   recordManualConfirmedSchedule(input: {

@@ -196,6 +196,94 @@ describe("interview arrangement skills", () => {
     expect(db.getCase(interviewCase.id)?.status).toBe("AWAITING_CANDIDATE_CONFIRMATION");
   });
 
+  it("records the user-selected room for a confirmed external schedule", async () => {
+    db = new BridgeDatabase(":memory:");
+    const interviewCase = db.createInterviewCase({
+      candidateName: "Candidate",
+      proposalDates: ["2026-08-12"],
+    });
+    db.setCaseStatus(interviewCase.id, "READY_TO_SCHEDULE");
+    db.recordExternallyConfirmedSchedule({
+      caseId: interviewCase.id,
+      notificationId: "notification-1",
+      date: "2026-08-12",
+      startTime: "10:00",
+      endTime: "11:00",
+    });
+    const blocks = db.syncMeetingRoomBlocks(["2026-08-12"], [
+      {
+        sourceKey: "DAOU:confirmed-room:one",
+        roomId: "R1",
+        roomName: "열정룸",
+        reservedBy: "Recruiter",
+        purpose: "면접",
+        date: "2026-08-12",
+        startTime: "09:00",
+        endTime: "12:00",
+        sourcePayloadHash: "confirmed-room-one",
+      },
+      {
+        sourceKey: "DAOU:confirmed-room:two",
+        roomId: "R2",
+        roomName: "행복룸",
+        reservedBy: "Recruiter",
+        purpose: "면접",
+        date: "2026-08-12",
+        startTime: "09:00",
+        endTime: "12:00",
+        sourcePayloadHash: "confirmed-room-two",
+      },
+    ]);
+    const decision = db.createOrGetPendingInterviewSkillDecision({
+      skillKey: "INTERVIEW_SCHEDULING",
+      decisionType: "SELECT_CONFIRMED_SCHEDULE_ROOM",
+      fingerprint: `case:${interviewCase.id}:confirmed-room-test`,
+      caseId: interviewCase.id,
+      title: "확정된 인터뷰 회의실 선택",
+      prompt: "회의실을 선택하세요.",
+      selectionMode: "SINGLE",
+      options: [
+        { id: "CONFIRMED_ROOM_0", label: "열정룸", description: "열정룸으로 기록합니다." },
+        { id: "CONFIRMED_ROOM_1", label: "행복룸", description: "행복룸으로 기록합니다." },
+      ],
+      context: {
+        choices: [
+          {
+            optionId: "CONFIRMED_ROOM_0",
+            roomBlockId: blocks.find((block) => block.roomName === "열정룸")!.id,
+            roomName: "열정룸",
+            date: "2026-08-12",
+            startTime: "10:00",
+            endTime: "11:00",
+          },
+          {
+            optionId: "CONFIRMED_ROOM_1",
+            roomBlockId: blocks.find((block) => block.roomName === "행복룸")!.id,
+            roomName: "행복룸",
+            date: "2026-08-12",
+            startTime: "10:00",
+            endTime: "11:00",
+          },
+        ],
+      },
+    });
+    const skills = createSkills();
+
+    const resolved = await skills.resolveDecision({
+      decisionId: decision.id,
+      optionId: "CONFIRMED_ROOM_1",
+    });
+
+    expect(resolved).toMatchObject({
+      decision: { status: "RESOLVED", selectedOptionId: "CONFIRMED_ROOM_1" },
+      outcome: {
+        schedule: { roomName: "행복룸", startTime: "10:00", endTime: "11:00" },
+        nextAction: "NONE",
+      },
+    });
+    expect(db.getCase(interviewCase.id)?.scheduledRoomName).toBe("행복룸");
+  });
+
   it("confirms a selected sequential interview plan with one continuous room block", async () => {
     db = new BridgeDatabase(":memory:");
     const interviewCase = db.createInterviewCase({

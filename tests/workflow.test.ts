@@ -1549,6 +1549,153 @@ describe("evaluation approval workflow", () => {
     expect(db.listRoomAllocations(caseId)[0]?.status).toBe("CANCELLED");
   });
 
+  it("auto-assigns one cached meeting room for an externally confirmed ready interview", async () => {
+    db = new BridgeDatabase(":memory:");
+    const ninehire: NinehireWorkflowAdapter = {
+      async lookupCompletedEvaluation() {
+        return { reason: "Not used in this test." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    };
+    const workflow = new WorkflowService(db, config, ninehire);
+    const interviewCase = db.createInterviewCase({
+      candidateName: "External candidate",
+      recruitmentName: "External recruitment",
+      proposalDates: ["2026-08-03"],
+    });
+    db.setCaseStatus(interviewCase.id, "READY_TO_SCHEDULE");
+    db.syncMeetingRoomBlocks(["2026-08-03"], [
+      {
+        sourceKey: "DAOU:external:one",
+        roomId: "R1",
+        roomName: "행복룸",
+        reservedBy: "Recruiter",
+        purpose: "면접",
+        date: "2026-08-03",
+        startTime: "13:00",
+        endTime: "16:00",
+        sourcePayloadHash: "external-one",
+      },
+    ]);
+
+    const processed = await workflow.ingestSlackNotification({
+      channelId: "C1",
+      messageTs: "20.0",
+      parsed: {
+        eventType: "SCHEDULE_CONFIRMED",
+        title: "일정이 확정되었습니다",
+        text: "일정이 확정되었습니다",
+        links: [],
+        payloadHash: "external-one-confirmed",
+        payloadJson: "{}",
+        candidateName: "External candidate",
+        recruitmentName: "External recruitment",
+        scheduledDate: "2026-08-03",
+        scheduledStartTime: "14:00",
+        scheduledEndTime: "15:00",
+      },
+    });
+
+    expect(processed).toMatchObject({
+      result: "INTERVIEW_CONFIRMED_ROOM_AUTO_ASSIGNED",
+      caseId: interviewCase.id,
+    });
+    expect(db.getCase(interviewCase.id)).toMatchObject({
+      status: "CONFIRMED",
+      scheduledRoomName: "행복룸",
+      scheduledDate: "2026-08-03",
+    });
+    expect(db.listRoomAllocations(interviewCase.id)).toMatchObject([
+      { roomBlockId: expect.any(String), startTime: "14:00", endTime: "15:00" },
+    ]);
+  });
+
+  it("creates a room selection decision for an externally confirmed ready interview with multiple rooms", async () => {
+    db = new BridgeDatabase(":memory:");
+    const ninehire: NinehireWorkflowAdapter = {
+      async lookupCompletedEvaluation() {
+        return { reason: "Not used in this test." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    };
+    const workflow = new WorkflowService(db, config, ninehire);
+    const interviewCase = db.createInterviewCase({
+      candidateName: "Room selection candidate",
+      recruitmentName: "Room selection recruitment",
+      proposalDates: ["2026-08-04"],
+    });
+    db.setCaseStatus(interviewCase.id, "READY_TO_SCHEDULE");
+    db.syncMeetingRoomBlocks(["2026-08-04"], [
+      {
+        sourceKey: "DAOU:external:multiple:one",
+        roomId: "R1",
+        roomName: "열정룸",
+        reservedBy: "Recruiter",
+        purpose: "면접",
+        date: "2026-08-04",
+        startTime: "13:00",
+        endTime: "16:00",
+        sourcePayloadHash: "external-multiple-one",
+      },
+      {
+        sourceKey: "DAOU:external:multiple:two",
+        roomId: "R2",
+        roomName: "행복룸",
+        reservedBy: "Recruiter",
+        purpose: "면접",
+        date: "2026-08-04",
+        startTime: "13:00",
+        endTime: "16:00",
+        sourcePayloadHash: "external-multiple-two",
+      },
+    ]);
+
+    const processed = await workflow.ingestSlackNotification({
+      channelId: "C1",
+      messageTs: "21.0",
+      parsed: {
+        eventType: "SCHEDULE_CONFIRMED",
+        title: "일정이 확정되었습니다",
+        text: "일정이 확정되었습니다",
+        links: [],
+        payloadHash: "external-multiple-confirmed",
+        payloadJson: "{}",
+        candidateName: "Room selection candidate",
+        recruitmentName: "Room selection recruitment",
+        scheduledDate: "2026-08-04",
+        scheduledStartTime: "14:00",
+        scheduledEndTime: "15:00",
+      },
+    });
+
+    expect(processed).toMatchObject({
+      result: "INTERVIEW_CONFIRMED_ROOM_SELECTION_REQUIRED",
+      caseId: interviewCase.id,
+    });
+    expect(db.getCase(interviewCase.id)).toMatchObject({ status: "CONFIRMED" });
+    expect(db.listRoomAllocations(interviewCase.id)).toHaveLength(0);
+    expect(db.listInterviewSkillDecisions({ status: "PENDING" })).toMatchObject([
+      {
+        caseId: interviewCase.id,
+        decisionType: "SELECT_CONFIRMED_SCHEDULE_ROOM",
+        options: [
+          { id: "CONFIRMED_ROOM_0", label: "열정룸" },
+          { id: "CONFIRMED_ROOM_1", label: "행복룸" },
+        ],
+      },
+    ]);
+  });
+
   it("requires review when a confirmed Slack schedule differs from the internal schedule", async () => {
     db = new BridgeDatabase(":memory:");
     const ninehire: NinehireWorkflowAdapter = {

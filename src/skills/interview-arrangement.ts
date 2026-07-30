@@ -626,6 +626,26 @@ export class InterviewArrangementSkills {
         nextAction: "CREATE_INTERVIEWER_SCHEDULE_CONFIRMATION_DRAFT",
       };
     }
+    if (decision.decisionType === "SELECT_CONFIRMED_SCHEDULE_ROOM") {
+      const choice = this.standardScheduleChoice(decision, optionId);
+      const allocation = this.db.allocateRoomBlock({
+        caseId: requiredCaseId(decision),
+        roomBlockId: choice.roomBlockId,
+        startTime: choice.startTime,
+        endTime: choice.endTime,
+      });
+      const schedule = this.db.setConfirmedScheduleRoomAllocation({
+        caseId: requiredCaseId(decision),
+        roomAllocationId: allocation.id,
+        actor: "USER",
+      });
+      return {
+        action: optionId,
+        allocation,
+        schedule,
+        nextAction: "NONE",
+      };
+    }
     if (decision.decisionType === "CONFIRM_SEQUENTIAL_SCHEDULE") {
       const choice = this.sequentialScheduleChoice(decision, optionId);
       const allocations = this.db.allocateSequentialRoomBlocks({

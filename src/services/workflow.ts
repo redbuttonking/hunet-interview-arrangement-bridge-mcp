@@ -973,7 +973,7 @@ export class WorkflowService {
             }
           : {}),
       });
-      if (processed.result === "INTERVIEW_CONFIRMED") confirmed += 1;
+      if (processed.result.startsWith("INTERVIEW_CONFIRMED")) confirmed += 1;
       if (processed.result === "REVIEW_REQUIRED") reviewRequired += 1;
     }
     return { scanned: notifications.length, confirmed, reviewRequired };
@@ -1046,11 +1046,103 @@ export class WorkflowService {
       return { notificationId, result: "REVIEW_REQUIRED" };
     }
 
-    const matches = this.db.findAwaitingCandidateConfirmationCases(
+    const awaitingMatches = this.db.findAwaitingCandidateConfirmationCases(
       parsed.candidateName,
       parsed.recruitmentName,
     );
-    if (matches.length !== 1) {
+    let interviewCase: InterviewCaseRow;
+    if (awaitingMatches.length === 1) {
+      interviewCase = awaitingMatches[0]!;
+      const isSameSchedule =
+        interviewCase.scheduledDate === parsed.scheduledDate &&
+        interviewCase.scheduledStartTime === parsed.scheduledStartTime &&
+        interviewCase.scheduledEndTime === parsed.scheduledEndTime;
+      if (!isSameSchedule) {
+        this.db.transaction(() => {
+          this.db.setCaseStatus(interviewCase.id, "REVIEW_REQUIRED");
+          this.db.createReview({
+            notificationId,
+            caseId: interviewCase.id,
+            reviewType: "SCHEDULE_CONFIRMATION_MISMATCH",
+            reason:
+              "The confirmed NineHire schedule differs from the internally scheduled date or time.",
+            summary: {
+              expected: {
+                date: interviewCase.scheduledDate,
+                startTime: interviewCase.scheduledStartTime,
+                endTime: interviewCase.scheduledEndTime,
+              },
+              received: {
+                date: parsed.scheduledDate,
+                startTime: parsed.scheduledStartTime,
+                endTime: parsed.scheduledEndTime,
+                location: parsed.location ?? null,
+              },
+            },
+          });
+          this.db.updateNotificationStatus(notificationId, "REVIEW_REQUIRED");
+        });
+        return {
+          notificationId,
+          result: "REVIEW_REQUIRED",
+          caseId: interviewCase.id,
+        };
+      }
+      this.db.confirmCandidateSchedule({
+        caseId: interviewCase.id,
+        notificationId,
+        sourceLocation: parsed.location,
+      });
+    } else if (awaitingMatches.length === 0) {
+      const readyMatches = this.db.findReadyToScheduleCandidateCases(
+        parsed.candidateName,
+        parsed.recruitmentName,
+      );
+      if (readyMatches.length !== 1) {
+        this.db.updateNotificationStatus(notificationId, "REVIEW_REQUIRED");
+        this.db.createReview({
+          notificationId,
+          reviewType: "SCHEDULE_CONFIRMATION_MATCH_REQUIRED",
+          reason:
+            "The confirmed-schedule notification did not match exactly one candidate-confirmation or ready-to-schedule case.",
+          summary: {
+            candidateName: parsed.candidateName,
+            recruitmentName: parsed.recruitmentName,
+            matchedCaseCount: readyMatches.length,
+          },
+        });
+        return { notificationId, result: "REVIEW_REQUIRED" };
+      }
+      interviewCase = readyMatches[0]!;
+      try {
+        interviewCase = this.db.recordExternallyConfirmedSchedule({
+          caseId: interviewCase.id,
+          notificationId,
+          date: parsed.scheduledDate,
+          startTime: parsed.scheduledStartTime,
+          endTime: parsed.scheduledEndTime,
+          sourceLocation: parsed.location,
+        });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        this.db.updateNotificationStatus(notificationId, "REVIEW_REQUIRED", reason);
+        this.db.createReview({
+          notificationId,
+          caseId: interviewCase.id,
+          reviewType: "SCHEDULE_CONFIRMATION_DURATION_MISMATCH",
+          reason,
+          summary: {
+            expectedDurationMinutes: interviewCase.durationMinutes,
+            received: {
+              date: parsed.scheduledDate,
+              startTime: parsed.scheduledStartTime,
+              endTime: parsed.scheduledEndTime,
+            },
+          },
+        });
+        return { notificationId, result: "REVIEW_REQUIRED", caseId: interviewCase.id };
+      }
+    } else {
       this.db.updateNotificationStatus(notificationId, "REVIEW_REQUIRED");
       this.db.createReview({
         notificationId,
@@ -1060,60 +1152,131 @@ export class WorkflowService {
         summary: {
           candidateName: parsed.candidateName,
           recruitmentName: parsed.recruitmentName,
-          matchedCaseCount: matches.length,
+          matchedCaseCount: awaitingMatches.length,
         },
       });
       return { notificationId, result: "REVIEW_REQUIRED" };
     }
 
-    const interviewCase = matches[0]!;
-    const isSameSchedule =
-      interviewCase.scheduledDate === parsed.scheduledDate &&
-      interviewCase.scheduledStartTime === parsed.scheduledStartTime &&
-      interviewCase.scheduledEndTime === parsed.scheduledEndTime;
-    if (!isSameSchedule) {
-      this.db.transaction(() => {
-        this.db.setCaseStatus(interviewCase.id, "REVIEW_REQUIRED");
-        this.db.createReview({
-          notificationId,
-          caseId: interviewCase.id,
-          reviewType: "SCHEDULE_CONFIRMATION_MISMATCH",
-          reason:
-            "The confirmed NineHire schedule differs from the internally scheduled date or time.",
-          summary: {
-            expected: {
-              date: interviewCase.scheduledDate,
-              startTime: interviewCase.scheduledStartTime,
-              endTime: interviewCase.scheduledEndTime,
-            },
-            received: {
-              date: parsed.scheduledDate,
-              startTime: parsed.scheduledStartTime,
-              endTime: parsed.scheduledEndTime,
-              location: parsed.location ?? null,
-            },
-          },
-        });
-        this.db.updateNotificationStatus(notificationId, "REVIEW_REQUIRED");
-      });
-      return {
-        notificationId,
-        result: "REVIEW_REQUIRED",
-        caseId: interviewCase.id,
-      };
-    }
-
-    this.db.confirmCandidateSchedule({
-      caseId: interviewCase.id,
-      notificationId,
-      sourceLocation: parsed.location,
-    });
+    const roomResult = this.resolveConfirmedScheduleRoom(interviewCase.id);
     this.db.updateNotificationStatus(notificationId, "PROCESSED");
     return {
       notificationId,
-      result: "INTERVIEW_CONFIRMED",
+      result: roomResult,
       caseId: interviewCase.id,
     };
+  }
+
+  private resolveConfirmedScheduleRoom(caseId: string): string {
+    const interviewCase = this.db.getCase(caseId);
+    if (
+      !interviewCase ||
+      interviewCase.status !== "CONFIRMED" ||
+      !interviewCase.scheduledDate ||
+      !interviewCase.scheduledStartTime ||
+      !interviewCase.scheduledEndTime
+    ) {
+      throw new Error("The confirmed interview schedule is incomplete.");
+    }
+
+    if (interviewCase.scheduledRoomName) return "INTERVIEW_CONFIRMED";
+    if (interviewCase.scheduledRoomAllocationId) {
+      this.db.setConfirmedScheduleRoomAllocation({
+        caseId,
+        roomAllocationId: interviewCase.scheduledRoomAllocationId,
+        actor: "SYSTEM",
+      });
+      return "INTERVIEW_CONFIRMED";
+    }
+
+    const plan = this.db.getCaseInterviewPlan(caseId);
+    if (plan?.mode === "SEQUENTIAL") {
+      this.db.createReview({
+        caseId,
+        reviewType: "CONFIRMED_SEQUENTIAL_INTERVIEW_ROOM_REQUIRED",
+        reason:
+          "A manually confirmed sequential interview needs room selection for each stage.",
+      });
+      return "INTERVIEW_CONFIRMED_ROOM_REVIEW_REQUIRED";
+    }
+
+    if (!this.db.areMeetingRoomDatesSynced([interviewCase.scheduledDate])) {
+      this.db.createReview({
+        caseId,
+        reviewType: "CONFIRMED_INTERVIEW_ROOM_SYNC_REQUIRED",
+        reason:
+          "The confirmed interview date has no synced Daou Office meeting room data.",
+        summary: {
+          date: interviewCase.scheduledDate,
+          startTime: interviewCase.scheduledStartTime,
+          endTime: interviewCase.scheduledEndTime,
+        },
+      });
+      return "INTERVIEW_CONFIRMED_ROOM_REVIEW_REQUIRED";
+    }
+
+    const rooms = this.db.findAvailableRoomBlocks(
+      interviewCase.scheduledDate,
+      interviewCase.scheduledStartTime,
+      interviewCase.scheduledEndTime,
+    );
+    if (rooms.length === 1) {
+      const allocation = this.db.allocateRoomBlock({
+        caseId,
+        roomBlockId: rooms[0]!.id,
+        startTime: interviewCase.scheduledStartTime,
+        endTime: interviewCase.scheduledEndTime,
+      });
+      this.db.setConfirmedScheduleRoomAllocation({
+        caseId,
+        roomAllocationId: allocation.id,
+        actor: "SYSTEM",
+      });
+      return "INTERVIEW_CONFIRMED_ROOM_AUTO_ASSIGNED";
+    }
+    if (rooms.length === 0) {
+      this.db.createReview({
+        caseId,
+        reviewType: "CONFIRMED_INTERVIEW_ROOM_UNAVAILABLE",
+        reason:
+          "No available synced meeting room block matches the confirmed interview schedule.",
+        summary: {
+          date: interviewCase.scheduledDate,
+          startTime: interviewCase.scheduledStartTime,
+          endTime: interviewCase.scheduledEndTime,
+        },
+      });
+      return "INTERVIEW_CONFIRMED_ROOM_REVIEW_REQUIRED";
+    }
+
+    this.db.createOrGetPendingInterviewSkillDecision({
+      skillKey: "INTERVIEW_SCHEDULING",
+      decisionType: "SELECT_CONFIRMED_SCHEDULE_ROOM",
+      fingerprint: `case:${caseId}:confirmed-room:${interviewCase.scheduledDate}:${interviewCase.scheduledStartTime}:${interviewCase.scheduledEndTime}:${rooms.map((room) => room.id).join("|")}`,
+      caseId,
+      title: "확정된 인터뷰 회의실 선택",
+      prompt: "나인하이어에서 확정된 인터뷰 시간에 사용할 회의실을 하나 선택하세요.",
+      selectionMode: "SINGLE",
+      options: rooms.map((room, index) => ({
+        id: `CONFIRMED_ROOM_${index}`,
+        label: `${room.roomName}`,
+        description: `${interviewCase.scheduledDate} ${interviewCase.scheduledStartTime}~${interviewCase.scheduledEndTime}에 이 회의실로 기록합니다.`,
+      })),
+      context: {
+        caseId,
+        candidateName: interviewCase.candidateName,
+        recruitmentName: interviewCase.recruitmentName,
+        choices: rooms.map((room, index) => ({
+          optionId: `CONFIRMED_ROOM_${index}`,
+          roomBlockId: room.id,
+          roomName: room.roomName,
+          date: interviewCase.scheduledDate,
+          startTime: interviewCase.scheduledStartTime,
+          endTime: interviewCase.scheduledEndTime,
+        })),
+      },
+    });
+    return "INTERVIEW_CONFIRMED_ROOM_SELECTION_REQUIRED";
   }
 
   private processCandidateInterviewAbsence(
