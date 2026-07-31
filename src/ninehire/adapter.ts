@@ -3,6 +3,7 @@ import type {
   EvaluationLookup,
   EvaluationSummary,
   InterviewerLookup,
+  NinehireCandidateSchedule,
   NinehireInterviewer,
   NinehireRecruitmentList,
   RecruitmentPipeline,
@@ -25,6 +26,7 @@ export interface NinehireWorkflowAdapter {
     offset: number;
   }): Promise<NinehireRecruitmentList>;
   getRecruitmentPipeline?(recruitmentId: string): Promise<RecruitmentPipeline>;
+  listCandidateSchedules?(contexts: CandidateContext[]): Promise<NinehireCandidateSchedule[]>;
 }
 
 export function upstreamPayload(result: Record<string, unknown>): unknown {
@@ -144,6 +146,29 @@ function codeOf(value: unknown): string | undefined {
 
 function nameOf(value: unknown): string | undefined {
   return text(asRecord(value)?.name);
+}
+
+function koreaDateTime(value: unknown): { date: string; time: string } | undefined {
+  const raw = text(value);
+  if (!raw) return undefined;
+  const instant = new Date(raw);
+  if (Number.isNaN(instant.getTime())) return undefined;
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Seoul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(instant);
+  const part = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((item) => item.type === type)?.value ?? "";
+  const date = `${part("year")}-${part("month")}-${part("day")}`;
+  const time = `${part("hour")}:${part("minute")}`;
+  return /^\d{4}-\d{2}-\d{2}$/.test(date) && /^\d{2}:\d{2}$/.test(time)
+    ? { date, time }
+    : undefined;
 }
 
 function uniqueRecord(
@@ -371,6 +396,76 @@ export class NinehireRecruitmentWorkflowAdapter
         })
         .sort((left, right) => left.order - right.order),
     };
+  }
+
+  async listCandidateSchedules(
+    contexts: CandidateContext[],
+  ): Promise<NinehireCandidateSchedule[]> {
+    const grouped = new Map<string, CandidateContext[]>();
+    for (const context of contexts) {
+      const recruitmentId = identifierFromReference(context.recruitmentRef);
+      const applicantProgressId = identifierFromReference(context.candidateRef);
+      if (!recruitmentId || !applicantProgressId) continue;
+      grouped.set(recruitmentId, [...(grouped.get(recruitmentId) ?? []), context]);
+    }
+
+    const schedules: NinehireCandidateSchedule[] = [];
+    for (const [recruitmentId, groupedContexts] of grouped) {
+      for (let index = 0; index < groupedContexts.length; index += 100) {
+        const chunk = groupedContexts.slice(index, index + 100);
+        const contextsByApplicantId = new Map(
+          chunk.flatMap((context) => {
+            const applicantProgressId = identifierFromReference(context.candidateRef);
+            return applicantProgressId ? [[applicantProgressId, context] as const] : [];
+          }),
+        );
+        const payload = asRecord(
+          upstreamPayload(
+            await this.gateway.callTool("get_applicant_progresses", {
+              recruitmentId,
+              applicantProgressIds: [...contextsByApplicantId.keys()],
+              limit: 100,
+            }),
+          ),
+        );
+        for (const applicant of records(payload?.results)) {
+          const applicantProgressId = text(applicant.applicantProgressId);
+          if (!applicantProgressId) continue;
+          const context = contextsByApplicantId.get(applicantProgressId);
+          const candidateName = text(context?.candidateName);
+          const recruitmentName = text(context?.recruitmentName);
+          const candidateRef = text(context?.candidateRef);
+          const recruitmentRef = text(context?.recruitmentRef);
+          if (!context || !candidateName || !recruitmentName || !candidateRef || !recruitmentRef) {
+            continue;
+          }
+          for (const event of records(applicant.events)) {
+            if (codeOf(event.type) !== "single") continue;
+            const eventId = text(event.eventId);
+            const start = koreaDateTime(event.startAt);
+            const end = koreaDateTime(event.endAt);
+            if (!eventId || !start || !end || start.date !== end.date || start.time >= end.time) {
+              continue;
+            }
+            schedules.push({
+              eventId,
+              candidateRef,
+              candidateName,
+              recruitmentRef,
+              recruitmentName,
+              date: start.date,
+              startTime: start.time,
+              endTime: end.time,
+              ...(text(event.location) ? { location: text(event.location) } : {}),
+              attendeeNames: records(event.attendees)
+                .map((attendee) => text(attendee.name))
+                .filter((name): name is string => Boolean(name)),
+            });
+          }
+        }
+      }
+    }
+    return schedules;
   }
 
   async lookupCompletedEvaluation(

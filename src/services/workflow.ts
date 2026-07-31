@@ -18,6 +18,7 @@ import { proposalDates } from "../domain/calendar.js";
 import type {
   CandidateContext,
   EvaluationSummary,
+  NinehireCandidateSchedule,
   RescheduleAvailabilityPolicy,
   ScoreSheetSummary,
   SlackNotificationInput,
@@ -1023,6 +1024,270 @@ export class WorkflowService {
       }
     }
     return { scanned: notifications.length, reviewRequired };
+  }
+
+  async reconcileNinehireConfirmedSchedules(): Promise<{
+    trackedCandidates: number;
+    discoveredSchedules: number;
+    confirmedCases: number;
+    manuallyRecorded: number;
+    roomSelectionRequired: number;
+    roomReviewRequired: number;
+  }> {
+    if (!this.ninehire.listCandidateSchedules) {
+      throw new Error("NineHire confirmed-schedule lookup is not available.");
+    }
+
+    const targets = new Map<string, {
+      candidateRef: string;
+      recruitmentRef: string;
+      kind: "CASE" | "REVIEW";
+      caseId?: string;
+      reviewId?: string;
+      candidateName: string;
+      recruitmentName: string;
+    }>();
+    for (const interviewCase of this.db.listCases("READY_TO_SCHEDULE")) {
+      if (
+        !interviewCase.candidateRef ||
+        !interviewCase.recruitmentRef ||
+        !interviewCase.candidateName ||
+        !interviewCase.recruitmentName
+      ) {
+        continue;
+      }
+      targets.set(
+        `${interviewCase.candidateRef}:${interviewCase.recruitmentRef}`,
+        {
+          candidateRef: interviewCase.candidateRef,
+          recruitmentRef: interviewCase.recruitmentRef,
+          kind: "CASE",
+          caseId: interviewCase.id,
+          candidateName: interviewCase.candidateName,
+          recruitmentName: interviewCase.recruitmentName,
+        },
+      );
+    }
+    for (const review of this.db.listOpenReviews()) {
+      if (review.reviewType !== "INTERVIEW_ARRANGEMENT_START_REQUIRED") continue;
+      const approval = evaluationApprovalPayload(review.summary);
+      const candidateRef = approval?.context.candidateRef;
+      const recruitmentRef = approval?.context.recruitmentRef;
+      const candidateName = approval?.context.candidateName;
+      const recruitmentName = approval?.context.recruitmentName;
+      if (!candidateRef || !recruitmentRef || !candidateName || !recruitmentName) {
+        continue;
+      }
+      const key = `${candidateRef}:${recruitmentRef}`;
+      if (targets.has(key)) continue;
+      targets.set(key, {
+        candidateRef,
+        recruitmentRef,
+        kind: "REVIEW",
+        reviewId: review.id,
+        candidateName,
+        recruitmentName,
+      });
+    }
+
+    if (targets.size === 0) {
+      return {
+        trackedCandidates: 0,
+        discoveredSchedules: 0,
+        confirmedCases: 0,
+        manuallyRecorded: 0,
+        roomSelectionRequired: 0,
+        roomReviewRequired: 0,
+      };
+    }
+
+    const schedules = await this.ninehire.listCandidateSchedules(
+      [...targets.values()].map((target) => ({
+        candidateRef: target.candidateRef,
+        candidateName: target.candidateName,
+        recruitmentRef: target.recruitmentRef,
+        recruitmentName: target.recruitmentName,
+      })),
+    );
+    const today = todayInKorea();
+    const schedulesByTarget = new Map<string, NinehireCandidateSchedule>();
+    for (const schedule of schedules) {
+      if (schedule.date < today) continue;
+      const targetKey = `${schedule.candidateRef}:${schedule.recruitmentRef}`;
+      if (!targets.has(targetKey)) continue;
+      const existing = schedulesByTarget.get(targetKey);
+      if (
+        !existing ||
+        `${schedule.date}T${schedule.startTime}` < `${existing.date}T${existing.startTime}`
+      ) {
+        schedulesByTarget.set(targetKey, schedule);
+      }
+    }
+
+    let discoveredSchedules = 0;
+    let confirmedCases = 0;
+    let manuallyRecorded = 0;
+    let roomSelectionRequired = 0;
+    let roomReviewRequired = 0;
+    for (const [targetKey, schedule] of schedulesByTarget) {
+      const target = targets.get(targetKey);
+      if (!target) continue;
+      discoveredSchedules += 1;
+
+      if (target.kind === "CASE" && target.caseId) {
+        try {
+          this.db.recordExternallyConfirmedSchedule({
+            caseId: target.caseId,
+            sourceEventId: schedule.eventId,
+            source: "NINEHIRE_MCP",
+            date: schedule.date,
+            startTime: schedule.startTime,
+            endTime: schedule.endTime,
+            sourceLocation: schedule.location,
+          });
+          const roomResult = this.resolveConfirmedScheduleRoom(target.caseId);
+          confirmedCases += 1;
+          if (roomResult === "INTERVIEW_CONFIRMED_ROOM_SELECTION_REQUIRED") {
+            roomSelectionRequired += 1;
+          } else if (roomResult === "INTERVIEW_CONFIRMED_ROOM_REVIEW_REQUIRED") {
+            roomReviewRequired += 1;
+          }
+        } catch (error) {
+          this.db.setCaseStatus(target.caseId, "REVIEW_REQUIRED");
+          if (!this.db.hasCaseReview(target.caseId, "NINEHIRE_SCHEDULE_RECONCILIATION_REQUIRED")) {
+            this.db.createReview({
+              caseId: target.caseId,
+              reviewType: "NINEHIRE_SCHEDULE_RECONCILIATION_REQUIRED",
+              reason: error instanceof Error ? error.message : String(error),
+              summary: this.reconciledScheduleSummary(schedule),
+            });
+          }
+          roomReviewRequired += 1;
+        }
+        continue;
+      }
+
+      if (target.kind !== "REVIEW" || !target.reviewId) continue;
+      const review = this.db.getReview(target.reviewId);
+      if (!review || review.status !== "OPEN") continue;
+      const roomResult = this.reconcileManualNinehireSchedule(review, schedule);
+      if (roomResult === "RECORDED") manuallyRecorded += 1;
+      if (roomResult === "SELECTION_REQUIRED") roomSelectionRequired += 1;
+      if (roomResult === "REVIEW_REQUIRED") roomReviewRequired += 1;
+    }
+
+    return {
+      trackedCandidates: targets.size,
+      discoveredSchedules,
+      confirmedCases,
+      manuallyRecorded,
+      roomSelectionRequired,
+      roomReviewRequired,
+    };
+  }
+
+  private reconcileManualNinehireSchedule(
+    review: { id: string; reviewType: string; status: string },
+    schedule: NinehireCandidateSchedule,
+  ): "RECORDED" | "SELECTION_REQUIRED" | "REVIEW_REQUIRED" {
+    if (review.reviewType !== "INTERVIEW_ARRANGEMENT_START_REQUIRED") {
+      return "REVIEW_REQUIRED";
+    }
+    if (!this.db.areMeetingRoomDatesSynced([schedule.date])) {
+      this.createReconciledScheduleRoomReview(
+        review.id,
+        schedule,
+        "NINEHIRE_CONFIRMED_SCHEDULE_ROOM_SYNC_REQUIRED",
+        "나인하이어에서 직접 확정된 인터뷰 날짜의 다우오피스 회의실 정보가 없습니다. 회의실 동기화 후 다시 확인하세요.",
+      );
+      return "REVIEW_REQUIRED";
+    }
+    const rooms = this.db.findAvailableRoomBlocks(
+      schedule.date,
+      schedule.startTime,
+      schedule.endTime,
+    );
+    if (rooms.length === 0) {
+      this.createReconciledScheduleRoomReview(
+        review.id,
+        schedule,
+        "NINEHIRE_CONFIRMED_SCHEDULE_ROOM_UNAVAILABLE",
+        "나인하이어에서 직접 확정된 인터뷰 시간에 사용할 수 있는 동기화된 회의실이 없습니다.",
+      );
+      return "REVIEW_REQUIRED";
+    }
+    if (rooms.length === 1) {
+      this.recordManualConfirmedInterview({
+        reviewId: review.id,
+        date: schedule.date,
+        startTime: schedule.startTime,
+        endTime: schedule.endTime,
+        roomName: rooms[0]!.roomName,
+        note: `나인하이어 직접 확정 일정 ${schedule.eventId}에서 자동 기록`,
+      });
+      return "RECORDED";
+    }
+
+    this.db.createOrGetPendingInterviewSkillDecision({
+      skillKey: "INTERVIEW_SCHEDULING",
+      decisionType: "SELECT_NINEHIRE_CONFIRMED_SCHEDULE_ROOM",
+      fingerprint: `review:${review.id}:event:${schedule.eventId}:rooms:${rooms.map((room) => room.id).join("|")}`,
+      reviewId: review.id,
+      title: "직접 확정된 인터뷰 회의실 선택",
+      prompt: "나인하이어에서 직접 확정된 인터뷰에 사용할 회의실을 하나 선택하세요.",
+      selectionMode: "SINGLE",
+      options: rooms.map((room, index) => ({
+        id: `NINEHIRE_CONFIRMED_ROOM_${index}`,
+        label: room.roomName,
+        description: `${schedule.date} ${schedule.startTime}~${schedule.endTime} 인터뷰로 기록합니다.`,
+      })),
+      context: {
+        reviewId: review.id,
+        eventId: schedule.eventId,
+        candidateName: schedule.candidateName,
+        recruitmentName: schedule.recruitmentName,
+        date: schedule.date,
+        startTime: schedule.startTime,
+        endTime: schedule.endTime,
+        choices: rooms.map((room, index) => ({
+          optionId: `NINEHIRE_CONFIRMED_ROOM_${index}`,
+          roomName: room.roomName,
+        })),
+      },
+    });
+    return "SELECTION_REQUIRED";
+  }
+
+  private createReconciledScheduleRoomReview(
+    reviewId: string,
+    schedule: NinehireCandidateSchedule,
+    reviewType: string,
+    reason: string,
+  ): void {
+    if (this.db.hasOpenReviewForSourceEvent(reviewType, schedule.eventId)) return;
+    this.db.createReview({
+      reviewType,
+      reason,
+      summary: {
+        reviewId,
+        ...this.reconciledScheduleSummary(schedule),
+      },
+    });
+  }
+
+  private reconciledScheduleSummary(schedule: NinehireCandidateSchedule): Record<string, unknown> {
+    return {
+      eventId: schedule.eventId,
+      candidateRef: schedule.candidateRef,
+      candidateName: schedule.candidateName,
+      recruitmentRef: schedule.recruitmentRef,
+      recruitmentName: schedule.recruitmentName,
+      date: schedule.date,
+      startTime: schedule.startTime,
+      endTime: schedule.endTime,
+      location: schedule.location ?? null,
+      attendeeNames: schedule.attendeeNames,
+    };
   }
 
   private processScheduleConfirmation(

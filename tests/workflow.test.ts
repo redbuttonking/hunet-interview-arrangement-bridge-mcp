@@ -1887,4 +1887,196 @@ describe("evaluation approval workflow", () => {
       ],
     });
   });
+
+  it("records a direct NineHire schedule with the only synced meeting room", async () => {
+    db = new BridgeDatabase(":memory:");
+    const notification = db.insertNotification(
+      {
+        channelId: "C1",
+        messageTs: "direct-schedule.1",
+        eventType: "EVALUATION_COMPLETED",
+        title: "평가표 제출이 완료되었습니다.",
+        payloadHash: "direct-schedule-hash",
+        payloadJson: "{}",
+      },
+      "AWAITING_START_APPROVAL",
+    );
+    const reviewId = db.createReview({
+      notificationId: notification.id,
+      reviewType: "INTERVIEW_ARRANGEMENT_START_REQUIRED",
+      reason: "인터뷰 조율 시작 여부를 확인하세요.",
+      summary: {
+        context: {
+          candidateRef: "A1",
+          candidateName: "직접 확정 지원자",
+          recruitmentRef: "R1",
+          recruitmentName: "직접 확정 채용",
+        },
+        evaluation: {
+          applicantProgressId: "A1",
+          recruitmentId: "R1",
+          scoreSheets: [],
+        },
+      },
+    });
+    db.syncMeetingRoomBlocks(["2099-08-04"], [
+      {
+        sourceKey: "DAOU:direct-schedule",
+        roomId: "R1",
+        roomName: "행복룸",
+        reservedBy: "담당자",
+        purpose: "인터뷰",
+        date: "2099-08-04",
+        startTime: "15:00",
+        endTime: "18:00",
+        sourcePayloadHash: "direct-schedule-room",
+      },
+    ]);
+    const ninehire: NinehireWorkflowAdapter = {
+      async lookupCompletedEvaluation() {
+        return { reason: "테스트에서는 사용하지 않습니다." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+      async listCandidateSchedules() {
+        return [{
+          eventId: "E1",
+          candidateRef: "A1",
+          candidateName: "직접 확정 지원자",
+          recruitmentRef: "R1",
+          recruitmentName: "직접 확정 채용",
+          date: "2099-08-04",
+          startTime: "16:00",
+          endTime: "17:00",
+          attendeeNames: ["면접관"],
+        }];
+      },
+    };
+    const workflow = new WorkflowService(db, config, ninehire);
+
+    await expect(workflow.reconcileNinehireConfirmedSchedules()).resolves.toEqual({
+      trackedCandidates: 1,
+      discoveredSchedules: 1,
+      confirmedCases: 0,
+      manuallyRecorded: 1,
+      roomSelectionRequired: 0,
+      roomReviewRequired: 0,
+    });
+
+    expect(db.getReview(reviewId)?.status).toBe("RESOLVED");
+    expect(db.listCases("CONFIRMED")).toMatchObject([
+      {
+        candidateName: "직접 확정 지원자",
+        scheduledDate: "2099-08-04",
+        scheduledStartTime: "16:00",
+        scheduledEndTime: "17:00",
+        scheduledRoomName: "행복룸",
+      },
+    ]);
+    expect(db.findAvailableRoomBlocks("2099-08-04", "16:00", "17:00")).toEqual([]);
+  });
+
+  it("asks for a room choice when a direct NineHire schedule has multiple rooms", async () => {
+    db = new BridgeDatabase(":memory:");
+    const notification = db.insertNotification(
+      {
+        channelId: "C1",
+        messageTs: "direct-schedule.2",
+        eventType: "EVALUATION_COMPLETED",
+        title: "평가표 제출이 완료되었습니다.",
+        payloadHash: "direct-schedule-multiple-hash",
+        payloadJson: "{}",
+      },
+      "AWAITING_START_APPROVAL",
+    );
+    const reviewId = db.createReview({
+      notificationId: notification.id,
+      reviewType: "INTERVIEW_ARRANGEMENT_START_REQUIRED",
+      reason: "인터뷰 조율 시작 여부를 확인하세요.",
+      summary: {
+        context: {
+          candidateRef: "A2",
+          candidateName: "회의실 선택 지원자",
+          recruitmentRef: "R2",
+          recruitmentName: "회의실 선택 채용",
+        },
+        evaluation: {
+          applicantProgressId: "A2",
+          recruitmentId: "R2",
+          scoreSheets: [],
+        },
+      },
+    });
+    db.syncMeetingRoomBlocks(["2099-08-05"], [
+      {
+        sourceKey: "DAOU:direct-schedule-one",
+        roomId: "R1",
+        roomName: "열정룸",
+        reservedBy: "담당자",
+        purpose: "인터뷰",
+        date: "2099-08-05",
+        startTime: "15:00",
+        endTime: "18:00",
+        sourcePayloadHash: "direct-schedule-room-one",
+      },
+      {
+        sourceKey: "DAOU:direct-schedule-two",
+        roomId: "R2",
+        roomName: "행복룸",
+        reservedBy: "담당자",
+        purpose: "인터뷰",
+        date: "2099-08-05",
+        startTime: "15:00",
+        endTime: "18:00",
+        sourcePayloadHash: "direct-schedule-room-two",
+      },
+    ]);
+    const ninehire: NinehireWorkflowAdapter = {
+      async lookupCompletedEvaluation() {
+        return { reason: "테스트에서는 사용하지 않습니다." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+      async listCandidateSchedules() {
+        return [{
+          eventId: "E2",
+          candidateRef: "A2",
+          candidateName: "회의실 선택 지원자",
+          recruitmentRef: "R2",
+          recruitmentName: "회의실 선택 채용",
+          date: "2099-08-05",
+          startTime: "16:00",
+          endTime: "17:00",
+          attendeeNames: [],
+        }];
+      },
+    };
+    const workflow = new WorkflowService(db, config, ninehire);
+
+    await expect(workflow.reconcileNinehireConfirmedSchedules()).resolves.toMatchObject({
+      trackedCandidates: 1,
+      discoveredSchedules: 1,
+      manuallyRecorded: 0,
+      roomSelectionRequired: 1,
+    });
+    expect(db.getReview(reviewId)?.status).toBe("OPEN");
+    expect(db.listInterviewSkillDecisions({ status: "PENDING" })).toMatchObject([
+      {
+        reviewId,
+        decisionType: "SELECT_NINEHIRE_CONFIRMED_SCHEDULE_ROOM",
+        options: [
+          { id: "NINEHIRE_CONFIRMED_ROOM_0", label: "열정룸" },
+          { id: "NINEHIRE_CONFIRMED_ROOM_1", label: "행복룸" },
+        ],
+      },
+    ]);
+  });
 });

@@ -14,6 +14,7 @@ type WorkflowActions = Pick<
   WorkflowService,
   | "approveInterviewArrangement"
   | "createRequestDraft"
+  | "recordManualConfirmedInterview"
   | "resolveCandidateInterviewAbsenceReview"
   | "syncCaseInterviewers"
 >;
@@ -45,6 +46,11 @@ interface SequentialScheduleChoice {
       endTime: string;
     };
   }>;
+}
+
+interface ReconciledNinehireScheduleChoice {
+  optionId: string;
+  roomName: string;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -646,6 +652,28 @@ export class InterviewArrangementSkills {
         nextAction: "NONE",
       };
     }
+    if (decision.decisionType === "SELECT_NINEHIRE_CONFIRMED_SCHEDULE_ROOM") {
+      const choice = this.reconciledNinehireScheduleChoice(decision, optionId);
+      const context = requiredDecisionContext(decision);
+      const date = text(context.date);
+      const startTime = text(context.startTime);
+      const endTime = text(context.endTime);
+      if (!date || !startTime || !endTime) {
+        throw new Error("The reconciled NineHire schedule is incomplete.");
+      }
+      return {
+        action: optionId,
+        result: this.workflow.recordManualConfirmedInterview({
+          reviewId: requiredReviewId(decision),
+          date,
+          startTime,
+          endTime,
+          roomName: choice.roomName,
+          note: `나인하이어 직접 확정 일정 ${text(context.eventId) ?? ""}에서 사용자 선택으로 기록`,
+        }),
+        nextAction: "NONE",
+      };
+    }
     if (decision.decisionType === "CONFIRM_SEQUENTIAL_SCHEDULE") {
       const choice = this.sequentialScheduleChoice(decision, optionId);
       const allocations = this.db.allocateSequentialRoomBlocks({
@@ -802,5 +830,19 @@ export class InterviewArrangementSkills {
       throw new Error(`Sequential schedule choice is invalid: ${optionId}`);
     }
     return { optionId, order, date, sessions };
+  }
+
+  private reconciledNinehireScheduleChoice(
+    decision: InterviewSkillDecisionRow,
+    optionId: string,
+  ): ReconciledNinehireScheduleChoice {
+    const choice = records(requiredDecisionContext(decision).choices).find(
+      (item) => text(item.optionId) === optionId,
+    );
+    const roomName = text(choice?.roomName);
+    if (!choice || !roomName) {
+      throw new Error(`Reconciled NineHire schedule choice not found: ${optionId}`);
+    }
+    return { optionId, roomName };
   }
 }

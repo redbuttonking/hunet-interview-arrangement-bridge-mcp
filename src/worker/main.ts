@@ -247,6 +247,7 @@ app.error(async (error) => {
 let cycleRunning = false;
 let retryCycleRunning = false;
 const slackReconciliationDedupeKey = config.slack.sourceChannelId;
+const ninehireScheduleReconciliationDedupeKey = "NINEHIRE_CONFIRMED_SCHEDULE_RECONCILIATION";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.stack ?? error.message : String(error);
@@ -281,6 +282,24 @@ async function reconcileSlackNotifications(): Promise<void> {
   }
 }
 
+async function reconcileNinehireConfirmedSchedules(): Promise<void> {
+  try {
+    await workflow.reconcileNinehireConfirmedSchedules();
+    db.completePendingIntegrationRetryByDedupeKey(
+      "NINEHIRE_SCHEDULE_RECONCILIATION",
+      ninehireScheduleReconciliationDedupeKey,
+    );
+  } catch (error) {
+    const message = errorMessage(error);
+    db.enqueueIntegrationRetry({
+      jobType: "NINEHIRE_SCHEDULE_RECONCILIATION",
+      dedupeKey: ninehireScheduleReconciliationDedupeKey,
+      payload: {},
+    });
+    throw new Error(`NineHire confirmed-schedule reconciliation failed: ${message}`);
+  }
+}
+
 async function runIntegrationRetryCycle(): Promise<void> {
   if (retryCycleRunning || cycleRunning) return;
   retryCycleRunning = true;
@@ -295,6 +314,8 @@ async function runIntegrationRetryCycle(): Promise<void> {
       try {
         if (job.jobType === "SLACK_NOTIFICATION_RECONCILIATION") {
           await reconciler.reconcile();
+        } else if (job.jobType === "NINEHIRE_SCHEDULE_RECONCILIATION") {
+          await workflow.reconcileNinehireConfirmedSchedules();
         } else {
           await workflow.processIntegrationRetryJob(job);
         }
@@ -325,6 +346,7 @@ async function runCycle(): Promise<void> {
   try {
     await ensureDailyDatabaseBackup();
     await reconcileSlackNotifications();
+    await reconcileNinehireConfirmedSchedules();
     const dueBeforeRefresh = db.listDueReminders();
     const caseIds = [...new Set(dueBeforeRefresh.map((item) => item.caseId))];
     for (const caseId of caseIds) {

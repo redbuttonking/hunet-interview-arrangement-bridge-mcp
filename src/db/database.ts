@@ -1607,6 +1607,18 @@ export class BridgeDatabase {
     return Boolean(row);
   }
 
+  hasOpenReviewForSourceEvent(reviewType: string, eventId: string): boolean {
+    const row = this.connection
+      .prepare(`
+        SELECT id FROM workflow_reviews
+        WHERE review_type = ? AND status = 'OPEN'
+          AND summary_json LIKE ?
+        LIMIT 1
+      `)
+      .get(reviewType, `%\"eventId\":\"${eventId}\"%`) as SqlRow | undefined;
+    return Boolean(row);
+  }
+
   resolveReview(id: string, resolution: string): void {
     const result = this.connection
       .prepare(`
@@ -2444,7 +2456,9 @@ export class BridgeDatabase {
 
   recordExternallyConfirmedSchedule(input: {
     caseId: string;
-    notificationId: string;
+    notificationId?: string;
+    sourceEventId?: string;
+    source?: "NINEHIRE_SLACK" | "NINEHIRE_MCP";
     date: string;
     startTime: string;
     endTime: string;
@@ -2454,6 +2468,9 @@ export class BridgeDatabase {
     if (!interviewCase) throw new Error(`Case not found: ${input.caseId}`);
     if (interviewCase.status !== "READY_TO_SCHEDULE") {
       throw new Error("Only a ready interview can be recorded from an external confirmation.");
+    }
+    if (!input.notificationId && !input.sourceEventId) {
+      throw new Error("An external confirmation source is required.");
     }
     if (
       !isDate(input.date) ||
@@ -2481,8 +2498,9 @@ export class BridgeDatabase {
           now,
           input.caseId,
         );
-      this.addEvent(input.caseId, "CANDIDATE_SCHEDULE_CONFIRMED", "NINEHIRE_SLACK", {
-        notificationId: input.notificationId,
+      this.addEvent(input.caseId, "CANDIDATE_SCHEDULE_CONFIRMED", input.source ?? "NINEHIRE_SLACK", {
+        notificationId: input.notificationId ?? null,
+        sourceEventId: input.sourceEventId ?? null,
         date: input.date,
         startTime: input.startTime,
         endTime: input.endTime,
@@ -2838,9 +2856,21 @@ export class BridgeDatabase {
               AND allocation.start_time < ?
               AND allocation.end_time > ?
           )
+          AND NOT EXISTS (
+            SELECT 1 FROM interview_cases confirmed_case
+            LEFT JOIN room_allocations confirmed_allocation
+              ON confirmed_allocation.id = confirmed_case.scheduled_room_allocation_id
+            LEFT JOIN meeting_room_blocks confirmed_block
+              ON confirmed_block.id = confirmed_allocation.room_block_id
+            WHERE confirmed_case.status IN ('AWAITING_CANDIDATE_CONFIRMATION', 'CONFIRMED')
+              AND confirmed_case.scheduled_date = block.date
+              AND COALESCE(confirmed_case.scheduled_room_name, confirmed_block.room_name) = block.room_name
+              AND confirmed_case.scheduled_start_time < ?
+              AND confirmed_case.scheduled_end_time > ?
+          )
         ORDER BY block.room_name ASC
       `)
-      .all(date, startTime, endTime, endTime, startTime) as SqlRow[];
+      .all(date, startTime, endTime, endTime, startTime, endTime, startTime) as SqlRow[];
     return rows.map(toMeetingRoomBlock);
   }
 

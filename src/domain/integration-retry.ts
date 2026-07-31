@@ -1,6 +1,7 @@
 // 외부 연동 오류의 재시도 대기열 기준을 정의한다.
 export type IntegrationRetryJobType =
   | "NINEHIRE_EVALUATION_LOOKUP"
+  | "NINEHIRE_SCHEDULE_RECONCILIATION"
   | "SLACK_NOTIFICATION_RECONCILIATION";
 
 export const INTEGRATION_RETRY_INITIAL_DELAY_MS = 60_000;

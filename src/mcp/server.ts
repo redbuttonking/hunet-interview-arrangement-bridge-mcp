@@ -938,6 +938,22 @@ export function createBridgeMcpServer(
   );
 
   server.registerTool(
+    "sync_ninehire_confirmed_interview_schedules",
+    {
+      title: "나인하이어 직접 확정 인터뷰 동기화",
+      description:
+        "Slack 알림이 없는 나인하이어 직접 등록 일정을 조회해, 추적 중인 후보자의 확정 인터뷰와 회의실 선택 검토를 로컬 상태에 반영합니다. 나인하이어·Slack·다우오피스에는 변경을 전송하지 않습니다.",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async () => result(await workflow.reconcileNinehireConfirmedSchedules()),
+  );
+
+  server.registerTool(
     "reprocess_interview_arrangement_eligibility_reviews",
     {
       title: "기존 인터뷰 조율 대상 재판정",

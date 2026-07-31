@@ -16,6 +16,7 @@ function createSkills(input: {
   }) => Promise<unknown>;
   syncCaseInterviewers?: (caseId: string) => Promise<unknown>;
   createRequestDraft?: (caseId: string) => Promise<unknown>;
+  recordManualConfirmedInterview?: (input: Record<string, unknown>) => unknown;
   resolveCandidateInterviewAbsenceReview?: (input: Record<string, unknown>) => unknown;
 } = {}) {
   const workflow = {
@@ -25,6 +26,8 @@ function createSkills(input: {
       input.syncCaseInterviewers ?? (async () => ({ addedOrUpdated: 1 })),
     createRequestDraft:
       input.createRequestDraft ?? (async () => ({ id: "draft-id", status: "DRAFT" })),
+    recordManualConfirmedInterview:
+      input.recordManualConfirmedInterview ?? (() => ({ case: { id: "manual-case" } })),
     resolveCandidateInterviewAbsenceReview:
       input.resolveCandidateInterviewAbsenceReview ?? (() => ({ action: "HOLD" })),
   } as unknown as WorkflowService;
@@ -282,6 +285,58 @@ describe("interview arrangement skills", () => {
       },
     });
     expect(db.getCase(interviewCase.id)?.scheduledRoomName).toBe("행복룸");
+  });
+
+  it("records a selected room for a directly confirmed NineHire schedule", async () => {
+    db = new BridgeDatabase(":memory:");
+    const calls: Array<Record<string, unknown>> = [];
+    const skills = createSkills({
+      recordManualConfirmedInterview(input) {
+        calls.push(input);
+        return { case: { id: "manual-case" }, schedule: { roomName: input.roomName } };
+      },
+    });
+    const reviewId = db.createReview({
+      reviewType: "INTERVIEW_ARRANGEMENT_START_REQUIRED",
+      reason: "직접 확정된 일정을 기록합니다.",
+    });
+    const decision = db.createOrGetPendingInterviewSkillDecision({
+      skillKey: "INTERVIEW_SCHEDULING",
+      decisionType: "SELECT_NINEHIRE_CONFIRMED_SCHEDULE_ROOM",
+      fingerprint: "review:direct-event:E1",
+      reviewId,
+      title: "직접 확정된 인터뷰 회의실 선택",
+      prompt: "회의실을 선택하세요.",
+      selectionMode: "SINGLE",
+      options: [{ id: "NINEHIRE_CONFIRMED_ROOM_0", label: "행복룸", description: "기록" }],
+      context: {
+        eventId: "E1",
+        date: "2099-08-05",
+        startTime: "16:00",
+        endTime: "17:00",
+        choices: [{ optionId: "NINEHIRE_CONFIRMED_ROOM_0", roomName: "행복룸" }],
+      },
+    });
+
+    const resolved = await skills.resolveDecision({
+      decisionId: decision.id,
+      optionId: "NINEHIRE_CONFIRMED_ROOM_0",
+    });
+
+    expect(calls).toEqual([
+      {
+        reviewId,
+        date: "2099-08-05",
+        startTime: "16:00",
+        endTime: "17:00",
+        roomName: "행복룸",
+        note: "나인하이어 직접 확정 일정 E1에서 사용자 선택으로 기록",
+      },
+    ]);
+    expect(resolved.decision).toMatchObject({
+      status: "RESOLVED",
+      selectedOptionId: "NINEHIRE_CONFIRMED_ROOM_0",
+    });
   });
 
   it("confirms a selected sequential interview plan with one continuous room block", async () => {

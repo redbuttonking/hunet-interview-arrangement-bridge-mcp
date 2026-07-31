@@ -26,6 +26,19 @@ export interface CandidateContext {
   recruitmentName?: string;
 }
 
+export interface NinehireCandidateSchedule {
+  eventId: string;
+  candidateRef: string;
+  candidateName: string;
+  recruitmentRef: string;
+  recruitmentName: string;
+  date: string;
+  startTime: string;
+  endTime: string;
+  location?: string;
+  attendeeNames: string[];
+}
+
 export interface NinehireInterviewer {
   ninehireUserId: string;
   displayName: string;

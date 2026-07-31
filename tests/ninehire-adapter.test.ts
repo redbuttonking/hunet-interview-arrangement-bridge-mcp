@@ -377,4 +377,62 @@ describe("NineHire approval adapter", () => {
       ],
     });
   });
+
+  it("reads direct candidate schedules in Korea time without retaining contact details", async () => {
+    const adapter = new NinehireRecruitmentWorkflowAdapter({
+      async callTool(name, args) {
+        expect(name).toBe("get_applicant_progresses");
+        expect(args).toEqual({
+          recruitmentId: "R1",
+          applicantProgressIds: ["A1"],
+          limit: 100,
+        });
+        return {
+          structuredContent: {
+            results: [
+              {
+                applicantProgressId: "A1",
+                applicantEmail: "candidate@example.com",
+                applicantPhone: "010-0000-0000",
+                events: [
+                  {
+                    eventId: "E1",
+                    type: { code: "single", name: "개별 일정" },
+                    location: "회의실 미지정",
+                    startAt: "2099-08-04T07:00:00.000Z",
+                    endAt: "2099-08-04T08:00:00.000Z",
+                    attendees: [{ name: "면접관" }],
+                  },
+                ],
+              },
+            ],
+          },
+        };
+      },
+    });
+
+    await expect(
+      adapter.listCandidateSchedules([
+        {
+          candidateRef: "A1",
+          candidateName: "지원자",
+          recruitmentRef: "R1",
+          recruitmentName: "채용",
+        },
+      ]),
+    ).resolves.toEqual([
+      {
+        eventId: "E1",
+        candidateRef: "A1",
+        candidateName: "지원자",
+        recruitmentRef: "R1",
+        recruitmentName: "채용",
+        date: "2099-08-04",
+        startTime: "16:00",
+        endTime: "17:00",
+        location: "회의실 미지정",
+        attendeeNames: ["면접관"],
+      },
+    ]);
+  });
 });
