@@ -1,0 +1,91 @@
+// 로컬 대시보드에 제공하는 운영 현황과 후보자 이력을 검증한다.
+import { afterEach, describe, expect, it } from "vitest";
+import { BridgeDatabase } from "../src/db/database.js";
+import { getDashboardSnapshot } from "../src/dashboard/service.js";
+
+let db: BridgeDatabase | undefined;
+
+afterEach(() => db?.close());
+
+describe("dashboard service", () => {
+  it("returns an operational case with its interview plan, review, decision, and room block", () => {
+    db = new BridgeDatabase(":memory:");
+    const interviewCase = db.createInterviewCase({
+      candidateName: "대시보드 테스트",
+      recruitmentRef: "R1",
+      recruitmentName: "인터뷰 어레인지 테스트 채용",
+      proposalDates: ["2026-08-10"],
+    });
+    db.upsertCaseInterviewPlan({
+      caseId: interviewCase.id,
+      source: "TEMPLATE",
+      mode: "STANDARD",
+      stepIds: ["S1"],
+      stepNames: ["1차 인터뷰"],
+      durationMinutes: 60,
+    });
+    const reviewId = db.createReview({
+      caseId: interviewCase.id,
+      reviewType: "INTERVIEW_ARRANGEMENT_START_REQUIRED",
+      reason: "사용자 승인이 필요합니다.",
+      summary: {
+        context: {
+          candidateName: "대시보드 테스트",
+          recruitmentName: "인터뷰 어레인지 테스트 채용",
+        },
+      },
+    });
+    db.createOrGetPendingInterviewSkillDecision({
+      skillKey: "CANDIDATE_TRIAGE",
+      decisionType: "START_INTERVIEW_ARRANGEMENT",
+      fingerprint: `review:${reviewId}:start`,
+      reviewId,
+      caseId: interviewCase.id,
+      title: "인터뷰 조율 시작",
+      prompt: "다음 작업을 선택하세요.",
+      selectionMode: "SINGLE",
+      options: [{ id: "START", label: "시작", description: "조율을 시작합니다." }],
+      context: {
+        candidateName: "대시보드 테스트",
+        recruitmentName: "인터뷰 어레인지 테스트 채용",
+      },
+    });
+    db.syncMeetingRoomBlocks(["2026-08-10"], [{
+      sourceKey: "DAOU:dashboard-test",
+      roomId: "ROOM1",
+      roomName: "행복룸",
+      reservedBy: "채용 담당자",
+      purpose: "인터뷰",
+      date: "2026-08-10",
+      startTime: "09:00",
+      endTime: "12:00",
+      sourcePayloadHash: "dashboard-test",
+    }]);
+
+    const snapshot = getDashboardSnapshot(db);
+
+    expect(snapshot.dashboard.cases).toEqual([
+      expect.objectContaining({
+        id: interviewCase.id,
+        candidateName: "대시보드 테스트",
+        interviewPlan: {
+          mode: "STANDARD",
+          stepNames: ["1차 인터뷰"],
+          durationMinutes: 60,
+        },
+      }),
+    ]);
+    expect(snapshot.reviews).toEqual([
+      expect.objectContaining({ id: reviewId, candidateName: "대시보드 테스트" }),
+    ]);
+    expect(snapshot.decisions).toEqual([
+      expect.objectContaining({ candidateName: "대시보드 테스트" }),
+    ]);
+    expect(snapshot.meetingRoomBlocks).toEqual([
+      expect.objectContaining({ roomName: "행복룸", date: "2026-08-10" }),
+    ]);
+    expect(db.listCaseEvents(interviewCase.id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ eventType: "CASE_CREATED", caseId: interviewCase.id }),
+    ]));
+  });
+});

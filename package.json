@@ -11,12 +11,15 @@
     "build": "tsc -p tsconfig.json",
     "dev:mcp": "tsx src/mcp/main.ts",
     "dev:worker": "tsx src/worker/main.ts",
+    "dev:dashboard": "npm run build && next dev apps/dashboard --hostname 127.0.0.1 --port 3100",
     "backup:db": "tsx src/cli/backup-database.ts",
     "inspect:ninehire": "tsx src/cli/inspect-ninehire.ts",
     "inspect:slack-source": "tsx src/cli/inspect-slack-source.ts",
     "daou:login": "tsx src/cli/open-daou-office.ts",
     "start:mcp": "node dist/src/mcp/main.js",
     "start:worker": "node dist/src/worker/main.js",
+    "build:dashboard": "npm run build && next build apps/dashboard",
+    "start:dashboard": "next start apps/dashboard --hostname 127.0.0.1 --port 3100",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
@@ -26,11 +29,16 @@
     "@slack/bolt": "^5.0.0",
     "@slack/types": "^3.0.0",
     "@slack/web-api": "^8.0.0",
+    "next": "^16.2.12",
     "playwright-core": "^1.62.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
     "tsx": "^4.23.1",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"

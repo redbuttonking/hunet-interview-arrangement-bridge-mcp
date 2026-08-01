@@ -86,6 +86,15 @@ export interface DraftRow {
   createdAt: string;
 }
 
+export interface CaseEventRow {
+  id: string;
+  caseId: string | null;
+  eventType: string;
+  actor: string;
+  detail: Record<string, unknown>;
+  createdAt: string;
+}
+
 export interface ReviewRow {
   id: string;
   notificationId: string | null;
@@ -2193,6 +2202,7 @@ export class BridgeDatabase {
         },
       },
       cases: cases.map((interviewCase) => {
+        const plan = this.getCaseInterviewPlan(interviewCase.id);
         const requiredInterviewers = this.listInterviewers(interviewCase.id).filter(
           (interviewer) => interviewer.required,
         );
@@ -2213,6 +2223,13 @@ export class BridgeDatabase {
           scheduledDate: interviewCase.scheduledDate,
           scheduledStartTime: interviewCase.scheduledStartTime,
           scheduledEndTime: interviewCase.scheduledEndTime,
+          interviewPlan: plan
+            ? {
+                mode: plan.mode,
+                stepNames: plan.stepNames,
+                durationMinutes: plan.durationMinutes,
+              }
+            : null,
           interviewerResponses: {
             required: requiredInterviewers.length,
             submitted: requiredInterviewers.filter(
@@ -2698,6 +2715,26 @@ export class BridgeDatabase {
       })),
       drafts,
     };
+  }
+
+  listCaseEvents(caseId: string, limit = 100): CaseEventRow[] {
+    const rows = this.connection
+      .prepare(`
+        SELECT id, case_id, event_type, actor, detail_json, created_at
+        FROM case_events
+        WHERE case_id = ?
+        ORDER BY created_at DESC
+        LIMIT ?
+      `)
+      .all(caseId, limit) as SqlRow[];
+    return rows.map((row) => ({
+      id: asString(row.id),
+      caseId: nullableString(row.case_id),
+      eventType: asString(row.event_type),
+      actor: asString(row.actor),
+      detail: JSON.parse(asString(row.detail_json)) as Record<string, unknown>,
+      createdAt: asString(row.created_at),
+    }));
   }
 
   syncMeetingRoomBlocks(
