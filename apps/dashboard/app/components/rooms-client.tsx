@@ -8,6 +8,12 @@ import type { CandidateCase, DashboardSnapshot } from "../lib/dashboard-types";
 const calendarStartHour = 9;
 const calendarEndHour = 18;
 const calendarHours = Array.from({ length: calendarEndHour - calendarStartHour }, (_, index) => calendarStartHour + index);
+const roomDisplayOrder = ["열정룸", "행복룸", "게임체인저", "의문당"];
+
+function roomOrder(roomName: string) {
+  const index = roomDisplayOrder.findIndex((name) => roomName.includes(name) || (name === "의문당" && roomName.includes("疑問堂")));
+  return index === -1 ? roomDisplayOrder.length : index;
+}
 
 function toMinutes(value: string) {
   const [hour, minute] = value.split(":").map(Number);
@@ -99,7 +105,7 @@ export function RoomsClient({ data }: { data: DashboardSnapshot }) {
   const roomNames = useMemo(() => [...new Set([
     ...data.meetingRoomBlocks.map((block) => block.roomName),
     ...data.dashboard.cases.map((interviewCase) => interviewCase.scheduledRoomName).filter((roomName): roomName is string => Boolean(roomName)),
-  ])], [data]);
+  ])].sort((left, right) => roomOrder(left) - roomOrder(right) || left.localeCompare(right, "ko-KR")), [data]);
   const blocks = data.meetingRoomBlocks.filter((block) => block.date === selectedDate);
   const scheduled = data.dashboard.cases.filter((interviewCase) =>
     interviewCase.scheduledDate === selectedDate &&
