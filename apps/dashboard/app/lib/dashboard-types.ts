@@ -48,6 +48,8 @@ export type Review = {
 
 export type Decision = {
   id: string;
+  reviewId: string | null;
+  caseId: string | null;
   decisionType: string;
   title: string;
   prompt: string;

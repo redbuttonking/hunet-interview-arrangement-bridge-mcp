@@ -1,33 +1,44 @@
 "use client";
-// 인터뷰 조율 운영 보드와 사용자 판단 상호작용을 제공한다.
+// 인터뷰 운영자가 지금 처리해야 할 일에 집중하도록 작업 화면을 제공한다.
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { CandidateCase, DashboardSnapshot, Decision, InterviewCaseStatus, Review } from "../lib/dashboard-types";
 
-type BoardColumn = {
-  id: "triage" | "collecting" | "scheduling" | "awaiting" | "confirmed";
+type ActionPriority = "urgent" | "normal" | "watch";
+
+type ActionItem = {
+  id: string;
+  priority: ActionPriority;
+  category: string;
   title: string;
   description: string;
+  candidateName: string | null;
+  recruitmentName: string | null;
+  meta: string | null;
+  actionLabel: string | null;
+  href: string | null;
+  decision?: Decision;
+  review?: Review;
 };
 
-const columns: BoardColumn[] = [
-  { id: "triage", title: "검토·조율 시작", description: "평가 결과와 인터뷰 유형을 확인합니다." },
-  { id: "collecting", title: "면접관 일정 수집", description: "가능 시간 제출을 기다립니다." },
-  { id: "scheduling", title: "시간·회의실 검토", description: "추천 일정과 회의실을 선택합니다." },
-  { id: "awaiting", title: "후보자 응답 대기", description: "나인하이어 일정 제안 후 확답을 기다립니다." },
-  { id: "confirmed", title: "최종 확정", description: "인터뷰 일정을 확인합니다." },
-];
+const actionableReviewType = "INTERVIEW_ARRANGEMENT_START_REQUIRED";
 
 function formatDate(value: string | null | undefined) {
-  if (!value) return "미정";
+  if (!value) return "일정 미정";
   return new Intl.DateTimeFormat("ko-KR", { month: "numeric", day: "numeric", weekday: "short" }).format(
     new Date(`${value}T00:00:00+09:00`),
   );
 }
 
-function formatTime(value: string | null | undefined) {
-  return value ?? "";
+function formatGeneratedAt(value: string) {
+  return new Intl.DateTimeFormat("ko-KR", { hour: "2-digit", minute: "2-digit" }).format(new Date(value));
+}
+
+function formatSchedule(interviewCase: CandidateCase) {
+  if (!interviewCase.scheduledDate || !interviewCase.scheduledStartTime) return "일정 미정";
+  const room = interviewCase.scheduledRoomName ? ` · ${interviewCase.scheduledRoomName}` : "";
+  return `${formatDate(interviewCase.scheduledDate)} ${interviewCase.scheduledStartTime}–${interviewCase.scheduledEndTime ?? ""}${room}`;
 }
 
 function stageLabel(interviewCase: CandidateCase) {
@@ -41,11 +52,11 @@ function stageLabel(interviewCase: CandidateCase) {
 
 function statusText(status: InterviewCaseStatus) {
   const labels: Record<InterviewCaseStatus, string> = {
-    READY_FOR_DRAFT: "요청 초안 준비",
-    DRAFT_CREATED: "초안 검토 대기",
-    REQUEST_SENT: "요청 발송됨",
-    COLLECTING_AVAILABILITY: "일정 수집 중",
-    READY_TO_SCHEDULE: "시간 추천 가능",
+    READY_FOR_DRAFT: "조율 시작 준비",
+    DRAFT_CREATED: "요청 초안 검토",
+    REQUEST_SENT: "면접관 응답 대기",
+    COLLECTING_AVAILABILITY: "면접관 일정 수집",
+    READY_TO_SCHEDULE: "시간·회의실 선택",
     AWAITING_CANDIDATE_CONFIRMATION: "후보자 응답 대기",
     CONFIRMED: "최종 확정",
     CANCELLED: "취소",
@@ -55,62 +66,109 @@ function statusText(status: InterviewCaseStatus) {
   return labels[status];
 }
 
-function columnForCase(interviewCase: CandidateCase): BoardColumn["id"] {
-  if (interviewCase.status === "CONFIRMED") return "confirmed";
-  if (interviewCase.status === "AWAITING_CANDIDATE_CONFIRMATION") return "awaiting";
-  if (["READY_TO_SCHEDULE", "REVIEW_REQUIRED"].includes(interviewCase.status)) return "scheduling";
-  if (["REQUEST_SENT", "COLLECTING_AVAILABILITY"].includes(interviewCase.status)) return "collecting";
-  return "triage";
+function reviewCategory(review: Review) {
+  const labels: Record<string, string> = {
+    INTERVIEW_ARRANGEMENT_START_REQUIRED: "조율 시작 확인",
+    CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED: "후보자 응답 확인",
+    WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED: "가용시간 복구 확인",
+  };
+  return labels[review.reviewType] ?? "운영 확인";
 }
 
-function CandidateCard({ interviewCase }: { interviewCase: CandidateCase }) {
-  const hasSchedule = interviewCase.scheduledDate && interviewCase.scheduledStartTime;
-  return (
-    <Link className={`candidate-card ${interviewCase.needsAttention ? "attention" : ""}`} href={`/cases/${interviewCase.id}`}>
-      <div className="candidate-card__top">
-        <strong>{interviewCase.candidateName ?? "이름 미확인"}</strong>
-        <span className={`status-chip status-${interviewCase.status.toLowerCase()}`}>{statusText(interviewCase.status)}</span>
-      </div>
-      <p className="recruitment-name">{interviewCase.recruitmentName ?? "채용 미확인"}</p>
-      <p className="stage-label">{stageLabel(interviewCase)} · {interviewCase.interviewPlan?.durationMinutes ?? 60}분</p>
-      {hasSchedule ? (
-        <div className="schedule-line">
-          <span>{formatDate(interviewCase.scheduledDate)} {formatTime(interviewCase.scheduledStartTime)}~{formatTime(interviewCase.scheduledEndTime)}</span>
-          <span>{interviewCase.scheduledRoomName ?? "회의실 확인 필요"}</span>
-        </div>
-      ) : (
-        <div className="response-line">
-          면접관 응답 {interviewCase.interviewerResponses.submitted}/{interviewCase.interviewerResponses.required}
-          {interviewCase.interviewerResponses.pending > 0 ? ` · 미응답 ${interviewCase.interviewerResponses.pending}` : ""}
-        </div>
-      )}
-      {interviewCase.isReschedule ? <span className="reschedule-label">재조율 {interviewCase.isReschedule ? "진행" : ""}</span> : null}
-    </Link>
-  );
+function caseAction(interviewCase: CandidateCase): ActionItem | undefined {
+  const base = {
+    id: `case:${interviewCase.id}`,
+    candidateName: interviewCase.candidateName,
+    recruitmentName: interviewCase.recruitmentName,
+    href: `/cases/${interviewCase.id}`,
+    decision: undefined,
+    review: undefined,
+  };
+
+  if (interviewCase.status === "READY_TO_SCHEDULE") {
+    return {
+      ...base,
+      priority: "urgent",
+      category: "시간·회의실 검토",
+      title: "인터뷰 시간과 회의실을 선택할 수 있습니다.",
+      description: `${stageLabel(interviewCase)} · 면접관 응답 ${interviewCase.interviewerResponses.submitted}/${interviewCase.interviewerResponses.required}`,
+      meta: "추천 결과를 확인하세요.",
+      actionLabel: "일정 검토",
+    };
+  }
+  if (interviewCase.status === "DRAFT_CREATED") {
+    return {
+      ...base,
+      priority: "normal",
+      category: "면접관 요청 초안",
+      title: "면접관에게 보낼 일정 요청 초안을 검토하세요.",
+      description: stageLabel(interviewCase),
+      meta: "승인 전에는 Slack으로 발송되지 않습니다.",
+      actionLabel: "초안 확인",
+    };
+  }
+  if (interviewCase.status === "REVIEW_REQUIRED") {
+    return {
+      ...base,
+      priority: "urgent",
+      category: "예외 확인",
+      title: "조율을 계속하기 전에 운영 확인이 필요합니다.",
+      description: stageLabel(interviewCase),
+      meta: interviewCase.isReschedule ? "재조율 건입니다." : null,
+      actionLabel: "상세 보기",
+    };
+  }
+  return undefined;
 }
 
-function ReviewCard({ review, onCreateDecision, loading }: {
-  review: Review;
-  onCreateDecision: (review: Review) => void;
-  loading: boolean;
-}) {
-  const actionable = review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED";
-  return (
-    <article className="review-card">
-      <div>
-        <span className="review-type">{review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED" ? "조율 시작 검토" : "판단 필요"}</span>
-        <strong>{review.candidateName ?? "후보자 확인 필요"}</strong>
-        <p>{review.recruitmentName ?? "채용 정보 확인 필요"}</p>
-        {review.currentStepName ? <small>현재 전형. {review.currentStepName}</small> : null}
-        <small>{review.reason}</small>
-      </div>
-      {actionable ? (
-        <button type="button" className="secondary-button" disabled={loading} onClick={() => onCreateDecision(review)}>
-          조율 판단하기
-        </button>
-      ) : null}
-    </article>
+function buildActionItems(data: DashboardSnapshot): ActionItem[] {
+  const caseIdsWithDecision = new Set(
+    data.decisions.map((decision) => decision.caseId).filter((caseId): caseId is string => Boolean(caseId)),
   );
+  const reviewIdsWithDecision = new Set(
+    data.decisions.map((decision) => decision.reviewId).filter((reviewId): reviewId is string => Boolean(reviewId)),
+  );
+  const caseIdsWithReview = new Set(
+    data.reviews.map((review) => review.caseId).filter((caseId): caseId is string => Boolean(caseId)),
+  );
+
+  const decisionItems: ActionItem[] = data.decisions.map((decision) => ({
+    id: `decision:${decision.id}`,
+    priority: "urgent",
+    category: "선택 대기",
+    title: decision.title,
+    description: decision.prompt,
+    candidateName: decision.candidateName,
+    recruitmentName: decision.recruitmentName,
+    meta: "선택 내용을 확인한 뒤 적용합니다.",
+    actionLabel: "결정하기",
+    href: decision.caseId ? `/cases/${decision.caseId}` : null,
+    decision,
+  }));
+  const reviewItems: ActionItem[] = data.reviews
+    .filter((review) => !reviewIdsWithDecision.has(review.id))
+    .map((review) => ({
+      id: `review:${review.id}`,
+      priority: review.reviewType === actionableReviewType ? "urgent" : "normal",
+      category: reviewCategory(review),
+      title: review.reviewType === actionableReviewType ? "인터뷰 조율을 시작할지 확인하세요." : review.reason,
+      description: review.reviewType === actionableReviewType
+        ? `${review.currentStepName ?? "평가 완료"} · ${review.reason}`
+        : review.currentStepName ?? "상세 내용 확인이 필요합니다.",
+      candidateName: review.candidateName,
+      recruitmentName: review.recruitmentName,
+      meta: review.reviewType === actionableReviewType ? "승인 전에는 나인하이어·Slack에 변경이 없습니다." : null,
+      actionLabel: review.reviewType === actionableReviewType ? "판단하기" : review.caseId ? "상세 보기" : null,
+      href: review.caseId ? `/cases/${review.caseId}` : null,
+      review,
+    }));
+  const caseItems = data.dashboard.cases
+    .filter((interviewCase) => !caseIdsWithDecision.has(interviewCase.id) && !caseIdsWithReview.has(interviewCase.id))
+    .map(caseAction)
+    .filter((item): item is ActionItem => Boolean(item));
+
+  return [...decisionItems, ...reviewItems, ...caseItems]
+    .sort((left, right) => ({ urgent: 0, normal: 1, watch: 2 }[left.priority] - { urgent: 0, normal: 1, watch: 2 }[right.priority]));
 }
 
 function DecisionModal({ decision, onClose, onResolve, loading }: {
@@ -124,10 +182,10 @@ function DecisionModal({ decision, onClose, onResolve, loading }: {
     <div className="modal-backdrop" role="presentation">
       <section className="decision-modal" role="dialog" aria-modal="true" aria-labelledby="decision-title">
         <button type="button" className="close-button" onClick={onClose} aria-label="닫기">×</button>
-        <span className="eyebrow">사용자 판단 필요</span>
+        <span className="section-kicker">확인 후 선택</span>
         <h2 id="decision-title">{decision.title}</h2>
         <p className="modal-context">{decision.candidateName ?? "후보자"} · {decision.recruitmentName ?? "채용"}</p>
-        <p>{decision.prompt}</p>
+        <p className="modal-prompt">{decision.prompt}</p>
         <div className="decision-options">
           {decision.options.map((option) => (
             <label key={option.id} className={`decision-option ${selectedOptionId === option.id ? "selected" : ""}`}>
@@ -137,8 +195,8 @@ function DecisionModal({ decision, onClose, onResolve, loading }: {
           ))}
         </div>
         <div className="modal-actions">
-          <button type="button" className="ghost-button" onClick={onClose}>나중에 결정</button>
-          <button type="button" className="primary-button" disabled={!selectedOptionId || loading} onClick={() => onResolve(selectedOptionId)}>
+          <button type="button" className="button button-quiet" onClick={onClose}>나중에 결정</button>
+          <button type="button" className="button button-primary" disabled={!selectedOptionId || loading} onClick={() => onResolve(selectedOptionId)}>
             {loading ? "처리 중" : "선택 적용"}
           </button>
         </div>
@@ -147,8 +205,35 @@ function DecisionModal({ decision, onClose, onResolve, loading }: {
   );
 }
 
-function boardCases(data: DashboardSnapshot, column: BoardColumn["id"]) {
-  return data.dashboard.cases.filter((interviewCase) => columnForCase(interviewCase) === column);
+function ActionRow({ item, onCreateDecision, onOpenDecision, loading }: {
+  item: ActionItem;
+  onCreateDecision: (review: Review) => void;
+  onOpenDecision: (decision: Decision) => void;
+  loading: boolean;
+}) {
+  const directDecision = item.decision;
+  const actionableReview = item.review?.reviewType === actionableReviewType;
+  return (
+    <article className={`action-row priority-${item.priority}`}>
+      <div className="action-priority" aria-hidden="true"><span /></div>
+      <div className="action-copy">
+        <div className="action-meta"><span>{item.category}</span>{item.meta ? <small>{item.meta}</small> : null}</div>
+        <h3>{item.candidateName ?? "후보자 확인 필요"}</h3>
+        <p className="action-recruitment">{item.recruitmentName ?? "채용 정보 확인 필요"}</p>
+        <p className="action-title">{item.title}</p>
+        <p className="action-description">{item.description}</p>
+      </div>
+      <div className="action-control">
+        {directDecision ? <button type="button" className="button button-primary" onClick={() => onOpenDecision(directDecision)}>결정하기</button> : null}
+        {!directDecision && actionableReview && item.review ? (
+          <button type="button" className="button button-primary" disabled={loading} onClick={() => onCreateDecision(item.review!)}>
+            {loading ? "준비 중" : "판단하기"}
+          </button>
+        ) : null}
+        {!directDecision && !actionableReview && item.href && item.actionLabel ? <Link className="button button-secondary" href={item.href}>{item.actionLabel}</Link> : null}
+      </div>
+    </article>
+  );
 }
 
 export function DashboardClient({ initialData }: { initialData: DashboardSnapshot }) {
@@ -205,113 +290,93 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
     }
   };
 
+  const actionItems = useMemo(() => buildActionItems(data), [data]);
+  const upcoming = useMemo(() => data.dashboard.cases
+    .filter((interviewCase) => interviewCase.scheduledDate && interviewCase.scheduledStartTime && ["CONFIRMED", "AWAITING_CANDIDATE_CONFIRMATION"].includes(interviewCase.status))
+    .sort((left, right) => `${left.scheduledDate}T${left.scheduledStartTime}`.localeCompare(`${right.scheduledDate}T${right.scheduledStartTime}`))
+    .slice(0, 5), [data.dashboard.cases]);
   const summary = data.dashboard.summary;
-  const topMetrics = useMemo(() => [
-    ["최종 확정 인터뷰", summary.caseCountsByStatus.CONFIRMED, "로컬에 기록된 확정 인터뷰를 일정·회의실 화면에서 확인합니다."],
-    ["사용자 판단 필요", summary.openReviews + data.decisions.length, "조율 시작, 회의실 선택, 예외 판단이 필요합니다."],
-    ["면접관 미응답", summary.pendingRequiredInterviewerResponses, "리마인드 또는 일정 조정이 필요할 수 있습니다."],
-    ["연동 재시도", summary.pendingIntegrationRetries + summary.failedIntegrationRetries, "Slack·나인하이어 동기화 상태를 확인합니다."],
-  ], [data.decisions.length, summary]);
+  const progress = [
+    { label: "조율 시작", statuses: ["READY_FOR_DRAFT", "DRAFT_CREATED"] },
+    { label: "면접관 일정", statuses: ["REQUEST_SENT", "COLLECTING_AVAILABILITY"] },
+    { label: "시간·회의실", statuses: ["READY_TO_SCHEDULE", "REVIEW_REQUIRED"] },
+    { label: "후보자 응답", statuses: ["AWAITING_CANDIDATE_CONFIRMATION"] },
+  ].map((item) => ({
+    ...item,
+    count: item.statuses.reduce((total, status) => total + summary.caseCountsByStatus[status as InterviewCaseStatus], 0),
+  }));
 
   return (
-    <main className="dashboard-shell">
-      <header className="topbar">
-        <div>
-          <span className="eyebrow">HUNET RECRUITING OPS</span>
-          <h1>인터뷰 어레인지 운영</h1>
-        </div>
-        <nav>
-          <Link className="active-nav" href="/">운영 보드</Link>
-          <Link href="/rooms">회의실·일정</Link>
+    <main className="ops-shell">
+      <header className="app-header">
+        <Link className="brand" href="/"><span className="brand-mark">H</span><span>HUNET <b>OPS</b></span></Link>
+        <nav className="primary-nav" aria-label="대시보드 메뉴">
+          <Link className="active" href="/">운영</Link>
+          <Link href="/rooms">회의실</Link>
         </nav>
-        <div className={`worker-status worker-${summary.worker.status.toLowerCase()}`}>
-          <span />워커 {summary.worker.status === "RUNNING" ? "정상" : summary.worker.status}
-        </div>
+        <div className={`connection-state worker-${summary.worker.status.toLowerCase()}`}><span />워커 {summary.worker.status === "RUNNING" ? "정상" : summary.worker.status}</div>
       </header>
 
-      <section className="metric-grid" aria-label="운영 요약">
-        {topMetrics.map(([label, value, description]) => (
-          <article key={String(label)} className="metric-card">
-            <span>{label}</span>
-            <strong>{value}</strong>
-            <small>{description}</small>
-          </article>
-        ))}
+      <section className="ops-intro">
+        <div>
+          <span className="section-kicker">INTERVIEW OPERATIONS</span>
+          <h1>오늘의 인터뷰 운영</h1>
+          <p>지금 판단하거나 처리해야 하는 업무부터 확인하세요.</p>
+        </div>
+        <button type="button" className="button button-secondary refresh-button" onClick={() => void refresh().catch((caught) => setError(caught.message))}>새로고침</button>
       </section>
 
       {error ? <p className="error-banner">{error}</p> : null}
 
-      <section className="decision-inbox" aria-labelledby="decision-inbox-title">
-        <div className="section-heading">
-          <div>
-            <span className="eyebrow">ACTION INBOX</span>
-            <h2 id="decision-inbox-title">지금 판단할 일</h2>
+      <div className="operations-grid">
+        <section className="work-queue" aria-labelledby="work-queue-title">
+          <div className="section-heading work-heading">
+            <div><span className="section-kicker">PRIORITY QUEUE</span><h2 id="work-queue-title">지금 처리할 일 <em>{actionItems.length}</em></h2></div>
+            <p>후보자별 중복을 제거한 우선순위 목록입니다.</p>
           </div>
-          <button type="button" className="text-button" onClick={() => void refresh().catch((caught) => setError(caught.message))}>새로고침</button>
-        </div>
-        {data.decisions.length === 0 && data.reviews.length === 0 ? (
-          <p className="empty-message">현재 판단 대기 항목이 없습니다.</p>
-        ) : (
-          <div className="inbox-grid">
-            {data.decisions.map((decision) => (
-              <article key={decision.id} className="review-card decision-card">
-                <div>
-                  <span className="review-type">선택 대기</span>
-                  <strong>{decision.title}</strong>
-                  <p>{decision.candidateName ?? "후보자 확인 필요"} · {decision.recruitmentName ?? "채용 확인 필요"}</p>
-                  <small>{decision.prompt}</small>
-                </div>
-                <button type="button" className="secondary-button" onClick={() => setActiveDecision(decision)}>선택하기</button>
-              </article>
-            ))}
-            {data.reviews.map((review) => (
-              <ReviewCard key={review.id} review={review} loading={loadingId === review.id} onCreateDecision={createDecision} />
-            ))}
-          </div>
-        )}
+          {actionItems.length === 0 ? (
+            <div className="queue-empty"><strong>지금 바로 처리할 업무가 없습니다.</strong><span>면접관 응답과 후보자 확답을 기다리고 있습니다.</span></div>
+          ) : (
+            <div className="action-list">
+              {actionItems.map((item) => <ActionRow key={item.id} item={item} loading={loadingId === item.review?.id} onCreateDecision={createDecision} onOpenDecision={setActiveDecision} />)}
+            </div>
+          )}
+        </section>
+
+        <aside className="operations-rail">
+          <section className="rail-panel upcoming-panel" aria-labelledby="upcoming-title">
+            <div className="rail-heading"><span className="section-kicker">UP NEXT</span><h2 id="upcoming-title">다가오는 인터뷰</h2></div>
+            {upcoming.length === 0 ? <p className="rail-empty">기록된 예정 인터뷰가 없습니다.</p> : (
+              <div className="upcoming-list">
+                {upcoming.map((interviewCase) => (
+                  <Link href={`/cases/${interviewCase.id}`} key={interviewCase.id} className="upcoming-item">
+                    <span className="upcoming-date">{formatDate(interviewCase.scheduledDate)}</span>
+                    <strong>{interviewCase.candidateName ?? "후보자 확인 필요"}</strong>
+                    <small>{formatSchedule(interviewCase)}</small>
+                  </Link>
+                ))}
+              </div>
+            )}
+            <Link className="text-link" href="/rooms">회의실 시간표 보기 <span>→</span></Link>
+          </section>
+
+          <section className="rail-panel progress-panel" aria-labelledby="progress-title">
+            <div className="rail-heading"><span className="section-kicker">PIPELINE</span><h2 id="progress-title">진행 중 조율</h2></div>
+            <div className="progress-list">
+              {progress.map((item) => <div className="progress-row" key={item.label}><span>{item.label}</span><strong>{item.count}</strong></div>)}
+            </div>
+            <div className="confirmed-summary"><span>최종 확정</span><strong>{summary.caseCountsByStatus.CONFIRMED}</strong></div>
+          </section>
+        </aside>
+      </div>
+
+      <section className="health-strip" aria-label="운영 상태">
+        <div><span>면접관 미응답</span><strong>{summary.pendingRequiredInterviewerResponses}</strong><small>제출 확인이 필요한 필수 면접관입니다.</small></div>
+        <div><span>연동 재시도</span><strong>{summary.pendingIntegrationRetries + summary.failedIntegrationRetries}</strong><small>Slack·나인하이어 동기화 오류를 확인하세요.</small></div>
+        <div><span>데이터 갱신</span><strong>{formatGeneratedAt(data.dashboard.generatedAt)}</strong><small>30초마다 로컬 상태를 다시 확인합니다.</small></div>
       </section>
 
-      <section className="board-section" aria-labelledby="board-title">
-        <div className="section-heading">
-          <div>
-            <span className="eyebrow">INTERVIEW JOURNEY</span>
-            <h2 id="board-title">후보자별 인터뷰 조율 현황</h2>
-          </div>
-          <p>전형 단계와 조율 상태를 함께 확인합니다.</p>
-        </div>
-        <div className="kanban-board">
-          {columns.map((column) => {
-            const interviewCases = boardCases(data, column.id);
-            const reviews = column.id === "triage" ? data.reviews : [];
-            return (
-              <section key={column.id} className="kanban-column">
-                <header>
-                  <div><h3>{column.title}</h3><span>{interviewCases.length + reviews.length}</span></div>
-                  <p>{column.description}</p>
-                </header>
-                <div className="kanban-list">
-                  {column.id === "triage" ? reviews.map((review) => (
-                    <article className="pending-card" key={review.id}>
-                      <span>평가 완료</span>
-                      <strong>{review.candidateName ?? "후보자 확인 필요"}</strong>
-                      <p>{review.currentStepName ?? "전형 단계 확인 필요"}</p>
-                      <small>{review.recruitmentName ?? "채용 정보 확인 필요"}</small>
-                    </article>
-                  )) : null}
-                  {interviewCases.map((interviewCase) => <CandidateCard key={interviewCase.id} interviewCase={interviewCase} />)}
-                  {interviewCases.length === 0 && reviews.length === 0 ? <p className="column-empty">해당 항목이 없습니다.</p> : null}
-                </div>
-              </section>
-            );
-          })}
-        </div>
-      </section>
-
-      <footer className="data-footer">
-        마지막 데이터 생성. {new Date(data.dashboard.generatedAt).toLocaleString("ko-KR")}. 브라우저는 30초마다 로컬 운영 상태를 새로 확인합니다.
-      </footer>
-
-      {activeDecision ? <DecisionModal decision={activeDecision} loading={loadingId === activeDecision.id} onClose={() => setActiveDecision(null)} onResolve={resolveDecision} /> : null}
+      {activeDecision ? <DecisionModal key={activeDecision.id} decision={activeDecision} loading={loadingId === activeDecision.id} onClose={() => setActiveDecision(null)} onResolve={resolveDecision} /> : null}
     </main>
   );
 }

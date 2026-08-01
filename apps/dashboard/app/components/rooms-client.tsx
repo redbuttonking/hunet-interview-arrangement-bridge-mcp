@@ -54,18 +54,21 @@ export function RoomsClient({ data }: { data: DashboardSnapshot }) {
   );
 
   return (
-    <main className="dashboard-shell room-page">
-      <header className="topbar">
-        <div>
-          <span className="eyebrow">HUNET RECRUITING OPS</span>
-          <h1>회의실·인터뷰 일정</h1>
-        </div>
-        <nav>
-          <Link href="/">운영 보드</Link>
-          <Link className="active-nav" href="/rooms">회의실·일정</Link>
+    <main className="ops-shell room-page">
+      <header className="app-header">
+        <Link className="brand" href="/"><span className="brand-mark">H</span><span>HUNET <b>OPS</b></span></Link>
+        <nav className="primary-nav" aria-label="대시보드 메뉴">
+          <Link href="/">운영</Link>
+          <Link className="active" href="/rooms">회의실</Link>
         </nav>
         <p className="room-sync-note">다우오피스 예약은 읽기 전용입니다.</p>
       </header>
+
+      <section className="page-intro">
+        <span className="section-kicker">ROOM SCHEDULE</span>
+        <h1>회의실과 인터뷰 일정</h1>
+        <p>확보한 회의실 블록 안에서 배정된 인터뷰를 확인합니다.</p>
+      </section>
 
       <section className="room-overview">
         <div className="section-heading">
@@ -107,7 +110,7 @@ export function RoomsClient({ data }: { data: DashboardSnapshot }) {
         <div className="section-heading"><div><span className="eyebrow">UPCOMING</span><h2>확정 또는 후보자 응답 대기 일정</h2></div></div>
         <div className="upcoming-list">
           {scheduled.map((interviewCase) => (
-            <Link href={`/cases/${interviewCase.id}`} key={interviewCase.id} className="upcoming-card">
+            <Link href={`/cases/${interviewCase.id}`} key={interviewCase.id} className="upcoming-item">
               <strong>{interviewCase.candidateName ?? "후보자 확인 필요"}</strong>
               <span>{interviewCase.scheduledStartTime}~{interviewCase.scheduledEndTime}</span>
               <span>{interviewCase.scheduledRoomName ?? "회의실 확인 필요"}</span>
