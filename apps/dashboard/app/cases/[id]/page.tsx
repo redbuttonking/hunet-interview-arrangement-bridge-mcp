@@ -1,6 +1,11 @@
-// 후보자별 인터뷰 조율 여정과 다음 운영 행동을 보여준다.
+// 후보자별 인터뷰 조율 상태와 필요한 다음 업무를 공통 화면 체계로 보여준다.
+
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { ArrowLeft, CalendarClock, CheckCircle2, ClipboardList, MessageSquareText, UsersRound } from "lucide-react";
+import { AppHeader, PageHeader } from "../../components/app-shell";
+import { Badge } from "../../components/ui/badge";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../../components/ui/card";
 import { loadCaseDetail } from "../../lib/data";
 
 export const dynamic = "force-dynamic";
@@ -8,12 +13,7 @@ export const dynamic = "force-dynamic";
 const journeySteps = ["조율 시작", "면접관 일정", "시간·회의실", "후보자 응답", "최종 확정"];
 
 function formatDateTime(value: string) {
-  return new Intl.DateTimeFormat("ko-KR", {
-    month: "numeric",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(value));
+  return new Intl.DateTimeFormat("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
 }
 
 function interviewerStatus(status: string) {
@@ -42,6 +42,12 @@ function statusLabel(status: string) {
   return labels[status] ?? status;
 }
 
+function statusVariant(status: string) {
+  if (status === "CONFIRMED") return "success" as const;
+  if (["REVIEW_REQUIRED", "CANCELLED"].includes(status)) return "warning" as const;
+  return "default" as const;
+}
+
 function journeyIndex(status: string) {
   if (["READY_FOR_DRAFT", "DRAFT_CREATED"].includes(status)) return 0;
   if (["REQUEST_SENT", "COLLECTING_AVAILABILITY"].includes(status)) return 1;
@@ -52,21 +58,21 @@ function journeyIndex(status: string) {
 
 function nextAction(status: string, pendingResponses: number) {
   const actions: Record<string, { title: string; description: string }> = {
-    READY_FOR_DRAFT: { title: "인터뷰 조율 시작 여부를 확인하세요.", description: "운영 보드의 사용자 판단 항목에서 인터뷰 유형을 선택합니다." },
-    DRAFT_CREATED: { title: "면접관 일정 요청 초안을 검토하세요.", description: "초안을 승인하기 전에는 Slack 메시지가 발송되지 않습니다." },
-    READY_TO_SCHEDULE: { title: "추천 시간과 회의실을 선택하세요.", description: "면접관 가용시간과 다우오피스 회의실 블록을 함께 확인합니다." },
-    AWAITING_CANDIDATE_CONFIRMATION: { title: "후보자의 일정 확답을 기다리고 있습니다.", description: "나인하이어에서 후보자가 확정하면 로컬 운영 상태에 반영됩니다." },
-    CONFIRMED: { title: "인터뷰가 최종 확정되었습니다.", description: "면접관 안내 메시지 발송 여부와 일정 정보를 확인하세요." },
-    REVIEW_REQUIRED: { title: "예외 상황을 확인하고 다음 조치를 결정하세요.", description: "자동 처리하지 않은 사유를 검토한 뒤 조율·보류·취소 중 하나를 선택합니다." },
-    CANCELLED: { title: "인터뷰 조율이 취소된 상태입니다.", description: "다우오피스의 기존 회의실 예약 블록은 그대로 유지됩니다." },
+    READY_FOR_DRAFT: { title: "인터뷰 조율을 시작할지 확인해 주세요.", description: "운영 보드의 사용자 판단 단계에서 인터뷰 유형을 선택합니다." },
+    DRAFT_CREATED: { title: "면접관 일정 요청 초안을 검토해 주세요.", description: "초안을 승인하기 전에는 Slack 메시지가 발송되지 않습니다." },
+    READY_TO_SCHEDULE: { title: "추천 시간과 회의실을 선택해 주세요.", description: "면접관 가용시간과 다우오피스 회의실 예약 블록을 함께 확인합니다." },
+    AWAITING_CANDIDATE_CONFIRMATION: { title: "후보자의 일정 답변을 기다리고 있습니다.", description: "나인하이어에서 후보자가 확정하면 로컬 운영 상태에 반영됩니다." },
+    CONFIRMED: { title: "인터뷰가 최종 확정되었습니다.", description: "면접관 안내 메시지 발송 여부와 일정 정보를 확인해 주세요." },
+    REVIEW_REQUIRED: { title: "예외 상황을 확인하고 다음 조치를 결정해 주세요.", description: "재조율, 보류, 취소 중 하나를 사용자의 판단으로 선택합니다." },
+    CANCELLED: { title: "인터뷰 조율이 취소된 상태입니다.", description: "다우오피스의 기존 회의실 예약 블록은 그대로 유지합니다." },
   };
   if (["REQUEST_SENT", "COLLECTING_AVAILABILITY"].includes(status)) {
     return {
       title: pendingResponses > 0 ? `필수 면접관 ${pendingResponses}명의 응답을 기다리고 있습니다.` : "면접관 응답을 확인하고 있습니다.",
-      description: "미응답이 지속되면 리마인드 또는 재수집 여부를 운영 보드에서 판단합니다.",
+      description: "미응답이 지속되면 리마인드 또는 수동 수집 여부를 운영 보드에서 판단합니다.",
     };
   }
-  return actions[status] ?? { title: "현재 상태를 확인하세요.", description: "운영 보드에서 필요한 다음 작업을 확인합니다." };
+  return actions[status] ?? { title: "현재 상태를 확인해 주세요.", description: "운영 보드에서 필요한 다음 작업을 확인합니다." };
 }
 
 export default async function CaseDetailPage({ params }: { params: Promise<{ id: string }> }) {
@@ -80,92 +86,67 @@ export default async function CaseDetailPage({ params }: { params: Promise<{ id:
   const interviewType = plan
     ? `${plan.mode === "COMBINED" ? "통합" : plan.mode === "SEQUENTIAL" ? "연속" : "단일"} · ${plan.stepNames.join(plan.mode === "SEQUENTIAL" ? " → " : " + ")}`
     : "인터뷰 유형 확인 필요";
+  const duration = plan?.durationMinutes ?? interviewCase.durationMinutes;
 
   return (
-    <main className="ops-shell case-page">
-      <header className="app-header">
-        <Link className="brand" href="/"><span className="brand-mark">H</span><span>HUNET <b>OPS</b></span></Link>
-        <nav className="primary-nav" aria-label="대시보드 메뉴">
-          <Link className="active" href="/">운영</Link>
-          <Link href="/rooms">회의실</Link>
-        </nav>
-      </header>
+    <div className="min-h-screen bg-slate-50">
+      <AppHeader active="operations" />
+      <main className="mx-auto max-w-[1440px] px-5 pb-12 sm:px-8">
+        <div className="pt-7"><Link className="inline-flex items-center gap-2 text-sm font-semibold text-slate-600 transition-colors hover:text-blue-700" href="/"><ArrowLeft className="size-4" />운영 보드</Link></div>
+        <PageHeader
+          actions={<Badge className="px-3 py-1 text-sm" variant={statusVariant(interviewCase.status)}>{statusLabel(interviewCase.status)}</Badge>}
+          description={interviewCase.recruitmentName ?? "채용 정보 확인 필요"}
+          eyebrow="CANDIDATE OVERVIEW"
+          title={interviewCase.candidateName ?? "후보자 확인 필요"}
+        />
 
-      <header className="case-header">
-        <Link className="back-link" href="/"><span>←</span> 운영 보드</Link>
-        <div className="case-hero">
-          <div>
-            <span className="section-kicker">CANDIDATE OVERVIEW</span>
-            <h1>{interviewCase.candidateName ?? "후보자 확인 필요"}</h1>
-            <p>{interviewCase.recruitmentName ?? "채용 정보 확인 필요"}</p>
-          </div>
-          <span className="case-status">{statusLabel(interviewCase.status)}</span>
-        </div>
-      </header>
+        <Card>
+          <CardHeader className="border-b border-slate-200 p-6 sm:p-7"><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">INTERVIEW JOURNEY</p><CardTitle className="mt-2 text-2xl">진행 상태</CardTitle><CardDescription className="text-base">{interviewType} · {duration}분 인터뷰입니다.</CardDescription></CardHeader>
+          <CardContent className="p-6 sm:p-7">
+            <ol className="grid gap-4 sm:grid-cols-5 sm:gap-0">
+              {journeySteps.map((step, index) => {
+                const isCompleted = index < currentJourneyIndex;
+                const isCurrent = index === currentJourneyIndex;
+                return (
+                  <li className="relative flex items-center gap-3 sm:block" key={step}>
+                    {index < journeySteps.length - 1 ? <span className="absolute left-5 top-10 hidden h-px w-[calc(100%-10px)] bg-slate-200 sm:block" /> : null}
+                    <span className={`relative z-10 grid size-10 shrink-0 place-items-center rounded-full text-sm font-bold ${isCompleted ? "bg-emerald-600 text-white" : isCurrent ? "bg-blue-600 text-white ring-4 ring-blue-100" : "bg-slate-100 text-slate-500"}`}>{isCompleted ? <CheckCircle2 className="size-5" /> : index + 1}</span>
+                    <strong className={`text-base sm:mt-3 sm:block ${isCurrent ? "text-slate-950" : "text-slate-600"}`}>{step}</strong>
+                  </li>
+                );
+              })}
+            </ol>
+            <div className="mt-8 rounded-xl border-l-4 border-blue-600 bg-blue-50/70 p-5"><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-700">NEXT ACTION</p><h2 className="mt-2 text-lg font-semibold tracking-tight text-slate-950">{action.title}</h2><p className="mt-2 text-base leading-7 text-slate-700">{action.description}</p></div>
+          </CardContent>
+        </Card>
 
-      <section className="journey-card">
-        <span className="section-kicker">INTERVIEW JOURNEY</span>
-        <h2>전형과 조율 진행 상태</h2>
-        <ol className="journey-steps">
-          {journeySteps.map((step, index) => {
-            const state = index < currentJourneyIndex ? "completed" : index === currentJourneyIndex ? "current" : "";
-            return <li key={step} className={state}><span>{index + 1}</span><strong>{step}</strong></li>;
-          })}
-        </ol>
-        <p className="journey-summary">{interviewType} · {plan?.durationMinutes ?? interviewCase.durationMinutes}분 인터뷰.</p>
-        <div className="case-next-action">
-          <span>NEXT ACTION</span>
-          <strong>{action.title}</strong>
-          <p>{action.description}</p>
-        </div>
-      </section>
+        <section className="mt-6 grid gap-5 lg:grid-cols-2">
+          <Card>
+            <CardHeader><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">INTERVIEW DETAILS</p><CardTitle className="mt-2">인터뷰 요약</CardTitle></CardHeader>
+            <CardContent><dl className="grid gap-4">{[
+              ["인터뷰 유형", interviewType],
+              ["소요 시간", `${duration}분`],
+              ["일정", interviewCase.scheduledDate ? `${interviewCase.scheduledDate} ${interviewCase.scheduledStartTime}–${interviewCase.scheduledEndTime}` : "아직 확정된 일정이 없습니다."],
+              ["회의실", interviewCase.scheduledRoomName ?? "회의실 선택 또는 확인 필요"],
+            ].map(([label, value]) => <div className="grid grid-cols-[104px_minmax(0,1fr)] gap-5" key={label}><dt className="text-sm font-medium text-slate-500">{label}</dt><dd className="m-0 text-base font-semibold leading-6 text-slate-900">{value}</dd></div>)}</dl></CardContent>
+          </Card>
 
-      <div className="case-detail-grid">
-        <section className="case-section">
-          <span className="section-kicker">INTERVIEW DETAILS</span>
-          <h2>인터뷰 요약</h2>
-          <dl>
-            <div><dt>인터뷰 유형</dt><dd>{interviewType}</dd></div>
-            <div><dt>소요 시간</dt><dd>{plan?.durationMinutes ?? interviewCase.durationMinutes}분</dd></div>
-            <div><dt>일정</dt><dd>{interviewCase.scheduledDate ? `${interviewCase.scheduledDate} ${interviewCase.scheduledStartTime}–${interviewCase.scheduledEndTime}` : "아직 내부 확정된 일정이 없습니다."}</dd></div>
-            <div><dt>회의실</dt><dd>{interviewCase.scheduledRoomName ?? "회의실 선택 또는 확인 필요"}</dd></div>
-          </dl>
+          <Card>
+            <CardHeader><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">INTERVIEWERS</p><CardTitle className="mt-2">면접관 일정 제출</CardTitle></CardHeader>
+            <CardContent>{bundle.interviewers.length > 0 ? <div className="divide-y divide-slate-200">{bundle.interviewers.map((interviewer) => <div className="flex items-center justify-between gap-4 py-4 first:pt-0 last:pb-0" key={interviewer.id}><div><p className="text-base font-semibold">{interviewer.displayName}</p><p className="mt-1 text-sm text-slate-600">{interviewer.required ? "필수 면접관" : "선택 면접관"}</p></div><Badge variant={interviewer.status === "SUBMITTED" ? "success" : interviewer.status === "DECLINED_PENDING_REVIEW" ? "warning" : "secondary"}>{interviewerStatus(interviewer.status)}</Badge></div>)}</div> : <p className="text-base text-slate-600">동기화된 면접관이 없습니다.</p>}</CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">SLACK MESSAGES</p><CardTitle className="mt-2">안내 메시지 상태</CardTitle></CardHeader>
+            <CardContent>{bundle.drafts.length > 0 ? <div className="divide-y divide-slate-200">{bundle.drafts.map((draft) => <div className="flex items-center justify-between gap-4 py-4 first:pt-0 last:pb-0" key={draft.id}><div><p className="text-base font-semibold">{draft.messageType}</p><p className="mt-1 text-sm text-slate-600">{formatDateTime(draft.createdAt)}</p></div><Badge variant="secondary">{draft.status}</Badge></div>)}</div> : <p className="text-base text-slate-600">생성된 Slack 초안이 없습니다.</p>}</CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">ACTIVITY LOG</p><CardTitle className="mt-2">업무 이력</CardTitle></CardHeader>
+            <CardContent>{events.length > 0 ? <ol className="divide-y divide-slate-200">{events.map((event) => <li className="grid grid-cols-[minmax(0,1fr)_auto] gap-4 py-4 first:pt-0 last:pb-0" key={event.id}><div><p className="text-base font-semibold">{event.eventType}</p><p className="mt-1 text-sm text-slate-600">{formatDateTime(event.createdAt)}</p></div><span className="text-sm text-slate-500">{event.actor}</span></li>)}</ol> : <p className="text-base text-slate-600">기록된 업무 이력이 없습니다.</p>}</CardContent>
+          </Card>
         </section>
-
-        <section className="case-section">
-          <span className="section-kicker">INTERVIEWERS</span>
-          <h2>면접관 일정 제출</h2>
-          <div className="interviewer-list">
-            {bundle.interviewers.map((interviewer) => (
-              <div key={interviewer.id} className="interviewer-row">
-                <div><strong>{interviewer.displayName}</strong><small>{interviewer.required ? "필수 면접관" : "선택 면접관"}</small></div>
-                <span className={`interviewer-status interviewer-${interviewer.status.toLowerCase()}`}>{interviewerStatus(interviewer.status)}</span>
-              </div>
-            ))}
-            {bundle.interviewers.length === 0 ? <p className="empty-message">동기화된 면접관이 없습니다.</p> : null}
-          </div>
-        </section>
-
-        <section className="case-section">
-          <span className="section-kicker">SLACK MESSAGES</span>
-          <h2>안내 메시지 상태</h2>
-          <div className="draft-list">
-            {bundle.drafts.map((draft) => (
-              <div key={draft.id} className="draft-row"><div><strong>{draft.messageType}</strong><small>{formatDateTime(draft.createdAt)}</small></div><span>{draft.status}</span></div>
-            ))}
-            {bundle.drafts.length === 0 ? <p className="empty-message">생성된 Slack 초안이 없습니다.</p> : null}
-          </div>
-        </section>
-
-        <section className="case-section">
-          <span className="section-kicker">ACTIVITY LOG</span>
-          <h2>업무 이력</h2>
-          <ol className="event-list">
-            {events.map((event) => <li key={event.id}><span>{formatDateTime(event.createdAt)}</span><strong>{event.eventType}</strong><small>{event.actor}</small></li>)}
-            {events.length === 0 ? <p className="empty-message">기록된 업무 이력이 없습니다.</p> : null}
-          </ol>
-        </section>
-      </div>
-    </main>
+      </main>
+    </div>
   );
 }

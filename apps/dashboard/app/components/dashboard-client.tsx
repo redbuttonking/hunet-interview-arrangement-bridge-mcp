@@ -1,8 +1,14 @@
 "use client";
-// 인터뷰 운영자가 지금 처리해야 할 일에 집중하도록 작업 화면을 제공한다.
+// 인터뷰 운영자가 우선순위 업무와 다음 일정을 같은 기준으로 처리하게 한다.
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { AlertCircle, ArrowRight, CalendarClock, CheckCircle2, ClipboardList, Loader2, RefreshCw, UsersRound, Wifi } from "lucide-react";
+import { AppHeader, PageHeader } from "./app-shell";
+import { Badge } from "./ui/badge";
+import { Button } from "./ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog";
 import type { CandidateCase, DashboardSnapshot, Decision, InterviewCaseStatus, Review } from "../lib/dashboard-types";
 
 type ActionPriority = "urgent" | "normal" | "watch";
@@ -50,22 +56,6 @@ function stageLabel(interviewCase: CandidateCase) {
   return name;
 }
 
-function statusText(status: InterviewCaseStatus) {
-  const labels: Record<InterviewCaseStatus, string> = {
-    READY_FOR_DRAFT: "조율 시작 준비",
-    DRAFT_CREATED: "요청 초안 검토",
-    REQUEST_SENT: "면접관 응답 대기",
-    COLLECTING_AVAILABILITY: "면접관 일정 수집",
-    READY_TO_SCHEDULE: "시간·회의실 선택",
-    AWAITING_CANDIDATE_CONFIRMATION: "후보자 응답 대기",
-    CONFIRMED: "최종 확정",
-    CANCELLED: "취소",
-    REVIEW_REQUIRED: "예외 검토",
-    CLOSED: "종료",
-  };
-  return labels[status];
-}
-
 function reviewCategory(review: Review) {
   const labels: Record<string, string> = {
     INTERVIEW_ARRANGEMENT_START_REQUIRED: "조율 시작 확인",
@@ -81,8 +71,6 @@ function caseAction(interviewCase: CandidateCase): ActionItem | undefined {
     candidateName: interviewCase.candidateName,
     recruitmentName: interviewCase.recruitmentName,
     href: `/cases/${interviewCase.id}`,
-    decision: undefined,
-    review: undefined,
   };
 
   if (interviewCase.status === "READY_TO_SCHEDULE") {
@@ -92,7 +80,7 @@ function caseAction(interviewCase: CandidateCase): ActionItem | undefined {
       category: "시간·회의실 검토",
       title: "인터뷰 시간과 회의실을 선택할 수 있습니다.",
       description: `${stageLabel(interviewCase)} · 면접관 응답 ${interviewCase.interviewerResponses.submitted}/${interviewCase.interviewerResponses.required}`,
-      meta: "추천 결과를 확인하세요.",
+      meta: "추천 결과를 확인해 주세요.",
       actionLabel: "일정 검토",
     };
   }
@@ -101,7 +89,7 @@ function caseAction(interviewCase: CandidateCase): ActionItem | undefined {
       ...base,
       priority: "normal",
       category: "면접관 요청 초안",
-      title: "면접관에게 보낼 일정 요청 초안을 검토하세요.",
+      title: "면접관에게 보낼 일정 요청 초안을 검토해 주세요.",
       description: stageLabel(interviewCase),
       meta: "승인 전에는 Slack으로 발송되지 않습니다.",
       actionLabel: "초안 확인",
@@ -122,15 +110,9 @@ function caseAction(interviewCase: CandidateCase): ActionItem | undefined {
 }
 
 function buildActionItems(data: DashboardSnapshot): ActionItem[] {
-  const caseIdsWithDecision = new Set(
-    data.decisions.map((decision) => decision.caseId).filter((caseId): caseId is string => Boolean(caseId)),
-  );
-  const reviewIdsWithDecision = new Set(
-    data.decisions.map((decision) => decision.reviewId).filter((reviewId): reviewId is string => Boolean(reviewId)),
-  );
-  const caseIdsWithReview = new Set(
-    data.reviews.map((review) => review.caseId).filter((caseId): caseId is string => Boolean(caseId)),
-  );
+  const caseIdsWithDecision = new Set(data.decisions.map((decision) => decision.caseId).filter((caseId): caseId is string => Boolean(caseId)));
+  const reviewIdsWithDecision = new Set(data.decisions.map((decision) => decision.reviewId).filter((reviewId): reviewId is string => Boolean(reviewId)));
+  const caseIdsWithReview = new Set(data.reviews.map((review) => review.caseId).filter((caseId): caseId is string => Boolean(caseId)));
 
   const decisionItems: ActionItem[] = data.decisions.map((decision) => ({
     id: `decision:${decision.id}`,
@@ -151,10 +133,10 @@ function buildActionItems(data: DashboardSnapshot): ActionItem[] {
       id: `review:${review.id}`,
       priority: review.reviewType === actionableReviewType ? "urgent" : "normal",
       category: reviewCategory(review),
-      title: review.reviewType === actionableReviewType ? "인터뷰 조율을 시작할지 확인하세요." : review.reason,
+      title: review.reviewType === actionableReviewType ? "인터뷰 조율을 시작할지 확인해 주세요." : review.reason,
       description: review.reviewType === actionableReviewType
         ? `${review.currentStepName ?? "평가 완료"} · ${review.reason}`
-        : review.currentStepName ?? "상세 내용 확인이 필요합니다.",
+        : review.currentStepName ?? "상세 내용을 확인해 주세요.",
       candidateName: review.candidateName,
       recruitmentName: review.recruitmentName,
       meta: review.reviewType === actionableReviewType ? "승인 전에는 나인하이어·Slack에 변경이 없습니다." : null,
@@ -171,6 +153,12 @@ function buildActionItems(data: DashboardSnapshot): ActionItem[] {
     .sort((left, right) => ({ urgent: 0, normal: 1, watch: 2 }[left.priority] - { urgent: 0, normal: 1, watch: 2 }[right.priority]));
 }
 
+function priorityStyle(priority: ActionPriority) {
+  if (priority === "urgent") return { dot: "bg-amber-500", badge: "warning" as const, label: "우선 처리" };
+  if (priority === "watch") return { dot: "bg-slate-400", badge: "secondary" as const, label: "확인 필요" };
+  return { dot: "bg-blue-500", badge: "default" as const, label: "검토 대기" };
+}
+
 function DecisionModal({ decision, onClose, onResolve, loading }: {
   decision: Decision;
   onClose: () => void;
@@ -178,30 +166,32 @@ function DecisionModal({ decision, onClose, onResolve, loading }: {
   loading: boolean;
 }) {
   const [selectedOptionId, setSelectedOptionId] = useState(decision.options[0]?.id ?? "");
+
   return (
-    <div className="modal-backdrop" role="presentation">
-      <section className="decision-modal" role="dialog" aria-modal="true" aria-labelledby="decision-title">
-        <button type="button" className="close-button" onClick={onClose} aria-label="닫기">×</button>
-        <span className="section-kicker">확인 후 선택</span>
-        <h2 id="decision-title">{decision.title}</h2>
-        <p className="modal-context">{decision.candidateName ?? "후보자"} · {decision.recruitmentName ?? "채용"}</p>
-        <p className="modal-prompt">{decision.prompt}</p>
-        <div className="decision-options">
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">승인 전 선택</p>
+          <DialogTitle>{decision.title}</DialogTitle>
+          <DialogDescription>{decision.candidateName ?? "후보자"} · {decision.recruitmentName ?? "채용 정보 확인 필요"}</DialogDescription>
+        </DialogHeader>
+        <p className="text-base leading-7 text-slate-700">{decision.prompt}</p>
+        <div className="grid gap-3">
           {decision.options.map((option) => (
-            <label key={option.id} className={`decision-option ${selectedOptionId === option.id ? "selected" : ""}`}>
-              <input type="radio" name="decision" value={option.id} checked={selectedOptionId === option.id} onChange={() => setSelectedOptionId(option.id)} />
-              <span><strong>{option.label}</strong><small>{option.description}</small></span>
+            <label key={option.id} className={`flex cursor-pointer gap-3 rounded-xl border p-4 transition-colors ${selectedOptionId === option.id ? "border-blue-500 bg-blue-50/70" : "border-slate-200 hover:border-slate-300"}`}>
+              <input className="mt-1 size-4 accent-blue-600" type="radio" name="decision" value={option.id} checked={selectedOptionId === option.id} onChange={() => setSelectedOptionId(option.id)} />
+              <span><strong className="block text-base text-slate-950">{option.label}</strong><small className="mt-1 block text-sm leading-6 text-slate-600">{option.description}</small></span>
             </label>
           ))}
         </div>
-        <div className="modal-actions">
-          <button type="button" className="button button-quiet" onClick={onClose}>나중에 결정</button>
-          <button type="button" className="button button-primary" disabled={!selectedOptionId || loading} onClick={() => onResolve(selectedOptionId)}>
-            {loading ? "처리 중" : "선택 적용"}
-          </button>
-        </div>
-      </section>
-    </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>나중에 결정</Button>
+          <Button disabled={!selectedOptionId || loading} onClick={() => onResolve(selectedOptionId)}>
+            {loading ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}선택 적용
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -213,24 +203,28 @@ function ActionRow({ item, onCreateDecision, onOpenDecision, loading }: {
 }) {
   const directDecision = item.decision;
   const actionableReview = item.review?.reviewType === actionableReviewType;
+  const priority = priorityStyle(item.priority);
+
   return (
-    <article className={`action-row priority-${item.priority}`}>
-      <div className="action-priority" aria-hidden="true"><span /></div>
-      <div className="action-copy">
-        <div className="action-meta"><span>{item.category}</span>{item.meta ? <small>{item.meta}</small> : null}</div>
-        <h3>{item.candidateName ?? "후보자 확인 필요"}</h3>
-        <p className="action-recruitment">{item.recruitmentName ?? "채용 정보 확인 필요"}</p>
-        <p className="action-title">{item.title}</p>
-        <p className="action-description">{item.description}</p>
+    <article className="grid gap-5 px-6 py-6 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:px-7">
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className={`size-2 rounded-full ${priority.dot}`} />
+          <Badge variant={priority.badge}>{priority.label}</Badge>
+          <span className="text-sm text-slate-500">{item.category}</span>
+          {item.meta ? <span className="text-sm text-slate-500">· {item.meta}</span> : null}
+        </div>
+        <h3 className="mt-3 text-xl font-semibold tracking-[-0.025em] text-slate-950">{item.candidateName ?? "후보자 확인 필요"}</h3>
+        <p className="mt-1 text-base text-slate-600">{item.recruitmentName ?? "채용 정보 확인 필요"}</p>
+        <p className="mt-4 text-base font-medium leading-6 text-slate-800">{item.title}</p>
+        <p className="mt-1 text-sm leading-6 text-slate-600">{item.description}</p>
       </div>
-      <div className="action-control">
-        {directDecision ? <button type="button" className="button button-primary" onClick={() => onOpenDecision(directDecision)}>결정하기</button> : null}
+      <div className="flex shrink-0 items-center sm:justify-end">
+        {directDecision ? <Button onClick={() => onOpenDecision(directDecision)}>결정하기</Button> : null}
         {!directDecision && actionableReview && item.review ? (
-          <button type="button" className="button button-primary" disabled={loading} onClick={() => onCreateDecision(item.review!)}>
-            {loading ? "준비 중" : "판단하기"}
-          </button>
+          <Button disabled={loading} onClick={() => onCreateDecision(item.review!)}>{loading ? <Loader2 className="size-4 animate-spin" /> : null}판단하기</Button>
         ) : null}
-        {!directDecision && !actionableReview && item.href && item.actionLabel ? <Link className="button button-secondary" href={item.href}>{item.actionLabel}</Link> : null}
+        {!directDecision && !actionableReview && item.href && item.actionLabel ? <Button asChild variant="outline"><Link href={item.href}>{item.actionLabel}<ArrowRight className="size-4" /></Link></Button> : null}
       </div>
     </article>
   );
@@ -259,11 +253,11 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
     try {
       const response = await fetch(`/api/reviews/${review.id}/decision`, { method: "POST" });
       const result = await response.json() as { decision?: Decision; error?: string };
-      if (!response.ok || !result.decision) throw new Error(result.error ?? "결정을 만들지 못했습니다.");
+      if (!response.ok || !result.decision) throw new Error(result.error ?? "결정문을 만들지 못했습니다.");
       setActiveDecision(result.decision);
       await refresh();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "결정을 만들지 못했습니다.");
+      setError(caught instanceof Error ? caught.message : "결정문을 만들지 못했습니다.");
     } finally {
       setLoadingId(null);
     }
@@ -280,11 +274,11 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
         body: JSON.stringify({ optionId }),
       });
       const result = await response.json() as { error?: string };
-      if (!response.ok) throw new Error(result.error ?? "결정을 처리하지 못했습니다.");
+      if (!response.ok) throw new Error(result.error ?? "결정문을 처리하지 못했습니다.");
       setActiveDecision(null);
       await refresh();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "결정을 처리하지 못했습니다.");
+      setError(caught instanceof Error ? caught.message : "결정문을 처리하지 못했습니다.");
     } finally {
       setLoadingId(null);
     }
@@ -301,82 +295,62 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
     { label: "면접관 일정", statuses: ["REQUEST_SENT", "COLLECTING_AVAILABILITY"] },
     { label: "시간·회의실", statuses: ["READY_TO_SCHEDULE", "REVIEW_REQUIRED"] },
     { label: "후보자 응답", statuses: ["AWAITING_CANDIDATE_CONFIRMATION"] },
-  ].map((item) => ({
-    ...item,
-    count: item.statuses.reduce((total, status) => total + summary.caseCountsByStatus[status as InterviewCaseStatus], 0),
-  }));
+  ].map((item) => ({ ...item, count: item.statuses.reduce((total, status) => total + summary.caseCountsByStatus[status as InterviewCaseStatus], 0) }));
 
   return (
-    <main className="ops-shell">
-      <header className="app-header">
-        <Link className="brand" href="/"><span className="brand-mark">H</span><span>HUNET <b>OPS</b></span></Link>
-        <nav className="primary-nav" aria-label="대시보드 메뉴">
-          <Link className="active" href="/">운영</Link>
-          <Link href="/rooms">회의실</Link>
-        </nav>
-        <div className={`connection-state worker-${summary.worker.status.toLowerCase()}`}><span />워커 {summary.worker.status === "RUNNING" ? "정상" : summary.worker.status}</div>
-      </header>
+    <div className="min-h-screen bg-slate-50">
+      <AppHeader active="operations" workerStatus={summary.worker.status} />
+      <main className="mx-auto max-w-[1440px] px-5 pb-12 sm:px-8">
+        <PageHeader
+          actions={<Button variant="outline" onClick={() => void refresh().catch((caught) => setError(caught.message))}><RefreshCw className="size-4" />새로고침</Button>}
+          description="판단하거나 처리해야 하는 인터뷰 업무부터 확인하고, 확정된 일정과 운영 상태를 함께 살펴보세요."
+          eyebrow="INTERVIEW OPERATIONS"
+          title="오늘의 인터뷰 운영"
+        />
 
-      <section className="ops-intro">
-        <div>
-          <span className="section-kicker">INTERVIEW OPERATIONS</span>
-          <h1>오늘의 인터뷰 운영</h1>
-          <p>지금 판단하거나 처리해야 하는 업무부터 확인하세요.</p>
-        </div>
-        <button type="button" className="button button-secondary refresh-button" onClick={() => void refresh().catch((caught) => setError(caught.message))}>새로고침</button>
-      </section>
+        {error ? <div className="mb-6 flex items-center gap-2 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-800"><AlertCircle className="size-4" />{error}</div> : null}
 
-      {error ? <p className="error-banner">{error}</p> : null}
+        <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
+          <Card className="overflow-hidden">
+            <CardHeader className="flex-row items-start justify-between gap-4 border-b border-slate-200 p-6 sm:p-7">
+              <div><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">PRIORITY QUEUE</p><CardTitle className="mt-2 flex items-center gap-2 text-2xl">지금 처리할 일 <Badge>{actionItems.length}</Badge></CardTitle></div>
+              <CardDescription className="max-w-xs text-right">후보자별 중복을 제거한 우선순위 목록입니다.</CardDescription>
+            </CardHeader>
+            {actionItems.length === 0 ? (
+              <CardContent className="grid min-h-64 place-items-center p-8 text-center"><div><CheckCircle2 className="mx-auto size-8 text-emerald-600" /><p className="mt-4 text-lg font-semibold">지금 바로 처리할 업무가 없습니다.</p><p className="mt-2 text-base text-slate-600">면접관 응답과 후보자 답변을 기다리고 있습니다.</p></div></CardContent>
+            ) : <div className="divide-y divide-slate-200">{actionItems.map((item) => <ActionRow key={item.id} item={item} loading={loadingId === item.review?.id} onCreateDecision={createDecision} onOpenDecision={setActiveDecision} />)}</div>}
+          </Card>
 
-      <div className="operations-grid">
-        <section className="work-queue" aria-labelledby="work-queue-title">
-          <div className="section-heading work-heading">
-            <div><span className="section-kicker">PRIORITY QUEUE</span><h2 id="work-queue-title">지금 처리할 일 <em>{actionItems.length}</em></h2></div>
-            <p>후보자별 중복을 제거한 우선순위 목록입니다.</p>
-          </div>
-          {actionItems.length === 0 ? (
-            <div className="queue-empty"><strong>지금 바로 처리할 업무가 없습니다.</strong><span>면접관 응답과 후보자 확답을 기다리고 있습니다.</span></div>
-          ) : (
-            <div className="action-list">
-              {actionItems.map((item) => <ActionRow key={item.id} item={item} loading={loadingId === item.review?.id} onCreateDecision={createDecision} onOpenDecision={setActiveDecision} />)}
-            </div>
-          )}
-        </section>
-
-        <aside className="operations-rail">
-          <section className="rail-panel upcoming-panel" aria-labelledby="upcoming-title">
-            <div className="rail-heading"><span className="section-kicker">UP NEXT</span><h2 id="upcoming-title">다가오는 인터뷰</h2></div>
-            {upcoming.length === 0 ? <p className="rail-empty">기록된 예정 인터뷰가 없습니다.</p> : (
-              <div className="upcoming-list">
-                {upcoming.map((interviewCase) => (
-                  <Link href={`/cases/${interviewCase.id}`} key={interviewCase.id} className="upcoming-item">
-                    <span className="upcoming-date">{formatDate(interviewCase.scheduledDate)}</span>
-                    <strong>{interviewCase.candidateName ?? "후보자 확인 필요"}</strong>
-                    <small>{formatSchedule(interviewCase)}</small>
+          <aside className="grid h-fit gap-6 sm:grid-cols-2 xl:grid-cols-1">
+            <Card>
+              <CardHeader><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">UP NEXT</p><CardTitle className="mt-2">다가오는 인터뷰</CardTitle></CardHeader>
+              <CardContent>
+                {upcoming.length === 0 ? <p className="text-base leading-7 text-slate-600">기록된 일정 인터뷰가 없습니다.</p> : <div className="divide-y divide-slate-200">{upcoming.map((interviewCase) => (
+                  <Link className="block py-4 first:pt-0 transition-colors hover:text-blue-700" href={`/cases/${interviewCase.id}`} key={interviewCase.id}>
+                    <p className="text-sm font-semibold text-blue-700">{formatDate(interviewCase.scheduledDate)}</p>
+                    <p className="mt-1 text-lg font-semibold text-slate-950">{interviewCase.candidateName ?? "후보자 확인 필요"}</p>
+                    <p className="mt-1 text-sm leading-6 text-slate-600">{formatSchedule(interviewCase)}</p>
                   </Link>
-                ))}
-              </div>
-            )}
-            <Link className="text-link" href="/rooms">회의실 시간표 보기 <span>→</span></Link>
-          </section>
+                ))}</div>}
+                <Button asChild className="mt-5 w-full" variant="outline"><Link href="/rooms"><CalendarClock className="size-4" />회의실 시간표 보기</Link></Button>
+              </CardContent>
+            </Card>
 
-          <section className="rail-panel progress-panel" aria-labelledby="progress-title">
-            <div className="rail-heading"><span className="section-kicker">PIPELINE</span><h2 id="progress-title">진행 중 조율</h2></div>
-            <div className="progress-list">
-              {progress.map((item) => <div className="progress-row" key={item.label}><span>{item.label}</span><strong>{item.count}</strong></div>)}
-            </div>
-            <div className="confirmed-summary"><span>최종 확정</span><strong>{summary.caseCountsByStatus.CONFIRMED}</strong></div>
-          </section>
-        </aside>
-      </div>
+            <Card>
+              <CardHeader><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">PIPELINE</p><CardTitle className="mt-2">진행 중 조율</CardTitle></CardHeader>
+              <CardContent><div className="divide-y divide-slate-200">{progress.map((item) => <div className="flex items-center justify-between py-3 first:pt-0" key={item.label}><span className="text-base text-slate-600">{item.label}</span><strong className="text-lg font-semibold text-slate-950">{item.count}</strong></div>)}</div><div className="mt-3 flex items-center justify-between rounded-lg bg-emerald-50 px-3 py-3"><span className="text-base font-medium text-emerald-800">최종 확정</span><strong className="text-lg font-semibold text-emerald-700">{summary.caseCountsByStatus.CONFIRMED}</strong></div></CardContent>
+            </Card>
+          </aside>
+        </div>
 
-      <section className="health-strip" aria-label="운영 상태">
-        <div><span>면접관 미응답</span><strong>{summary.pendingRequiredInterviewerResponses}</strong><small>제출 확인이 필요한 필수 면접관입니다.</small></div>
-        <div><span>연동 재시도</span><strong>{summary.pendingIntegrationRetries + summary.failedIntegrationRetries}</strong><small>Slack·나인하이어 동기화 오류를 확인하세요.</small></div>
-        <div><span>데이터 갱신</span><strong>{formatGeneratedAt(data.dashboard.generatedAt)}</strong><small>30초마다 로컬 상태를 다시 확인합니다.</small></div>
-      </section>
+        <section className="mt-6 grid gap-4 md:grid-cols-3" aria-label="운영 상태">
+          <Card><CardContent className="flex items-start gap-4 p-5"><span className="grid size-10 place-items-center rounded-lg bg-amber-50 text-amber-700"><UsersRound className="size-5" /></span><div><p className="text-sm font-medium text-slate-600">면접관 미응답</p><p className="mt-1 text-2xl font-semibold tracking-tight">{summary.pendingRequiredInterviewerResponses}</p><p className="mt-1 text-sm leading-5 text-slate-500">제출 확인이 필요한 필수 면접관입니다.</p></div></CardContent></Card>
+          <Card><CardContent className="flex items-start gap-4 p-5"><span className="grid size-10 place-items-center rounded-lg bg-rose-50 text-rose-700"><Wifi className="size-5" /></span><div><p className="text-sm font-medium text-slate-600">연동 재시도</p><p className="mt-1 text-2xl font-semibold tracking-tight">{summary.pendingIntegrationRetries + summary.failedIntegrationRetries}</p><p className="mt-1 text-sm leading-5 text-slate-500">Slack·나인하이어 동기화 오류를 확인합니다.</p></div></CardContent></Card>
+          <Card><CardContent className="flex items-start gap-4 p-5"><span className="grid size-10 place-items-center rounded-lg bg-blue-50 text-blue-700"><ClipboardList className="size-5" /></span><div><p className="text-sm font-medium text-slate-600">데이터 갱신</p><p className="mt-1 text-2xl font-semibold tracking-tight">{formatGeneratedAt(data.dashboard.generatedAt)}</p><p className="mt-1 text-sm leading-5 text-slate-500">30초마다 로컬 상태를 다시 확인합니다.</p></div></CardContent></Card>
+        </section>
+      </main>
 
-      {activeDecision ? <DecisionModal key={activeDecision.id} decision={activeDecision} loading={loadingId === activeDecision.id} onClose={() => setActiveDecision(null)} onResolve={resolveDecision} /> : null}
-    </main>
+      {activeDecision ? <DecisionModal decision={activeDecision} loading={loadingId === activeDecision.id} onClose={() => setActiveDecision(null)} onResolve={resolveDecision} /> : null}
+    </div>
   );
 }
