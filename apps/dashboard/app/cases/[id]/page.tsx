@@ -85,8 +85,16 @@ export default async function CaseDetailPage({ params }: { params: Promise<{ id:
   if (!data) notFound();
   const { bundle, plan, events } = data;
   const interviewCase = bundle.interviewCase;
+  const activeInterviewers = bundle.interviewers.filter(
+    (interviewer) => interviewer.active,
+  );
   const currentJourneyIndex = journeyIndex(interviewCase.status);
-  const action = nextAction(interviewCase.status, bundle.interviewers.filter((interviewer) => interviewer.required && interviewer.status === "PENDING").length);
+  const action = nextAction(
+    interviewCase.status,
+    activeInterviewers.filter(
+      (interviewer) => interviewer.required && interviewer.status === "PENDING",
+    ).length,
+  );
   const interviewType = plan
     ? `${plan.mode === "COMBINED" ? "통합" : plan.mode === "SEQUENTIAL" ? "연속" : "단일"} · ${plan.stepNames.join(plan.mode === "SEQUENTIAL" ? " → " : " + ")}`
     : "인터뷰 유형 확인 필요";
@@ -137,7 +145,7 @@ export default async function CaseDetailPage({ params }: { params: Promise<{ id:
 
           <Card>
             <CardHeader><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">INTERVIEWERS</p><CardTitle className="mt-2">면접관 일정 제출</CardTitle></CardHeader>
-            <CardContent>{bundle.interviewers.length > 0 ? <div className="divide-y divide-slate-200">{bundle.interviewers.map((interviewer) => <div className="flex items-center justify-between gap-4 py-4 first:pt-0 last:pb-0" key={interviewer.id}><div><p className="text-base font-semibold">{interviewer.displayName}</p><p className="mt-1 text-sm text-slate-600">{interviewer.required ? "필수 면접관" : "선택 면접관"}</p></div><Badge variant={interviewer.status === "SUBMITTED" ? "success" : interviewer.status === "DECLINED_PENDING_REVIEW" ? "warning" : "secondary"}>{interviewerStatus(interviewer.status)}</Badge></div>)}</div> : <p className="text-base text-slate-600">동기화된 면접관이 없습니다.</p>}</CardContent>
+            <CardContent>{activeInterviewers.length > 0 ? <div className="divide-y divide-slate-200">{activeInterviewers.map((interviewer) => <div className="flex items-center justify-between gap-4 py-4 first:pt-0 last:pb-0" key={interviewer.id}><div><p className="text-base font-semibold">{interviewer.displayName}</p><p className="mt-1 text-sm text-slate-600">{interviewer.required ? "필수 면접관" : "선택 면접관"}</p></div><Badge variant={interviewer.status === "SUBMITTED" ? "success" : interviewer.status === "DECLINED_PENDING_REVIEW" ? "warning" : "secondary"}>{interviewerStatus(interviewer.status)}</Badge></div>)}</div> : <p className="text-base text-slate-600">동기화된 면접관이 없습니다.</p>}</CardContent>
           </Card>
 
           <Card>
