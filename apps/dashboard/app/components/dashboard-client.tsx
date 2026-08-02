@@ -30,6 +30,28 @@ type ActionItem = {
   caseSkillKey?: "AVAILABILITY_COLLECTION" | "INTERVIEW_SCHEDULING";
 };
 
+type ActiveDecision = {
+  decision: Decision;
+  dismissOnClose: boolean;
+};
+
+type RecruitmentTemplatePreview = {
+  kind: "RECRUITMENT_TEMPLATE_PREVIEW";
+  preview: {
+    recruitmentName: string;
+    requiresApproval: boolean;
+    steps: Array<{
+      stepId: string;
+      title: string;
+      name: string;
+      order: number;
+      suggestedAsInterview: boolean;
+      suggestedMode: "STANDARD" | "COMBINED" | null;
+      defaultDurationMinutes: number;
+    }>;
+  };
+};
+
 const supportedReviewDecisionTypes = new Set([
   "INTERVIEW_ARRANGEMENT_START_REQUIRED",
   "RECRUITMENT_TEMPLATE_UPDATE_REQUIRED",
@@ -168,8 +190,8 @@ function buildActionItems(data: DashboardSnapshot): ActionItem[] {
     description: decision.prompt,
     candidateName: decision.candidateName,
     recruitmentName: decision.recruitmentName,
-    meta: "선택 내용을 확인한 뒤 적용합니다.",
-    actionLabel: "결정하기",
+    meta: "선택 적용 전에는 인터뷰 상태가 바뀌지 않습니다.",
+    actionLabel: "결정 계속하기",
     href: decision.caseId ? `/cases/${decision.caseId}` : null,
     decision,
   }));
@@ -190,7 +212,13 @@ function buildActionItems(data: DashboardSnapshot): ActionItem[] {
       candidateName: review.candidateName,
       recruitmentName: review.recruitmentName,
       meta: review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED" ? "승인 전에는 나인하이어·Slack에 변경이 없습니다." : null,
-      actionLabel: supportedReviewDecisionTypes.has(review.reviewType) ? "선택하기" : review.caseId ? "상세 보기" : null,
+      actionLabel: review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED"
+        ? "조율 시작 검토"
+        : review.reviewType === "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED"
+          ? "응답 조치 선택"
+          : supportedReviewDecisionTypes.has(review.reviewType)
+            ? "규칙 확인"
+            : review.caseId ? "상세 보기" : null,
       href: review.caseId ? `/cases/${review.caseId}` : null,
       review,
     }));
@@ -209,23 +237,29 @@ function priorityStyle(priority: ActionPriority) {
   return { dot: "bg-blue-500", badge: "default" as const, label: "검토 대기" };
 }
 
-function DecisionModal({ decision, onClose, onResolve, loading }: {
-  decision: Decision;
+function DecisionModal({ activeDecision, onClose, onResolve, loading }: {
+  activeDecision: ActiveDecision;
   onClose: () => void;
   onResolve: (optionId: string) => void;
   loading: boolean;
 }) {
+  const { decision, dismissOnClose } = activeDecision;
   const [selectedOptionId, setSelectedOptionId] = useState(decision.options[0]?.id ?? "");
+
+  useEffect(() => {
+    setSelectedOptionId(decision.options[0]?.id ?? "");
+  }, [decision.id, decision.options]);
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent>
         <DialogHeader>
-          <p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">승인 전 선택</p>
+          <p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">선택 내용 확인</p>
           <DialogTitle>{decision.title}</DialogTitle>
           <DialogDescription>{decision.candidateName ?? "후보자"} · {decision.recruitmentName ?? "채용 정보 확인 필요"}</DialogDescription>
         </DialogHeader>
         <p className="text-base leading-7 text-slate-700">{decision.prompt}</p>
+        <p className="rounded-lg bg-slate-50 px-3 py-2 text-sm leading-6 text-slate-600">`선택 적용`을 누르기 전에는 인터뷰 상태나 외부 시스템이 변경되지 않습니다.</p>
         <div className="grid gap-3">
           {decision.options.map((option) => (
             <label key={option.id} className={`flex cursor-pointer gap-3 rounded-xl border p-4 transition-colors ${selectedOptionId === option.id ? "border-blue-500 bg-blue-50/70" : "border-slate-200 hover:border-slate-300"}`}>
@@ -235,10 +269,46 @@ function DecisionModal({ decision, onClose, onResolve, loading }: {
           ))}
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={onClose}>나중에 결정</Button>
+          <Button variant="outline" onClick={onClose}>{dismissOnClose ? "닫기" : "나중에 결정"}</Button>
           <Button disabled={!selectedOptionId || loading} onClick={() => onResolve(selectedOptionId)}>
             {loading ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}선택 적용
           </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function TemplatePreviewDialog({ preview, onClose }: {
+  preview: RecruitmentTemplatePreview["preview"];
+  onClose: () => void;
+}) {
+  const suggestedSteps = preview.steps.filter((step) => step.suggestedAsInterview);
+
+  return (
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">RECRUITMENT TEMPLATE</p>
+          <DialogTitle>{preview.recruitmentName} 인터뷰 규칙 확인</DialogTitle>
+          <DialogDescription>나인하이어의 최신 칸반 단계를 읽어 온 결과입니다.</DialogDescription>
+        </DialogHeader>
+        <div className={`rounded-lg border px-4 py-3 text-sm leading-6 ${preview.requiresApproval ? "border-amber-200 bg-amber-50 text-amber-900" : "border-emerald-200 bg-emerald-50 text-emerald-900"}`}>
+          {preview.requiresApproval
+            ? "저장된 인터뷰 규칙이 없거나 현재 칸반과 달라 확인이 필요합니다. 이 화면에서는 아직 저장하지 않습니다."
+            : "현재 저장된 인터뷰 규칙이 최신 칸반과 일치합니다."}
+        </div>
+        <div className="grid gap-3">
+          {preview.steps.map((step) => (
+            <div className="flex flex-col gap-2 rounded-xl border border-slate-200 p-4 sm:flex-row sm:items-center sm:justify-between" key={step.stepId}>
+              <div><p className="text-base font-semibold text-slate-950">{step.order}. {step.name}</p><p className="mt-1 text-sm text-slate-600">{step.title}</p></div>
+              {step.suggestedAsInterview ? <Badge variant="default">추천 · {step.suggestedMode === "COMBINED" ? "통합" : "개별"} · {step.defaultDurationMinutes}분</Badge> : <Badge variant="secondary">인터뷰 단계 아님</Badge>}
+            </div>
+          ))}
+        </div>
+        {suggestedSteps.length === 0 ? <p className="rounded-lg bg-slate-50 px-3 py-2 text-sm leading-6 text-slate-600">자동으로 식별된 인터뷰 단계가 없습니다. 이 채용은 개별 규칙 설정이 필요합니다.</p> : null}
+        <DialogFooter>
+          <Button onClick={onClose}>확인</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -272,9 +342,9 @@ function ActionRow({ item, onCreateReviewDecision, onCreateCaseDecision, onOpenD
         <p className="mt-1 text-sm leading-6 text-slate-600">{item.description}</p>
       </div>
       <div className="flex shrink-0 items-center sm:justify-end">
-        {directDecision ? <Button onClick={() => onOpenDecision(directDecision)}>결정하기</Button> : null}
+        {directDecision ? <Button variant="decision" onClick={() => onOpenDecision(directDecision)}>결정 계속하기</Button> : null}
         {!directDecision && actionableReview && review ? (
-          <Button disabled={loading} onClick={() => onCreateReviewDecision(review)}>{loading ? <Loader2 className="size-4 animate-spin" /> : null}{item.actionLabel}</Button>
+          <Button disabled={loading} onClick={() => onCreateReviewDecision(review)} variant="outline">{loading ? <Loader2 className="size-4 animate-spin" /> : null}{item.actionLabel}</Button>
         ) : null}
         {!directDecision && !actionableReview && item.caseSkillKey && item.caseId ? (
           <Button disabled={loading} onClick={() => onCreateCaseDecision(item.caseId!, item.caseSkillKey!)}>{loading ? <Loader2 className="size-4 animate-spin" /> : null}{item.actionLabel}</Button>
@@ -287,7 +357,8 @@ function ActionRow({ item, onCreateReviewDecision, onCreateCaseDecision, onOpenD
 
 export function DashboardClient({ initialData }: { initialData: DashboardSnapshot }) {
   const [data, setData] = useState(initialData);
-  const [activeDecision, setActiveDecision] = useState<Decision | null>(null);
+  const [activeDecision, setActiveDecision] = useState<ActiveDecision | null>(null);
+  const [templatePreview, setTemplatePreview] = useState<RecruitmentTemplatePreview["preview"] | null>(null);
   const [loadingId, setLoadingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -307,10 +378,9 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
     setError(null);
     try {
       const response = await fetch(`/api/reviews/${review.id}/decision`, { method: "POST" });
-      const result = await response.json() as { decision?: Decision; error?: string };
+      const result = await response.json() as { decision?: Decision; dismissOnClose?: boolean; error?: string };
       if (!response.ok || !result.decision) throw new Error(result.error ?? "결정문을 만들지 못했습니다.");
-      setActiveDecision(result.decision);
-      await refresh();
+      setActiveDecision({ decision: result.decision, dismissOnClose: result.dismissOnClose === true });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "결정문을 만들지 못했습니다.");
     } finally {
@@ -330,10 +400,9 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ skillKey }),
       });
-      const result = await response.json() as { decision?: Decision; error?: string };
+      const result = await response.json() as { decision?: Decision; dismissOnClose?: boolean; error?: string };
       if (!response.ok || !result.decision) throw new Error(result.error ?? "선택지를 만들지 못했습니다.");
-      setActiveDecision(result.decision);
-      await refresh();
+      setActiveDecision({ decision: result.decision, dismissOnClose: result.dismissOnClose === true });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "선택지를 만들지 못했습니다.");
     } finally {
@@ -343,10 +412,11 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
 
   const resolveDecision = async (optionId: string) => {
     if (!activeDecision) return;
-    setLoadingId(activeDecision.id);
+    const decision = activeDecision.decision;
+    setLoadingId(decision.id);
     setError(null);
     try {
-      const response = await fetch(`/api/decisions/${activeDecision.id}`, {
+      const response = await fetch(`/api/decisions/${decision.id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ optionId }),
@@ -360,7 +430,16 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
         && "options" in result.followUp
         && Array.isArray((result.followUp as { options?: unknown }).options)
       ) {
-        setActiveDecision(result.followUp as Decision);
+        setActiveDecision({ decision: result.followUp as Decision, dismissOnClose: false });
+      } else if (
+        result.followUp
+        && typeof result.followUp === "object"
+        && "kind" in result.followUp
+        && (result.followUp as { kind?: unknown }).kind === "RECRUITMENT_TEMPLATE_PREVIEW"
+        && "preview" in result.followUp
+      ) {
+        setActiveDecision(null);
+        setTemplatePreview((result.followUp as RecruitmentTemplatePreview).preview);
       } else {
         setActiveDecision(null);
       }
@@ -369,6 +448,22 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
       setError(caught instanceof Error ? caught.message : "결정문을 처리하지 못했습니다.");
     } finally {
       setLoadingId(null);
+    }
+  };
+
+  const closeDecision = async () => {
+    if (!activeDecision) return;
+    const decision = activeDecision.decision;
+    const dismissOnClose = activeDecision.dismissOnClose;
+    setActiveDecision(null);
+    if (!dismissOnClose) return;
+    try {
+      const response = await fetch(`/api/decisions/${decision.id}/dismiss`, { method: "DELETE" });
+      const result = await response.json() as { dismissed?: boolean; error?: string };
+      if (!response.ok || !result.dismissed) throw new Error(result.error ?? "선택지를 닫지 못했습니다.");
+      await refresh();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "선택지를 닫지 못했습니다.");
     }
   };
 
@@ -406,7 +501,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
             </CardHeader>
             {actionItems.length === 0 ? (
               <CardContent className="grid min-h-64 place-items-center p-8 text-center"><div><CheckCircle2 className="mx-auto size-8 text-emerald-600" /><p className="mt-4 text-lg font-semibold">지금 바로 처리할 업무가 없습니다.</p><p className="mt-2 text-base text-slate-600">면접관 응답과 후보자 답변을 기다리고 있습니다.</p></div></CardContent>
-            ) : <div className="divide-y divide-slate-200">{actionItems.map((item) => <ActionRow key={item.id} item={item} loading={loadingId === item.id} onCreateCaseDecision={createCaseDecision} onCreateReviewDecision={createReviewDecision} onOpenDecision={setActiveDecision} />)}</div>}
+            ) : <div className="divide-y divide-slate-200">{actionItems.map((item) => <ActionRow key={item.id} item={item} loading={loadingId === item.id} onCreateCaseDecision={createCaseDecision} onCreateReviewDecision={createReviewDecision} onOpenDecision={(decision) => setActiveDecision({ decision, dismissOnClose: false })} />)}</div>}
           </Card>
 
           <aside className="grid h-fit gap-6 sm:grid-cols-2 xl:grid-cols-1">
@@ -438,7 +533,8 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
         </section>
       </main>
 
-      {activeDecision ? <DecisionModal decision={activeDecision} loading={loadingId === activeDecision.id} onClose={() => setActiveDecision(null)} onResolve={resolveDecision} /> : null}
+      {activeDecision ? <DecisionModal activeDecision={activeDecision} loading={loadingId === activeDecision.decision.id} onClose={() => void closeDecision()} onResolve={resolveDecision} /> : null}
+      {templatePreview ? <TemplatePreviewDialog preview={templatePreview} onClose={() => setTemplatePreview(null)} /> : null}
     </div>
   );
 }

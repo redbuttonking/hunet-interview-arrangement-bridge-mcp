@@ -10,8 +10,7 @@ export async function POST(
 ) {
   try {
     const { id } = await context.params;
-    const decision = await createDashboardReviewDecision(id);
-    return NextResponse.json({ decision });
+    return NextResponse.json(await createDashboardReviewDecision(id));
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "결정을 만들 수 없습니다." },

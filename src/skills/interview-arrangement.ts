@@ -119,6 +119,7 @@ function reviewContext(review: ReviewRow): Record<string, unknown> {
     reviewId: review.id,
     reviewType: review.reviewType,
     reason: review.reason,
+    recruitmentRef: text(sourceContext?.recruitmentRef) ?? null,
     candidateName: text(sourceContext?.candidateName) ?? null,
     recruitmentName: text(sourceContext?.recruitmentName) ?? null,
   };

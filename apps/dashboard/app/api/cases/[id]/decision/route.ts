@@ -17,8 +17,7 @@ export async function POST(
   try {
     const { id } = await context.params;
     const body = bodySchema.parse(await request.json());
-    const decision = await createDashboardCaseDecision({ caseId: id, skillKey: body.skillKey });
-    return NextResponse.json({ decision });
+    return NextResponse.json(await createDashboardCaseDecision({ caseId: id, skillKey: body.skillKey }));
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "선택지를 만들 수 없습니다." },

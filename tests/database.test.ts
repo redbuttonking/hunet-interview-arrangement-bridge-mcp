@@ -47,6 +47,24 @@ describe("BridgeDatabase", () => {
     expect(db.listInterviewSkillDecisions({ status: "PENDING" })).toEqual([]);
   });
 
+  it("discards a pending decision when the user closes an unsubmitted selection", () => {
+    db = new BridgeDatabase(":memory:");
+    const decision = db.createOrGetPendingInterviewSkillDecision({
+      skillKey: "CANDIDATE_TRIAGE",
+      decisionType: "START_INTERVIEW_ARRANGEMENT",
+      fingerprint: "review:R2:start",
+      title: "조율 시작 여부",
+      prompt: "선택하세요.",
+      selectionMode: "SINGLE",
+      options: [{ id: "START", label: "시작", description: "조율을 시작합니다." }],
+      context: { reviewId: "R2" },
+    });
+
+    expect(db.discardPendingInterviewSkillDecision(decision.id)).toBe(true);
+    expect(db.getInterviewSkillDecision(decision.id)).toBeUndefined();
+    expect(db.discardPendingInterviewSkillDecision(decision.id)).toBe(false);
+  });
+
   it("stores a recruitment template and a candidate-specific combined plan", () => {
     db = new BridgeDatabase(":memory:");
     const interviewCase = db.createInterviewCase({

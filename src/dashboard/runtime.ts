@@ -2,7 +2,7 @@
 import { WebClient } from "@slack/web-api";
 import { getConfig } from "../config.js";
 import { DaouOfficeBrowserController } from "../daou-office/browser.js";
-import { BridgeDatabase } from "../db/database.js";
+import { BridgeDatabase, type InterviewSkillDecisionRow } from "../db/database.js";
 import { NinehireRecruitmentWorkflowAdapter } from "../ninehire/adapter.js";
 import { NinehireMcpGateway } from "../ninehire/gateway.js";
 import { OperationalReadinessService } from "../services/operational-readiness.js";
@@ -57,6 +57,11 @@ export async function createDashboardReviewDecision(reviewId: string) {
     if (!review || review.status !== "OPEN") {
       throw new Error(`Open review not found: ${reviewId}`);
     }
+    const existing = runtime.db
+      .listInterviewSkillDecisions({ status: "PENDING" })
+      .find((decision) => decision.reviewId === reviewId);
+    if (existing) return { decision: existing, dismissOnClose: false };
+    let decision: InterviewSkillDecisionRow;
     if (
       [
         "INTERVIEW_ARRANGEMENT_START_REQUIRED",
@@ -64,12 +69,13 @@ export async function createDashboardReviewDecision(reviewId: string) {
         "RECRUITMENT_TEMPLATE_CHECK_REQUIRED",
       ].includes(review.reviewType)
     ) {
-      return runtime.skills.createCandidateTriageDecision(reviewId);
+      decision = runtime.skills.createCandidateTriageDecision(reviewId);
+    } else if (review.reviewType === "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED") {
+      decision = runtime.skills.createCandidateScheduleResponseDecision(reviewId);
+    } else {
+      throw new Error(`Dashboard decision is not available for review type: ${review.reviewType}`);
     }
-    if (review.reviewType === "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED") {
-      return runtime.skills.createCandidateScheduleResponseDecision(reviewId);
-    }
-    throw new Error(`Dashboard decision is not available for review type: ${review.reviewType}`);
+    return { decision, dismissOnClose: true };
   } finally {
     runtime.db.close();
   }
@@ -85,10 +91,26 @@ export async function createDashboardCaseDecision(input: {
 }) {
   const runtime = createRuntime();
   try {
+    const existing = runtime.db
+      .listInterviewSkillDecisions({ status: "PENDING" })
+      .find((decision) => decision.caseId === input.caseId && decision.skillKey === input.skillKey);
+    if (existing) return { decision: existing, dismissOnClose: false };
+    let decision: InterviewSkillDecisionRow;
     if (input.skillKey === "AVAILABILITY_COLLECTION") {
-      return runtime.skills.createAvailabilityCollectionDecision(input.caseId);
+      decision = runtime.skills.createAvailabilityCollectionDecision(input.caseId);
+    } else {
+      decision = runtime.skills.createInterviewSchedulingDecision(input.caseId);
     }
-    return runtime.skills.createInterviewSchedulingDecision(input.caseId);
+    return { decision, dismissOnClose: true };
+  } finally {
+    runtime.db.close();
+  }
+}
+
+export async function dismissDashboardDecision(decisionId: string) {
+  const runtime = createRuntime();
+  try {
+    return runtime.db.discardPendingInterviewSkillDecision(decisionId);
   } finally {
     runtime.db.close();
   }
@@ -120,6 +142,20 @@ export async function resolveDashboardDecision(input: {
     }
     if (caseId && nextAction === "CREATE_INTERVIEWER_SCHEDULE_CONFIRMATION_DRAFT") {
       followUp = runtime.workflow.createScheduleConfirmationDraft(caseId);
+    }
+    if (nextAction === "PREVIEW_RECRUITMENT_INTERVIEW_TEMPLATE") {
+      const context = resolved.outcome.context;
+      const recruitmentId =
+        typeof context === "object" && context !== null && "recruitmentRef" in context
+          ? (context as { recruitmentRef?: unknown }).recruitmentRef
+          : undefined;
+      if (typeof recruitmentId !== "string" || !recruitmentId) {
+        throw new Error("채용 인터뷰 규칙을 확인할 채용 정보를 찾지 못했습니다.");
+      }
+      followUp = {
+        kind: "RECRUITMENT_TEMPLATE_PREVIEW",
+        preview: await runtime.workflow.previewRecruitmentInterviewTemplate(recruitmentId),
+      };
     }
     return { ...resolved, followUp };
   } finally {

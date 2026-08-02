@@ -1693,6 +1693,13 @@ export class BridgeDatabase {
     return row ? toInterviewSkillDecision(row) : undefined;
   }
 
+  discardPendingInterviewSkillDecision(id: string): boolean {
+    const result = this.connection
+      .prepare("DELETE FROM interview_skill_decisions WHERE id = ? AND status = 'PENDING'")
+      .run(id);
+    return Number(result.changes) === 1;
+  }
+
   listInterviewSkillDecisions(input: {
     status?: InterviewSkillDecisionStatus;
     limit?: number;
