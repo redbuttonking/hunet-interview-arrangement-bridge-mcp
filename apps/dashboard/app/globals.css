@@ -29,3 +29,12 @@
     cursor: pointer;
   }
 }
+
+[data-case-detail-panels] > :nth-child(3) > :last-child,
+[data-case-detail-panels] > :nth-child(4) > :last-child {
+  max-height: 31rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 1rem;
+  scrollbar-gutter: stable;
+}

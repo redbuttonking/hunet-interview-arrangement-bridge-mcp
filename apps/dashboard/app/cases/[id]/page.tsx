@@ -132,7 +132,7 @@ export default async function CaseDetailPage({ params }: { params: Promise<{ id:
           </CardContent>
         </Card>
 
-        <section className="mt-6 grid gap-5 lg:grid-cols-2">
+        <section className="mt-6 grid gap-5 lg:grid-cols-2" data-case-detail-panels>
           <Card>
             <CardHeader><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">INTERVIEW DETAILS</p><CardTitle className="mt-2">인터뷰 요약</CardTitle></CardHeader>
             <CardContent><dl className="grid gap-4">{[

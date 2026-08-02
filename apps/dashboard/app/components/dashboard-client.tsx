@@ -16,6 +16,7 @@ type ActionPriority = "urgent" | "normal" | "watch";
 type ActionItem = {
   id: string;
   priority: ActionPriority;
+  progressLabel: string;
   category: string;
   title: string;
   description: string;
@@ -38,8 +39,16 @@ type ActiveDecision = {
 type RecruitmentTemplatePreview = {
   kind: "RECRUITMENT_TEMPLATE_PREVIEW";
   preview: {
+    recruitmentId: string;
     recruitmentName: string;
     requiresApproval: boolean;
+    approvedTemplate: {
+      steps: Array<{
+        stepId: string;
+        mode: "STANDARD" | "COMBINED";
+        durationMinutes: number;
+      }>;
+    } | null;
     steps: Array<{
       stepId: string;
       title: string;
@@ -97,6 +106,33 @@ function stageLabel(interviewCase: CandidateCase) {
   return name;
 }
 
+function progressLabel(status: InterviewCaseStatus) {
+  const labels: Record<InterviewCaseStatus, string> = {
+    READY_FOR_DRAFT: "1. 조율 시작",
+    DRAFT_CREATED: "1. 조율 시작",
+    REQUEST_SENT: "2. 면접관 일정",
+    COLLECTING_AVAILABILITY: "2. 면접관 일정",
+    READY_TO_SCHEDULE: "3. 시간·회의실",
+    REVIEW_REQUIRED: "3. 시간·회의실",
+    AWAITING_CANDIDATE_CONFIRMATION: "4. 후보자 응답",
+    CONFIRMED: "5. 최종 확정",
+    ON_HOLD: "조율 보류",
+    CANCELLED: "조율 취소",
+    CLOSED: "조율 종료",
+  };
+  return labels[status];
+}
+
+function reviewProgressLabel(review: Review) {
+  if (review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED") {
+    return "1. 조율 시작";
+  }
+  if (review.reviewType === "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED") {
+    return "일정 예외 검토";
+  }
+  return "규칙 확인";
+}
+
 function reviewCategory(review: Review) {
   const labels: Record<string, string> = {
     INTERVIEW_ARRANGEMENT_START_REQUIRED: "조율 시작 확인",
@@ -112,6 +148,7 @@ function caseAction(interviewCase: CandidateCase): ActionItem | undefined {
   const base = {
     id: `case:${interviewCase.id}`,
     caseId: interviewCase.id,
+    progressLabel: progressLabel(interviewCase.status),
     candidateName: interviewCase.candidateName,
     recruitmentName: interviewCase.recruitmentName,
     href: `/cases/${interviewCase.id}`,
@@ -190,6 +227,7 @@ function caseAction(interviewCase: CandidateCase): ActionItem | undefined {
 }
 
 function buildActionItems(data: DashboardSnapshot): ActionItem[] {
+  const casesById = new Map(data.dashboard.cases.map((interviewCase) => [interviewCase.id, interviewCase]));
   const caseIdsWithDecision = new Set(data.decisions.map((decision) => decision.caseId).filter((caseId): caseId is string => Boolean(caseId)));
   const reviewIdsWithDecision = new Set(data.decisions.map((decision) => decision.reviewId).filter((reviewId): reviewId is string => Boolean(reviewId)));
   const caseIdsWithReview = new Set(data.reviews.map((review) => review.caseId).filter((caseId): caseId is string => Boolean(caseId)));
@@ -197,6 +235,9 @@ function buildActionItems(data: DashboardSnapshot): ActionItem[] {
   const decisionItems: ActionItem[] = data.decisions.map((decision) => ({
     id: `decision:${decision.id}`,
     priority: "urgent",
+    progressLabel: decision.caseId && casesById.get(decision.caseId)
+      ? progressLabel(casesById.get(decision.caseId)!.status)
+      : "1. 조율 시작",
     category: "선택 대기",
     title: decision.title,
     description: decision.prompt,
@@ -212,6 +253,7 @@ function buildActionItems(data: DashboardSnapshot): ActionItem[] {
     .map((review) => ({
       id: `review:${review.id}`,
       priority: supportedReviewDecisionTypes.has(review.reviewType) ? "urgent" : "normal",
+      progressLabel: reviewProgressLabel(review),
       category: reviewCategory(review),
       title: review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED"
         ? "인터뷰 조율을 시작할지 확인해 주세요."
@@ -330,11 +372,60 @@ function DecisionModal({ activeDecision, evaluationSummary, onClose, onResolve, 
   );
 }
 
-function TemplatePreviewDialog({ preview, onClose }: {
+type TemplateStepSelection = {
+  selected: boolean;
+  mode: "STANDARD" | "COMBINED";
+  durationMinutes: number;
+};
+
+function initialTemplateStepSelections(preview: RecruitmentTemplatePreview["preview"]) {
+  const savedSteps = new Map(
+    preview.approvedTemplate?.steps.map((step) => [step.stepId, step]) ?? [],
+  );
+  const hasSavedStepInPipeline = preview.steps.some((step) => savedSteps.has(step.stepId));
+
+  return Object.fromEntries(
+    preview.steps.map((step) => {
+      const saved = savedSteps.get(step.stepId);
+      return [step.stepId, {
+        selected: hasSavedStepInPipeline ? Boolean(saved) : step.suggestedAsInterview,
+        mode: saved?.mode ?? step.suggestedMode ?? "STANDARD",
+        durationMinutes: saved?.durationMinutes ?? step.defaultDurationMinutes,
+      } satisfies TemplateStepSelection];
+    }),
+  ) as Record<string, TemplateStepSelection>;
+}
+
+function TemplatePreviewDialog({ preview, onClose, onSave, loading, error }: {
   preview: RecruitmentTemplatePreview["preview"];
   onClose: () => void;
+  onSave: (steps: Array<{ stepId: string; mode: "STANDARD" | "COMBINED"; durationMinutes: number }>) => void;
+  loading: boolean;
+  error: string | null;
 }) {
   const suggestedSteps = preview.steps.filter((step) => step.suggestedAsInterview);
+  const [selections, setSelections] = useState<Record<string, TemplateStepSelection>>(() => initialTemplateStepSelections(preview));
+
+  useEffect(() => {
+    setSelections(initialTemplateStepSelections(preview));
+  }, [preview]);
+
+  const selectedSteps = preview.steps.flatMap((step) => {
+    const selection = selections[step.stepId];
+    if (!selection?.selected) return [];
+    return [{
+      stepId: step.stepId,
+      mode: selection.mode,
+      durationMinutes: selection.mode === "COMBINED" ? 60 : selection.durationMinutes,
+    }];
+  });
+
+  const updateSelection = (stepId: string, update: Partial<TemplateStepSelection>) => {
+    setSelections((current) => ({
+      ...current,
+      [stepId]: { ...current[stepId]!, ...update },
+    }));
+  };
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
@@ -350,16 +441,49 @@ function TemplatePreviewDialog({ preview, onClose }: {
             : "현재 저장된 인터뷰 규칙이 최신 칸반과 일치합니다."}
         </div>
         <div className="grid gap-3">
-          {preview.steps.map((step) => (
-            <div className="flex flex-col gap-2 rounded-xl border border-slate-200 p-4 sm:flex-row sm:items-center sm:justify-between" key={step.stepId}>
+          {preview.steps.map((step) => {
+            const selection = selections[step.stepId]!;
+            return (
+            <div className={`flex flex-col gap-3 rounded-xl border p-4 transition-colors sm:flex-row sm:items-start sm:justify-between ${selection.selected ? "border-blue-200 bg-blue-50/40" : "border-slate-200 bg-white"}`} key={step.stepId}>
+              <label className="flex cursor-pointer items-center gap-2 text-sm font-semibold text-slate-700 sm:pt-1">
+                <input checked={selection.selected} className="size-4 accent-blue-600" onChange={(event) => updateSelection(step.stepId, { selected: event.target.checked })} type="checkbox" />
+                인터뷰 단계
+              </label>
               <div><p className="text-base font-semibold text-slate-950">{step.order}. {step.name}</p><p className="mt-1 text-sm text-slate-600">{step.title}</p></div>
               {step.suggestedAsInterview ? <Badge variant="default">추천 · {step.suggestedMode === "COMBINED" ? "통합" : "개별"} · {step.defaultDurationMinutes}분</Badge> : <Badge variant="secondary">인터뷰 단계 아님</Badge>}
             </div>
-          ))}
+            );
+          })}
+        </div>
+        <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-4">
+          <p className="text-base font-semibold text-slate-950">선택한 인터뷰 단계 설정</p>
+          <p className="mt-1 text-sm leading-6 text-slate-600">개별 인터뷰는 시간을 조정할 수 있고, 통합 인터뷰는 60분으로 고정됩니다.</p>
+          {selectedSteps.length > 0 ? <div className="mt-4 grid gap-3">
+            {selectedSteps.map((step) => {
+              const pipelineStep = preview.steps.find((item) => item.stepId === step.stepId)!;
+              const selection = selections[step.stepId]!;
+              return <div className="grid gap-3 rounded-lg border border-slate-200 bg-white p-3 sm:grid-cols-[minmax(0,1fr)_180px_160px] sm:items-end" key={step.stepId}>
+                <p className="pb-2 text-sm font-semibold text-slate-900">{pipelineStep.order}. {pipelineStep.name}</p>
+                <label className="grid gap-1.5 text-sm font-medium text-slate-700">진행 방식
+                  <select className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-900 outline-none transition-colors focus:border-blue-500 focus:ring-2 focus:ring-blue-100" onChange={(event) => updateSelection(step.stepId, { mode: event.target.value as "STANDARD" | "COMBINED", durationMinutes: event.target.value === "COMBINED" ? 60 : selection.durationMinutes })} value={selection.mode}>
+                    <option value="STANDARD">개별 인터뷰</option>
+                    <option value="COMBINED">통합 인터뷰</option>
+                  </select>
+                </label>
+                <label className="grid gap-1.5 text-sm font-medium text-slate-700">소요 시간
+                  <div className="relative"><input className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 pr-10 text-sm font-medium text-slate-900 outline-none transition-colors focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-100 disabled:text-slate-500" disabled={selection.mode === "COMBINED"} min="15" onChange={(event) => updateSelection(step.stepId, { durationMinutes: Number(event.target.value) || 0 })} step="15" type="number" value={selection.mode === "COMBINED" ? 60 : selection.durationMinutes} /><span className="pointer-events-none absolute right-3 top-2.5 text-sm text-slate-500">분</span></div>
+                </label>
+              </div>;
+            })}
+          </div> : <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm leading-6 text-amber-900">인터뷰 조율에 사용할 단계를 하나 이상 선택해 주세요.</p>}
         </div>
         {suggestedSteps.length === 0 ? <p className="rounded-lg bg-slate-50 px-3 py-2 text-sm leading-6 text-slate-600">자동으로 식별된 인터뷰 단계가 없습니다. 이 채용은 개별 규칙 설정이 필요합니다.</p> : null}
+        {error ? <p className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm leading-6 text-rose-800">{error}</p> : null}
         <DialogFooter>
-          <Button onClick={onClose}>확인</Button>
+          <Button disabled={loading} onClick={onClose} variant="outline">취소</Button>
+          <Button disabled={loading || selectedSteps.length === 0 || selectedSteps.some((step) => step.durationMinutes < 15)} onClick={() => onSave(selectedSteps)}>
+            {loading ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}인터뷰 규칙 저장
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -384,6 +508,7 @@ function ActionRow({ item, onCreateReviewDecision, onCreateCaseDecision, onOpenD
         <div className="flex flex-wrap items-center gap-2">
           <span className={`size-2 rounded-full ${priority.dot}`} />
           <Badge variant={priority.badge}>{priority.label}</Badge>
+          <Badge className="border-blue-200 bg-blue-50 text-blue-700" variant="outline">진행 {item.progressLabel}</Badge>
           <span className="text-sm text-slate-500">{item.category}</span>
           {item.meta ? <span className="text-sm text-slate-500">· {item.meta}</span> : null}
         </div>
@@ -435,7 +560,7 @@ function HeldWorkCard({ work, loading, onResume }: {
 export function DashboardClient({ initialData }: { initialData: DashboardSnapshot }) {
   const [data, setData] = useState(initialData);
   const [activeDecision, setActiveDecision] = useState<ActiveDecision | null>(null);
-  const [templatePreview, setTemplatePreview] = useState<RecruitmentTemplatePreview["preview"] | null>(null);
+  const [templatePreview, setTemplatePreview] = useState<{ preview: RecruitmentTemplatePreview["preview"]; reviewId: string | null } | null>(null);
   const [loadingId, setLoadingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -516,13 +641,47 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
         && "preview" in result.followUp
       ) {
         setActiveDecision(null);
-        setTemplatePreview((result.followUp as RecruitmentTemplatePreview).preview);
+        setTemplatePreview({
+          preview: (result.followUp as RecruitmentTemplatePreview).preview,
+          reviewId: decision.reviewId,
+        });
       } else {
         setActiveDecision(null);
       }
       await refresh();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "결정문을 처리하지 못했습니다.");
+    } finally {
+      setLoadingId(null);
+    }
+  };
+
+  const saveRecruitmentTemplate = async (
+    steps: Array<{ stepId: string; mode: "STANDARD" | "COMBINED"; durationMinutes: number }>,
+  ) => {
+    if (!templatePreview) return;
+    const loadingKey = `template:${templatePreview.preview.recruitmentId}`;
+    setLoadingId(loadingKey);
+    setError(null);
+    try {
+      const response = await fetch("/api/recruitment-templates", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          recruitmentId: templatePreview.preview.recruitmentId,
+          reviewId: templatePreview.reviewId,
+          steps,
+        }),
+      });
+      const result = await response.json() as { decision?: Decision; error?: string };
+      if (!response.ok) throw new Error(result.error ?? "인터뷰 규칙을 저장하지 못했습니다.");
+      setTemplatePreview(null);
+      if (result.decision) {
+        setActiveDecision({ decision: result.decision, dismissOnClose: false });
+      }
+      await refresh();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "인터뷰 규칙을 저장하지 못했습니다.");
     } finally {
       setLoadingId(null);
     }
@@ -639,7 +798,13 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
       </main>
 
       {activeDecision ? <DecisionModal activeDecision={activeDecision} evaluationSummary={activeReview?.evaluationSummary} loading={loadingId === activeDecision.decision.id} onClose={() => void closeDecision()} onResolve={resolveDecision} /> : null}
-      {templatePreview ? <TemplatePreviewDialog preview={templatePreview} onClose={() => setTemplatePreview(null)} /> : null}
+      {templatePreview ? <TemplatePreviewDialog
+        error={error}
+        loading={loadingId === `template:${templatePreview.preview.recruitmentId}`}
+        onClose={() => setTemplatePreview(null)}
+        onSave={(steps) => void saveRecruitmentTemplate(steps)}
+        preview={templatePreview.preview}
+      /> : null}
     </div>
   );
 }

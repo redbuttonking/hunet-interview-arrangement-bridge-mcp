@@ -207,6 +207,51 @@ export async function resolveDashboardDecision(input: {
   }
 }
 
+export async function approveDashboardRecruitmentInterviewTemplate(input: {
+  recruitmentId: string;
+  reviewId?: string | null;
+  steps: Array<{
+    stepId: string;
+    mode: "STANDARD" | "COMBINED";
+    durationMinutes: number;
+  }>;
+}) {
+  const runtime = createRuntime();
+  try {
+    const template = await runtime.workflow.approveRecruitmentInterviewTemplate({
+      recruitmentId: input.recruitmentId,
+      steps: input.steps,
+    });
+    const review = input.reviewId
+      ? runtime.db.getReview(input.reviewId)
+      : undefined;
+
+    if (!review || review.status !== "OPEN") {
+      return { template };
+    }
+
+    if (review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED") {
+      return {
+        template,
+        decision: runtime.skills.createCandidateTriageDecision(review.id),
+      };
+    }
+
+    if (
+      [
+        "RECRUITMENT_TEMPLATE_UPDATE_REQUIRED",
+        "RECRUITMENT_TEMPLATE_CHECK_REQUIRED",
+      ].includes(review.reviewType)
+    ) {
+      runtime.db.resolveReview(review.id, "RECRUITMENT_TEMPLATE_APPROVED");
+    }
+
+    return { template };
+  } finally {
+    runtime.db.close();
+  }
+}
+
 export async function approveDashboardDraft(draftId: string) {
   const runtime = createRuntime();
   try {
