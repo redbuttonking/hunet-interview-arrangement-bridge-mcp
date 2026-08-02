@@ -33,6 +33,26 @@ describe("dashboard service", () => {
           candidateName: "대시보드 테스트",
           recruitmentName: "인터뷰 어레인지 테스트 채용",
         },
+        evaluation: {
+          applicantProgressId: "AP1",
+          recruitmentId: "R1",
+          currentStep: { stepId: "S1", name: "서류 평가", order: 1 },
+          scoreSheets: [{
+            scoreSheetId: "SS1",
+            title: "서류전형 평가표",
+            completedAt: "2026-08-02T09:00:00.000Z",
+            participants: ["대시보드 테스트"],
+            evaluators: [{
+              name: "평가자",
+              comment: "인터뷰를 추천합니다.",
+              items: [{
+                title: "최종 의견",
+                finalEvaluation: true,
+                selectedOptions: [{ title: "합격", score: 5 }],
+              }],
+            }],
+          }],
+        },
       },
     });
     db.createOrGetPendingInterviewSkillDecision({
@@ -76,7 +96,17 @@ describe("dashboard service", () => {
       }),
     ]);
     expect(snapshot.reviews).toEqual([
-      expect.objectContaining({ id: reviewId, candidateName: "대시보드 테스트" }),
+      expect.objectContaining({
+        id: reviewId,
+        candidateName: "대시보드 테스트",
+        evaluationSummary: expect.objectContaining({
+          currentStep: { name: "서류 평가", order: 1 },
+          scoreSheets: [expect.objectContaining({
+            title: "서류전형 평가표",
+            evaluators: [expect.objectContaining({ name: "평가자" })],
+          })],
+        }),
+      }),
     ]);
     expect(snapshot.decisions).toEqual([
       expect.objectContaining({ candidateName: "대시보드 테스트" }),

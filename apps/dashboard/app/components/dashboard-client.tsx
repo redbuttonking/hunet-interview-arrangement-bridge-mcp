@@ -9,7 +9,7 @@ import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog";
-import type { CandidateCase, DashboardSnapshot, Decision, InterviewCaseStatus, Review } from "../lib/dashboard-types";
+import type { CandidateCase, DashboardSnapshot, Decision, EvaluationSummary, InterviewCaseStatus, Review } from "../lib/dashboard-types";
 
 type ActionPriority = "urgent" | "normal" | "watch";
 
@@ -68,6 +68,18 @@ function formatDate(value: string | null | undefined) {
 
 function formatGeneratedAt(value: string) {
   return new Intl.DateTimeFormat("ko-KR", { hour: "2-digit", minute: "2-digit" }).format(new Date(value));
+}
+
+function formatDateTime(value: string | undefined) {
+  if (!value) return "완료 시각 미확인";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat("ko-KR", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
 }
 
 function formatSchedule(interviewCase: CandidateCase) {
@@ -237,8 +249,46 @@ function priorityStyle(priority: ActionPriority) {
   return { dot: "bg-blue-500", badge: "default" as const, label: "검토 대기" };
 }
 
-function DecisionModal({ activeDecision, onClose, onResolve, loading }: {
+function EvaluationSummaryPanel({ evaluation }: { evaluation: EvaluationSummary | null | undefined }) {
+  if (!evaluation) {
+    return <p className="rounded-lg bg-slate-50 px-3 py-2 text-sm leading-6 text-slate-600">저장된 완료 평가표 요약이 없습니다. 나인하이어 동기화 상태를 확인해 주세요.</p>;
+  }
+
+  return (
+    <section aria-label="나인하이어 평가표 요약" className="rounded-xl border border-slate-200 bg-slate-50/70 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div><p className="text-sm font-semibold text-slate-950">나인하이어 평가표 요약</p><p className="mt-1 text-sm text-slate-600">완료된 평가표 {evaluation.scoreSheets.length}건을 기준으로 표시합니다.</p></div>
+        {evaluation.currentStep ? <Badge variant="secondary">현재 {evaluation.currentStep.name}</Badge> : null}
+      </div>
+      <div className="mt-4 grid max-h-96 gap-3 overflow-y-auto pr-1">
+        {evaluation.scoreSheets.map((scoreSheet, scoreSheetIndex) => (
+          <article className="rounded-lg border border-slate-200 bg-white p-4" key={`${scoreSheet.title}-${scoreSheetIndex}`}>
+            <div className="flex flex-wrap items-start justify-between gap-2"><div><p className="text-base font-semibold text-slate-950">{scoreSheet.title}</p><p className="mt-1 text-sm text-slate-600">{scoreSheet.evaluationMethod ?? "평가 방식 미확인"} · {formatDateTime(scoreSheet.completedAt)}</p></div><Badge variant="outline">평가자 {scoreSheet.evaluators.length}명</Badge></div>
+            <div className="mt-4 grid gap-3">
+              {scoreSheet.evaluators.map((evaluator, evaluatorIndex) => (
+                <div className="rounded-lg bg-slate-50 p-3" key={`${scoreSheet.title}-${evaluator.name}-${evaluatorIndex}`}>
+                  <p className="text-sm font-semibold text-slate-900">{evaluator.name}<span className="ml-2 font-normal text-slate-500">{formatDateTime(evaluator.submittedAt)}</span></p>
+                  {evaluator.items.length > 0 ? <div className="mt-3 grid gap-2">{evaluator.items.map((item, itemIndex) => (
+                    <div className="text-sm leading-6 text-slate-700" key={`${evaluator.name}-${item.title}-${itemIndex}`}>
+                      <div className="flex flex-wrap items-center gap-2"><strong>{item.title}</strong>{item.finalEvaluation ? <Badge variant="warning">최종 판단</Badge> : null}</div>
+                      <p className="mt-1">{item.selectedOptions.length > 0 ? item.selectedOptions.map((option) => `${option.title}${option.score !== undefined ? ` (${option.score}점)` : ""}`).join(", ") : "선택 결과 없음"}</p>
+                      {item.comment ? <p className="mt-1 rounded bg-white px-2 py-1 text-slate-600">{item.comment}</p> : null}
+                    </div>
+                  ))}</div> : <p className="mt-2 text-sm text-slate-600">세부 평가 항목이 없습니다.</p>}
+                  {evaluator.comment ? <p className="mt-3 border-t border-slate-200 pt-3 text-sm leading-6 text-slate-700">평가 의견. {evaluator.comment}</p> : null}
+                </div>
+              ))}
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function DecisionModal({ activeDecision, evaluationSummary, onClose, onResolve, loading }: {
   activeDecision: ActiveDecision;
+  evaluationSummary?: EvaluationSummary | null;
   onClose: () => void;
   onResolve: (optionId: string) => void;
   loading: boolean;
@@ -259,6 +309,7 @@ function DecisionModal({ activeDecision, onClose, onResolve, loading }: {
           <DialogDescription>{decision.candidateName ?? "후보자"} · {decision.recruitmentName ?? "채용 정보 확인 필요"}</DialogDescription>
         </DialogHeader>
         <p className="text-base leading-7 text-slate-700">{decision.prompt}</p>
+        {decision.decisionType === "START_INTERVIEW_ARRANGEMENT" || decision.decisionType === "SELECT_INTERVIEW_ROUTE" || decision.decisionType === "REVIEW_RECRUITMENT_TEMPLATE" ? <EvaluationSummaryPanel evaluation={evaluationSummary} /> : null}
         <p className="rounded-lg bg-slate-50 px-3 py-2 text-sm leading-6 text-slate-600">`선택 적용`을 누르기 전에는 인터뷰 상태나 외부 시스템이 변경되지 않습니다.</p>
         <div className="grid gap-3">
           {decision.options.map((option) => (
@@ -479,6 +530,9 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
     { label: "시간·회의실", statuses: ["READY_TO_SCHEDULE", "REVIEW_REQUIRED"] },
     { label: "후보자 응답", statuses: ["AWAITING_CANDIDATE_CONFIRMATION"] },
   ].map((item) => ({ ...item, count: item.statuses.reduce((total, status) => total + summary.caseCountsByStatus[status as InterviewCaseStatus], 0) }));
+  const activeReview = activeDecision
+    ? data.reviews.find((review) => review.id === activeDecision.decision.reviewId)
+    : undefined;
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -533,7 +587,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
         </section>
       </main>
 
-      {activeDecision ? <DecisionModal activeDecision={activeDecision} loading={loadingId === activeDecision.decision.id} onClose={() => void closeDecision()} onResolve={resolveDecision} /> : null}
+      {activeDecision ? <DecisionModal activeDecision={activeDecision} evaluationSummary={activeReview?.evaluationSummary} loading={loadingId === activeDecision.decision.id} onClose={() => void closeDecision()} onResolve={resolveDecision} /> : null}
       {templatePreview ? <TemplatePreviewDialog preview={templatePreview} onClose={() => setTemplatePreview(null)} /> : null}
     </div>
   );

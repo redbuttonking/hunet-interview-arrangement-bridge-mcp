@@ -43,7 +43,28 @@ export type Review = {
   candidateName: string | null;
   recruitmentName: string | null;
   currentStepName: string | null;
+  evaluationSummary: EvaluationSummary | null;
   createdAt: string;
+};
+
+export type EvaluationSummary = {
+  scoreSheets: Array<{
+    title: string;
+    evaluationMethod?: string;
+    completedAt?: string;
+    evaluators: Array<{
+      name: string;
+      submittedAt?: string;
+      comment?: string;
+      items: Array<{
+        title: string;
+        finalEvaluation: boolean;
+        selectedOptions: Array<{ title: string; score?: number }>;
+        comment?: string;
+      }>;
+    }>;
+  }>;
+  currentStep?: { name: string; order?: number };
 };
 
 export type Decision = {
