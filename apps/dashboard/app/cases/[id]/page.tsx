@@ -7,6 +7,7 @@ import { AppHeader, PageHeader } from "../../components/app-shell";
 import { DraftApprovalCard } from "../../components/draft-approval-card";
 import { Badge } from "../../components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../../components/ui/card";
+import { activityActorLabel, activityEventLabel } from "../../lib/activity-labels";
 import { loadCaseDetail } from "../../lib/data";
 
 export const dynamic = "force-dynamic";
@@ -146,7 +147,7 @@ export default async function CaseDetailPage({ params }: { params: Promise<{ id:
 
           <Card>
             <CardHeader><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">ACTIVITY LOG</p><CardTitle className="mt-2">업무 이력</CardTitle></CardHeader>
-            <CardContent>{events.length > 0 ? <ol className="divide-y divide-slate-200">{events.map((event) => <li className="grid grid-cols-[minmax(0,1fr)_auto] gap-4 py-4 first:pt-0 last:pb-0" key={event.id}><div><p className="text-base font-semibold">{event.eventType}</p><p className="mt-1 text-sm text-slate-600">{formatDateTime(event.createdAt)}</p></div><span className="text-sm text-slate-500">{event.actor}</span></li>)}</ol> : <p className="text-base text-slate-600">기록된 업무 이력이 없습니다.</p>}</CardContent>
+            <CardContent>{events.length > 0 ? <ol className="divide-y divide-slate-200">{events.map((event) => <li className="grid grid-cols-[minmax(0,1fr)_auto] gap-4 py-4 first:pt-0 last:pb-0" key={event.id}><div><p className="text-base font-semibold text-slate-950">{activityEventLabel(event.eventType)}</p><p className="mt-1 text-sm text-slate-500">{event.eventType} · {formatDateTime(event.createdAt)}</p></div><span className="text-sm text-slate-500">{activityActorLabel(event.actor)}</span></li>)}</ol> : <p className="text-base text-slate-600">기록된 업무 이력이 없습니다.</p>}</CardContent>
           </Card>
         </section>
       </main>
