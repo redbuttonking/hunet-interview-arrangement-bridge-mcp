@@ -48,11 +48,13 @@ export type Review = {
 
 export type Decision = {
   id: string;
+  skillKey: string;
   reviewId: string | null;
   caseId: string | null;
   decisionType: string;
   title: string;
   prompt: string;
+  selectionMode: "SINGLE" | "MULTIPLE";
   options: Array<{ id: string; label: string; description: string }>;
   candidateName: string | null;
   recruitmentName: string | null;

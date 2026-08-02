@@ -1,6 +1,6 @@
 // 검토 건을 사용자 선택용 결정으로 바꾸는 로컬 API를 제공한다.
 import { NextResponse } from "next/server";
-import { createDashboardTriageDecision } from "../../../../../../../dist/src/dashboard/runtime.js";
+import { createDashboardReviewDecision } from "../../../../../../../dist/src/dashboard/runtime.js";
 
 export const runtime = "nodejs";
 
@@ -10,7 +10,7 @@ export async function POST(
 ) {
   try {
     const { id } = await context.params;
-    const decision = await createDashboardTriageDecision(id);
+    const decision = await createDashboardReviewDecision(id);
     return NextResponse.json({ decision });
   } catch (error) {
     return NextResponse.json(

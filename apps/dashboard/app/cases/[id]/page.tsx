@@ -2,8 +2,9 @@
 
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ArrowLeft, CalendarClock, CheckCircle2, ClipboardList, MessageSquareText, UsersRound } from "lucide-react";
+import { ArrowLeft, CheckCircle2 } from "lucide-react";
 import { AppHeader, PageHeader } from "../../components/app-shell";
+import { DraftApprovalCard } from "../../components/draft-approval-card";
 import { Badge } from "../../components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../../components/ui/card";
 import { loadCaseDetail } from "../../lib/data";
@@ -138,7 +139,7 @@ export default async function CaseDetailPage({ params }: { params: Promise<{ id:
 
           <Card>
             <CardHeader><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">SLACK MESSAGES</p><CardTitle className="mt-2">안내 메시지 상태</CardTitle></CardHeader>
-            <CardContent>{bundle.drafts.length > 0 ? <div className="divide-y divide-slate-200">{bundle.drafts.map((draft) => <div className="flex items-center justify-between gap-4 py-4 first:pt-0 last:pb-0" key={draft.id}><div><p className="text-base font-semibold">{draft.messageType}</p><p className="mt-1 text-sm text-slate-600">{formatDateTime(draft.createdAt)}</p></div><Badge variant="secondary">{draft.status}</Badge></div>)}</div> : <p className="text-base text-slate-600">생성된 Slack 초안이 없습니다.</p>}</CardContent>
+            <CardContent>{bundle.drafts.length > 0 ? <DraftApprovalCard drafts={bundle.drafts.map((draft) => ({ id: draft.id, messageType: draft.messageType, status: draft.status, previewText: draft.previewText, createdAt: draft.createdAt }))} /> : <p className="text-base text-slate-600">생성된 Slack 초안이 없습니다.</p>}</CardContent>
           </Card>
 
           <Card>

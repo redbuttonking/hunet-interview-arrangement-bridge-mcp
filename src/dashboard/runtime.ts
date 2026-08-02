@@ -47,13 +47,48 @@ function createRuntime() {
     slackClient,
   );
   const skills = new InterviewArrangementSkills(db, workflow, readiness);
-  return { db, skills };
+  return { db, skills, workflow, slackClient };
+}
+
+export async function createDashboardReviewDecision(reviewId: string) {
+  const runtime = createRuntime();
+  try {
+    const review = runtime.db.getReview(reviewId);
+    if (!review || review.status !== "OPEN") {
+      throw new Error(`Open review not found: ${reviewId}`);
+    }
+    if (
+      [
+        "INTERVIEW_ARRANGEMENT_START_REQUIRED",
+        "RECRUITMENT_TEMPLATE_UPDATE_REQUIRED",
+        "RECRUITMENT_TEMPLATE_CHECK_REQUIRED",
+      ].includes(review.reviewType)
+    ) {
+      return runtime.skills.createCandidateTriageDecision(reviewId);
+    }
+    if (review.reviewType === "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED") {
+      return runtime.skills.createCandidateScheduleResponseDecision(reviewId);
+    }
+    throw new Error(`Dashboard decision is not available for review type: ${review.reviewType}`);
+  } finally {
+    runtime.db.close();
+  }
 }
 
 export async function createDashboardTriageDecision(reviewId: string) {
+  return createDashboardReviewDecision(reviewId);
+}
+
+export async function createDashboardCaseDecision(input: {
+  caseId: string;
+  skillKey: "AVAILABILITY_COLLECTION" | "INTERVIEW_SCHEDULING";
+}) {
   const runtime = createRuntime();
   try {
-    return runtime.skills.createCandidateTriageDecision(reviewId);
+    if (input.skillKey === "AVAILABILITY_COLLECTION") {
+      return runtime.skills.createAvailabilityCollectionDecision(input.caseId);
+    }
+    return runtime.skills.createInterviewSchedulingDecision(input.caseId);
   } finally {
     runtime.db.close();
   }
@@ -66,7 +101,53 @@ export async function resolveDashboardDecision(input: {
 }) {
   const runtime = createRuntime();
   try {
-    return await runtime.skills.resolveDecision(input);
+    const resolved = await runtime.skills.resolveDecision(input);
+    const caseId = resolved.decision.caseId;
+    const nextAction = resolved.outcome.nextAction;
+    let followUp: unknown;
+    if (
+      caseId
+      && resolved.decision.decisionType === "SYNC_INTERVIEWERS"
+      && input.optionId === "SYNC_INTERVIEWERS"
+    ) {
+      followUp = runtime.skills.createAvailabilityCollectionDecision(caseId);
+    }
+    if (caseId && nextAction === "CREATE_AVAILABILITY_COLLECTION_DECISION") {
+      followUp = runtime.skills.createAvailabilityCollectionDecision(caseId);
+    }
+    if (caseId && nextAction === "CREATE_INTERVIEW_SCHEDULING_DECISION") {
+      followUp = runtime.skills.createInterviewSchedulingDecision(caseId);
+    }
+    if (caseId && nextAction === "CREATE_INTERVIEWER_SCHEDULE_CONFIRMATION_DRAFT") {
+      followUp = runtime.workflow.createScheduleConfirmationDraft(caseId);
+    }
+    return { ...resolved, followUp };
+  } finally {
+    runtime.db.close();
+  }
+}
+
+export async function approveDashboardDraft(draftId: string) {
+  const runtime = createRuntime();
+  try {
+    if (!runtime.slackClient) {
+      throw new Error("Slack 봇 토큰이 설정되지 않아 메시지를 발송할 수 없습니다.");
+    }
+    const draft = runtime.db.getDraft(draftId);
+    if (!draft) throw new Error(`Draft not found: ${draftId}`);
+    if (draft.messageType === "INTERVIEWER_REQUEST") {
+      return runtime.workflow.approveAndSendInterviewerRequest(draftId, runtime.slackClient);
+    }
+    if (draft.messageType === "SCHEDULE_CONFIRMATION") {
+      return runtime.workflow.approveAndSendScheduleConfirmation(draftId, runtime.slackClient);
+    }
+    if (draft.messageType === "AVAILABILITY_RECOVERY") {
+      return runtime.workflow.approveAndSendAvailabilityRecovery(draftId, runtime.slackClient);
+    }
+    if (["SCHEDULE_CHANGE", "SCHEDULE_CANCELLATION"].includes(draft.messageType)) {
+      return runtime.workflow.approveAndSendScheduleUpdate(draftId, runtime.slackClient);
+    }
+    throw new Error(`Dashboard sending is not available for draft type: ${draft.messageType}`);
   } finally {
     runtime.db.close();
   }

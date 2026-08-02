@@ -26,9 +26,16 @@ type ActionItem = {
   href: string | null;
   decision?: Decision;
   review?: Review;
+  caseId?: string;
+  caseSkillKey?: "AVAILABILITY_COLLECTION" | "INTERVIEW_SCHEDULING";
 };
 
-const actionableReviewType = "INTERVIEW_ARRANGEMENT_START_REQUIRED";
+const supportedReviewDecisionTypes = new Set([
+  "INTERVIEW_ARRANGEMENT_START_REQUIRED",
+  "RECRUITMENT_TEMPLATE_UPDATE_REQUIRED",
+  "RECRUITMENT_TEMPLATE_CHECK_REQUIRED",
+  "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED",
+]);
 
 function formatDate(value: string | null | undefined) {
   if (!value) return "일정 미정";
@@ -59,6 +66,8 @@ function stageLabel(interviewCase: CandidateCase) {
 function reviewCategory(review: Review) {
   const labels: Record<string, string> = {
     INTERVIEW_ARRANGEMENT_START_REQUIRED: "조율 시작 확인",
+    RECRUITMENT_TEMPLATE_UPDATE_REQUIRED: "인터뷰 규칙 확인",
+    RECRUITMENT_TEMPLATE_CHECK_REQUIRED: "인터뷰 규칙 확인",
     CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED: "후보자 응답 확인",
     WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED: "가용시간 복구 확인",
   };
@@ -68,11 +77,36 @@ function reviewCategory(review: Review) {
 function caseAction(interviewCase: CandidateCase): ActionItem | undefined {
   const base = {
     id: `case:${interviewCase.id}`,
+    caseId: interviewCase.id,
     candidateName: interviewCase.candidateName,
     recruitmentName: interviewCase.recruitmentName,
     href: `/cases/${interviewCase.id}`,
   };
 
+  if (interviewCase.status === "READY_FOR_DRAFT") {
+    return {
+      ...base,
+      priority: "urgent",
+      category: "면접관 일정 준비",
+      title: "면접관 가능 일정 요청을 준비해 주세요.",
+      description: stageLabel(interviewCase),
+      meta: "초안 검토와 Slack 발송 승인은 다음 단계에서 진행합니다.",
+      actionLabel: "일정 요청 준비",
+      caseSkillKey: "AVAILABILITY_COLLECTION",
+    };
+  }
+  if (["REQUEST_SENT", "COLLECTING_AVAILABILITY"].includes(interviewCase.status)) {
+    return {
+      ...base,
+      priority: "normal",
+      category: "면접관 일정 수집",
+      title: "면접관 가능 일정 제출 상태를 확인해 주세요.",
+      description: `${stageLabel(interviewCase)} · 제출 ${interviewCase.interviewerResponses.submitted}/${interviewCase.interviewerResponses.required}`,
+      meta: interviewCase.interviewerResponses.pending > 0 ? `미제출 ${interviewCase.interviewerResponses.pending}명` : "모든 필수 면접관이 제출했습니다.",
+      actionLabel: "제출 상태 확인",
+      caseSkillKey: "AVAILABILITY_COLLECTION",
+    };
+  }
   if (interviewCase.status === "READY_TO_SCHEDULE") {
     return {
       ...base,
@@ -82,6 +116,7 @@ function caseAction(interviewCase: CandidateCase): ActionItem | undefined {
       description: `${stageLabel(interviewCase)} · 면접관 응답 ${interviewCase.interviewerResponses.submitted}/${interviewCase.interviewerResponses.required}`,
       meta: "추천 결과를 확인해 주세요.",
       actionLabel: "일정 검토",
+      caseSkillKey: "INTERVIEW_SCHEDULING",
     };
   }
   if (interviewCase.status === "DRAFT_CREATED") {
@@ -93,6 +128,17 @@ function caseAction(interviewCase: CandidateCase): ActionItem | undefined {
       description: stageLabel(interviewCase),
       meta: "승인 전에는 Slack으로 발송되지 않습니다.",
       actionLabel: "초안 확인",
+    };
+  }
+  if (interviewCase.status === "AWAITING_CANDIDATE_CONFIRMATION") {
+    return {
+      ...base,
+      priority: "normal",
+      category: "후보자 응답 대기",
+      title: "내부 확정된 인터뷰 일정의 후보자 응답을 기다리고 있습니다.",
+      description: formatSchedule(interviewCase),
+      meta: "후보자에게 보내는 나인하이어 일정 제안은 직접 처리합니다.",
+      actionLabel: "일정 확인",
     };
   }
   if (interviewCase.status === "REVIEW_REQUIRED") {
@@ -131,16 +177,20 @@ function buildActionItems(data: DashboardSnapshot): ActionItem[] {
     .filter((review) => !reviewIdsWithDecision.has(review.id))
     .map((review) => ({
       id: `review:${review.id}`,
-      priority: review.reviewType === actionableReviewType ? "urgent" : "normal",
+      priority: supportedReviewDecisionTypes.has(review.reviewType) ? "urgent" : "normal",
       category: reviewCategory(review),
-      title: review.reviewType === actionableReviewType ? "인터뷰 조율을 시작할지 확인해 주세요." : review.reason,
-      description: review.reviewType === actionableReviewType
+      title: review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED"
+        ? "인터뷰 조율을 시작할지 확인해 주세요."
+        : review.reviewType === "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED"
+          ? "후보자 응답에 대한 처리 방법을 선택해 주세요."
+          : review.reason,
+      description: review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED"
         ? `${review.currentStepName ?? "평가 완료"} · ${review.reason}`
         : review.currentStepName ?? "상세 내용을 확인해 주세요.",
       candidateName: review.candidateName,
       recruitmentName: review.recruitmentName,
-      meta: review.reviewType === actionableReviewType ? "승인 전에는 나인하이어·Slack에 변경이 없습니다." : null,
-      actionLabel: review.reviewType === actionableReviewType ? "판단하기" : review.caseId ? "상세 보기" : null,
+      meta: review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED" ? "승인 전에는 나인하이어·Slack에 변경이 없습니다." : null,
+      actionLabel: supportedReviewDecisionTypes.has(review.reviewType) ? "선택하기" : review.caseId ? "상세 보기" : null,
       href: review.caseId ? `/cases/${review.caseId}` : null,
       review,
     }));
@@ -195,14 +245,16 @@ function DecisionModal({ decision, onClose, onResolve, loading }: {
   );
 }
 
-function ActionRow({ item, onCreateDecision, onOpenDecision, loading }: {
+function ActionRow({ item, onCreateReviewDecision, onCreateCaseDecision, onOpenDecision, loading }: {
   item: ActionItem;
-  onCreateDecision: (review: Review) => void;
+  onCreateReviewDecision: (review: Review) => void;
+  onCreateCaseDecision: (caseId: string, skillKey: "AVAILABILITY_COLLECTION" | "INTERVIEW_SCHEDULING") => void;
   onOpenDecision: (decision: Decision) => void;
   loading: boolean;
 }) {
   const directDecision = item.decision;
-  const actionableReview = item.review?.reviewType === actionableReviewType;
+  const review = item.review;
+  const actionableReview = Boolean(review && supportedReviewDecisionTypes.has(review.reviewType));
   const priority = priorityStyle(item.priority);
 
   return (
@@ -221,10 +273,13 @@ function ActionRow({ item, onCreateDecision, onOpenDecision, loading }: {
       </div>
       <div className="flex shrink-0 items-center sm:justify-end">
         {directDecision ? <Button onClick={() => onOpenDecision(directDecision)}>결정하기</Button> : null}
-        {!directDecision && actionableReview && item.review ? (
-          <Button disabled={loading} onClick={() => onCreateDecision(item.review!)}>{loading ? <Loader2 className="size-4 animate-spin" /> : null}판단하기</Button>
+        {!directDecision && actionableReview && review ? (
+          <Button disabled={loading} onClick={() => onCreateReviewDecision(review)}>{loading ? <Loader2 className="size-4 animate-spin" /> : null}{item.actionLabel}</Button>
         ) : null}
-        {!directDecision && !actionableReview && item.href && item.actionLabel ? <Button asChild variant="outline"><Link href={item.href}>{item.actionLabel}<ArrowRight className="size-4" /></Link></Button> : null}
+        {!directDecision && !actionableReview && item.caseSkillKey && item.caseId ? (
+          <Button disabled={loading} onClick={() => onCreateCaseDecision(item.caseId!, item.caseSkillKey!)}>{loading ? <Loader2 className="size-4 animate-spin" /> : null}{item.actionLabel}</Button>
+        ) : null}
+        {!directDecision && !actionableReview && !item.caseSkillKey && item.href && item.actionLabel ? <Button asChild variant="outline"><Link href={item.href}>{item.actionLabel}<ArrowRight className="size-4" /></Link></Button> : null}
       </div>
     </article>
   );
@@ -247,8 +302,8 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
     return () => window.clearInterval(interval);
   }, [refresh]);
 
-  const createDecision = async (review: Review) => {
-    setLoadingId(review.id);
+  const createReviewDecision = async (review: Review) => {
+    setLoadingId(`review:${review.id}`);
     setError(null);
     try {
       const response = await fetch(`/api/reviews/${review.id}/decision`, { method: "POST" });
@@ -258,6 +313,29 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
       await refresh();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "결정문을 만들지 못했습니다.");
+    } finally {
+      setLoadingId(null);
+    }
+  };
+
+  const createCaseDecision = async (
+    caseId: string,
+    skillKey: "AVAILABILITY_COLLECTION" | "INTERVIEW_SCHEDULING",
+  ) => {
+    setLoadingId(`case:${caseId}`);
+    setError(null);
+    try {
+      const response = await fetch(`/api/cases/${caseId}/decision`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ skillKey }),
+      });
+      const result = await response.json() as { decision?: Decision; error?: string };
+      if (!response.ok || !result.decision) throw new Error(result.error ?? "선택지를 만들지 못했습니다.");
+      setActiveDecision(result.decision);
+      await refresh();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "선택지를 만들지 못했습니다.");
     } finally {
       setLoadingId(null);
     }
@@ -273,9 +351,19 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ optionId }),
       });
-      const result = await response.json() as { error?: string };
+      const result = await response.json() as { error?: string; followUp?: unknown };
       if (!response.ok) throw new Error(result.error ?? "결정문을 처리하지 못했습니다.");
-      setActiveDecision(null);
+      if (
+        result.followUp
+        && typeof result.followUp === "object"
+        && "id" in result.followUp
+        && "options" in result.followUp
+        && Array.isArray((result.followUp as { options?: unknown }).options)
+      ) {
+        setActiveDecision(result.followUp as Decision);
+      } else {
+        setActiveDecision(null);
+      }
       await refresh();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "결정문을 처리하지 못했습니다.");
@@ -318,7 +406,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
             </CardHeader>
             {actionItems.length === 0 ? (
               <CardContent className="grid min-h-64 place-items-center p-8 text-center"><div><CheckCircle2 className="mx-auto size-8 text-emerald-600" /><p className="mt-4 text-lg font-semibold">지금 바로 처리할 업무가 없습니다.</p><p className="mt-2 text-base text-slate-600">면접관 응답과 후보자 답변을 기다리고 있습니다.</p></div></CardContent>
-            ) : <div className="divide-y divide-slate-200">{actionItems.map((item) => <ActionRow key={item.id} item={item} loading={loadingId === item.review?.id} onCreateDecision={createDecision} onOpenDecision={setActiveDecision} />)}</div>}
+            ) : <div className="divide-y divide-slate-200">{actionItems.map((item) => <ActionRow key={item.id} item={item} loading={loadingId === item.id} onCreateCaseDecision={createCaseDecision} onCreateReviewDecision={createReviewDecision} onOpenDecision={setActiveDecision} />)}</div>}
           </Card>
 
           <aside className="grid h-fit gap-6 sm:grid-cols-2 xl:grid-cols-1">
