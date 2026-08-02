@@ -44,6 +44,27 @@ function number(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+function plainText(value: unknown): string | null {
+  const source = text(value);
+  if (!source) return null;
+  return source
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/giu, "")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/giu, "")
+    .replace(/<\s*br\s*\/?\s*>/giu, "\n")
+    .replace(/<\s*li\b[^>]*>/giu, "• ")
+    .replace(/<\/\s*(?:li|p|div|ul|ol|h[1-6])\s*>/giu, "\n")
+    .replace(/<[^>]*>/gu, "")
+    .replace(/&nbsp;/giu, " ")
+    .replace(/&quot;/giu, '"')
+    .replace(/&#39;|&apos;/giu, "'")
+    .replace(/&lt;/giu, "<")
+    .replace(/&gt;/giu, ">")
+    .replace(/&amp;/giu, "&")
+    .replace(/[ \t]+\n/gu, "\n")
+    .replace(/\n{3,}/gu, "\n\n")
+    .trim() || null;
+}
+
 function evaluationSummary(value: unknown): DashboardEvaluationSummary | null {
   const evaluation = record(value);
   const applicantProgressId = text(evaluation?.applicantProgressId);
@@ -60,7 +81,7 @@ function evaluationSummary(value: unknown): DashboardEvaluationSummary | null {
       evaluators: records(scoreSheet.evaluators).map((evaluator) => ({
         name: text(evaluator.name) ?? "이름 미확인 평가자",
         ...(text(evaluator.submittedAt) ? { submittedAt: text(evaluator.submittedAt)! } : {}),
-        ...(text(evaluator.comment) ? { comment: text(evaluator.comment)! } : {}),
+        ...(plainText(evaluator.comment) ? { comment: plainText(evaluator.comment)! } : {}),
         items: records(evaluator.items).map((item) => ({
           title: text(item.title) ?? "제목 없는 평가 항목",
           finalEvaluation: item.finalEvaluation === true,
@@ -68,7 +89,7 @@ function evaluationSummary(value: unknown): DashboardEvaluationSummary | null {
             title: text(option.title) ?? "선택값 미확인",
             ...(number(option.score) !== undefined ? { score: number(option.score)! } : {}),
           })),
-          ...(text(item.comment) ? { comment: text(item.comment)! } : {}),
+          ...(plainText(item.comment) ? { comment: plainText(item.comment)! } : {}),
         })),
       })),
     }];

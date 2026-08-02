@@ -44,7 +44,7 @@ describe("dashboard service", () => {
             participants: ["대시보드 테스트"],
             evaluators: [{
               name: "평가자",
-              comment: "인터뷰를 추천합니다.",
+              comment: "<ul><li>인터뷰를 추천합니다.</li><li>후속 인터뷰도 권장합니다.</li></ul>",
               items: [{
                 title: "최종 의견",
                 finalEvaluation: true,
@@ -103,7 +103,10 @@ describe("dashboard service", () => {
           currentStep: { name: "서류 평가", order: 1 },
           scoreSheets: [expect.objectContaining({
             title: "서류전형 평가표",
-            evaluators: [expect.objectContaining({ name: "평가자" })],
+            evaluators: [expect.objectContaining({
+              name: "평가자",
+              comment: "• 인터뷰를 추천합니다.\n• 후속 인터뷰도 권장합니다.",
+            })],
           })],
         }),
       }),

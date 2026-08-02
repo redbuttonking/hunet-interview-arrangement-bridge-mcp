@@ -260,7 +260,7 @@ function EvaluationSummaryPanel({ evaluation }: { evaluation: EvaluationSummary 
         <div><p className="text-sm font-semibold text-slate-950">나인하이어 평가표 요약</p><p className="mt-1 text-sm text-slate-600">완료된 평가표 {evaluation.scoreSheets.length}건을 기준으로 표시합니다.</p></div>
         {evaluation.currentStep ? <Badge variant="secondary">현재 {evaluation.currentStep.name}</Badge> : null}
       </div>
-      <div className="mt-4 grid max-h-96 gap-3 overflow-y-auto pr-1">
+      <div className="mt-4 grid max-h-[52vh] gap-3 overflow-y-auto pr-1">
         {evaluation.scoreSheets.map((scoreSheet, scoreSheetIndex) => (
           <article className="rounded-lg border border-slate-200 bg-white p-4" key={`${scoreSheet.title}-${scoreSheetIndex}`}>
             <div className="flex flex-wrap items-start justify-between gap-2"><div><p className="text-base font-semibold text-slate-950">{scoreSheet.title}</p><p className="mt-1 text-sm text-slate-600">{scoreSheet.evaluationMethod ?? "평가 방식 미확인"} · {formatDateTime(scoreSheet.completedAt)}</p></div><Badge variant="outline">평가자 {scoreSheet.evaluators.length}명</Badge></div>
@@ -302,7 +302,7 @@ function DecisionModal({ activeDecision, evaluationSummary, onClose, onResolve, 
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent>
+      <DialogContent className="max-w-4xl max-h-[calc(100vh-2rem)] overflow-y-auto">
         <DialogHeader>
           <p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">선택 내용 확인</p>
           <DialogTitle>{decision.title}</DialogTitle>
