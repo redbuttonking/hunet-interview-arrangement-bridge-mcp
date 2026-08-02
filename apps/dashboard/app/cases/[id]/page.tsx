@@ -5,6 +5,7 @@ import { notFound } from "next/navigation";
 import { ArrowLeft, CheckCircle2 } from "lucide-react";
 import { AppHeader, PageHeader } from "../../components/app-shell";
 import { DraftApprovalCard } from "../../components/draft-approval-card";
+import { CasePlanOverrides } from "../../components/case-plan-overrides";
 import { Badge } from "../../components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../../components/ui/card";
 import { activityActorLabel, activityEventLabel } from "../../lib/activity-labels";
@@ -83,7 +84,7 @@ export default async function CaseDetailPage({ params }: { params: Promise<{ id:
   const { id } = await params;
   const data = loadCaseDetail(id);
   if (!data) notFound();
-  const { bundle, plan, events } = data;
+  const { bundle, plan, template, events } = data;
   const interviewCase = bundle.interviewCase;
   const activeInterviewers = bundle.interviewers.filter(
     (interviewer) => interviewer.active,
@@ -131,6 +132,21 @@ export default async function CaseDetailPage({ params }: { params: Promise<{ id:
             <div className="mt-8 rounded-xl border-l-4 border-blue-600 bg-blue-50/70 p-5"><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-700">NEXT ACTION</p><h2 className="mt-2 text-lg font-semibold tracking-tight text-slate-950">{action.title}</h2><p className="mt-2 text-base leading-7 text-slate-700">{action.description}</p></div>
           </CardContent>
         </Card>
+
+        <CasePlanOverrides
+          caseId={interviewCase.id}
+          editable={["READY_FOR_DRAFT", "DRAFT_CREATED"].includes(interviewCase.status)}
+          interviewers={activeInterviewers.map((interviewer) => ({
+            id: interviewer.id,
+            displayName: interviewer.displayName,
+            required: interviewer.required,
+          }))}
+          steps={(template?.steps ?? []).map((step) => ({
+            stepId: step.stepId,
+            name: step.name,
+            order: step.order,
+          }))}
+        />
 
         <section className="mt-6 grid gap-5 lg:grid-cols-2" data-case-detail-panels>
           <Card>

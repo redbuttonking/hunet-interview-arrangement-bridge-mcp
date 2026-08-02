@@ -23,6 +23,9 @@ export function loadCaseDetail(caseId: string) {
     return {
       bundle,
       plan: db.getCaseInterviewPlan(caseId) ?? null,
+      template: bundle.interviewCase.recruitmentRef
+        ? db.getRecruitmentInterviewTemplate(bundle.interviewCase.recruitmentRef) ?? null
+        : null,
       events: db.listCaseEvents(caseId, 100),
     };
   } finally {

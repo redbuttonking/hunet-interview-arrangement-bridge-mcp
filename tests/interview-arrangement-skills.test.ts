@@ -18,6 +18,7 @@ function createSkills(input: {
   createRequestDraft?: (caseId: string) => Promise<unknown>;
   recordManualConfirmedInterview?: (input: Record<string, unknown>) => unknown;
   resolveCandidateInterviewAbsenceReview?: (input: Record<string, unknown>) => unknown;
+  createAvailabilityRecoveryDraft?: (reviewId: string) => unknown;
 } = {}) {
   const workflow = {
     approveInterviewArrangement:
@@ -30,6 +31,8 @@ function createSkills(input: {
       input.recordManualConfirmedInterview ?? (() => ({ case: { id: "manual-case" } })),
     resolveCandidateInterviewAbsenceReview:
       input.resolveCandidateInterviewAbsenceReview ?? (() => ({ action: "HOLD" })),
+    createAvailabilityRecoveryDraft:
+      input.createAvailabilityRecoveryDraft ?? (() => ({ id: "recovery-draft", status: "DRAFT" })),
   } as unknown as WorkflowService;
   const readiness = {
     async inspect() {
@@ -479,6 +482,60 @@ describe("interview arrangement skills", () => {
 
     expect(actions).toEqual(["CANCEL"]);
     expect(resolved.decision.selectedOptionId).toBe("CANCEL");
+  });
+
+  it("records a candidate schedule proposal only after explicit user confirmation", async () => {
+    db = new BridgeDatabase(":memory:");
+    const interviewCase = db.createInterviewCase({
+      candidateName: "Candidate",
+      proposalDates: ["2026-08-10"],
+    });
+    db.setCaseStatus(interviewCase.id, "AWAITING_CANDIDATE_CONFIRMATION");
+    const skills = createSkills();
+
+    const decision = skills.createCandidateScheduleProposalDecision(interviewCase.id);
+    const resolved = await skills.resolveDecision({
+      decisionId: decision.id,
+      optionId: "MARK_PROPOSAL_SENT",
+    });
+
+    expect(resolved).toMatchObject({
+      decision: { status: "RESOLVED", selectedOptionId: "MARK_PROPOSAL_SENT" },
+      outcome: { nextAction: "NONE" },
+    });
+    expect(db.hasCandidateScheduleProposalSent(interviewCase.id)).toBe(true);
+  });
+
+  it("creates a recovery draft decision without sending a Slack message", async () => {
+    db = new BridgeDatabase(":memory:");
+    const interviewCase = db.createInterviewCase({
+      candidateName: "Candidate",
+      proposalDates: ["2026-08-10"],
+    });
+    const reviewId = db.createReview({
+      caseId: interviewCase.id,
+      reviewType: "WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED",
+      reason: "Worker downtime requires an availability check.",
+    });
+    const calls: string[] = [];
+    const skills = createSkills({
+      createAvailabilityRecoveryDraft(id) {
+        calls.push(id);
+        return { id: "recovery-draft", status: "DRAFT" };
+      },
+    });
+
+    const decision = skills.createAvailabilityRecoveryDecision(reviewId);
+    const resolved = await skills.resolveDecision({
+      decisionId: decision.id,
+      optionId: "CREATE_RECOVERY_DRAFT",
+    });
+
+    expect(calls).toEqual([reviewId]);
+    expect(resolved.outcome).toMatchObject({
+      draft: { id: "recovery-draft", status: "DRAFT" },
+      nextAction: "REVIEW_AND_APPROVE_AVAILABILITY_RECOVERY",
+    });
   });
 
   it("returns one operations control payload for MCP and a future dashboard", async () => {

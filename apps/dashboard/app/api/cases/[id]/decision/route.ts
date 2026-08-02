@@ -5,7 +5,11 @@ import { z } from "zod";
 import { createDashboardCaseDecision } from "../../../../../../../dist/src/dashboard/runtime.js";
 
 const bodySchema = z.object({
-  skillKey: z.enum(["AVAILABILITY_COLLECTION", "INTERVIEW_SCHEDULING"]),
+  skillKey: z.enum([
+    "AVAILABILITY_COLLECTION",
+    "INTERVIEW_SCHEDULING",
+    "CANDIDATE_SCHEDULE_PROPOSAL",
+  ]),
 });
 
 export const runtime = "nodejs";

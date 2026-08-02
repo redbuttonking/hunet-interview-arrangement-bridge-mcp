@@ -17,6 +17,7 @@ type WorkflowActions = Pick<
   | "recordManualConfirmedInterview"
   | "resolveCandidateInterviewAbsenceReview"
   | "syncCaseInterviewers"
+  | "createAvailabilityRecoveryDraft"
 >;
 
 type ReadinessActions = Pick<OperationalReadinessService, "inspect">;
@@ -466,6 +467,67 @@ export class InterviewArrangementSkills {
     });
   }
 
+  createCandidateScheduleProposalDecision(caseId: string): InterviewSkillDecisionRow {
+    const interviewCase = this.db.getCase(caseId);
+    if (!interviewCase || interviewCase.status !== "AWAITING_CANDIDATE_CONFIRMATION") {
+      throw new Error("An internally confirmed interview is required before recording a candidate proposal.");
+    }
+    if (this.db.hasCandidateScheduleProposalSent(caseId)) {
+      throw new Error("The candidate schedule proposal is already recorded as sent.");
+    }
+    return pendingDecision(this.db, {
+      skillKey: "CANDIDATE_SCHEDULE_PROPOSAL",
+      decisionType: "CANDIDATE_SCHEDULE_PROPOSAL_SENT",
+      fingerprint: `case:${caseId}:candidate-schedule-proposal`,
+      caseId,
+      title: "나인하이어 일정 제안 발송 확인",
+      prompt:
+        "나인하이어에서 후보자에게 일정 제안을 발송한 뒤에만 완료로 처리하세요. 현재 나인하이어 MCP는 이 발송 이력을 직접 조회할 수 없습니다.",
+      selectionMode: "SINGLE",
+      options: decisionOptions([
+        ["MARK_PROPOSAL_SENT", "일정 제안 발송 완료", "후보자에게 보낼 나인하이어 일정 제안이 발송되었음을 로컬 운영 이력에 기록합니다."],
+      ]),
+      context: {
+        ...caseContext(this.db, caseId),
+        scheduledDate: interviewCase.scheduledDate,
+        scheduledStartTime: interviewCase.scheduledStartTime,
+        scheduledEndTime: interviewCase.scheduledEndTime,
+        scheduledRoomName: interviewCase.scheduledRoomName,
+      },
+    });
+  }
+
+  createAvailabilityRecoveryDecision(reviewId: string): InterviewSkillDecisionRow {
+    const review = this.db.getReview(reviewId);
+    if (
+      !review ||
+      review.status !== "OPEN" ||
+      !review.caseId ||
+      review.reviewType !== "WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED"
+    ) {
+      throw new Error(`Open availability recovery review not found: ${reviewId}`);
+    }
+    return pendingDecision(this.db, {
+      skillKey: "OPERATIONS_RECOVERY",
+      decisionType: "CREATE_AVAILABILITY_RECOVERY_DRAFT",
+      fingerprint: `review:${review.id}:availability-recovery`,
+      reviewId: review.id,
+      caseId: review.caseId,
+      title: "면접관 일정 재제출 요청 확인",
+      prompt:
+        "워커 중단 중 제출된 일정이 누락됐을 수 있습니다. 초안을 만든 뒤 내용을 검토하고 Slack 발송을 승인하세요.",
+      selectionMode: "SINGLE",
+      options: decisionOptions([
+        ["CREATE_RECOVERY_DRAFT", "재제출 요청 초안 만들기", "미제출 필수 면접관에게 보낼 Slack 재제출 요청 초안을 만듭니다. 아직 발송하지 않습니다."],
+        ["HOLD", "보류", "현재 복구 요청을 보내지 않고 검토 건을 보류합니다."],
+      ]),
+      context: {
+        ...caseContext(this.db, review.caseId),
+        reviewId: review.id,
+      },
+    });
+  }
+
   createCandidateScheduleResponseDecision(reviewId: string): InterviewSkillDecisionRow {
     const review = this.db.getReview(reviewId);
     if (
@@ -650,6 +712,26 @@ export class InterviewArrangementSkills {
         allocation,
         schedule,
         nextAction: "CREATE_INTERVIEWER_SCHEDULE_CONFIRMATION_DRAFT",
+      };
+    }
+    if (decision.decisionType === "CANDIDATE_SCHEDULE_PROPOSAL_SENT") {
+      if (optionId !== "MARK_PROPOSAL_SENT") {
+        throw new Error(`Unsupported candidate proposal option: ${optionId}`);
+      }
+      return {
+        action: optionId,
+        result: this.db.recordCandidateScheduleProposalSent(requiredCaseId(decision)),
+        nextAction: "NONE",
+      };
+    }
+    if (decision.decisionType === "CREATE_AVAILABILITY_RECOVERY_DRAFT") {
+      if (optionId !== "CREATE_RECOVERY_DRAFT") {
+        throw new Error(`Unsupported availability recovery option: ${optionId}`);
+      }
+      return {
+        action: optionId,
+        draft: this.workflow.createAvailabilityRecoveryDraft(requiredReviewId(decision)),
+        nextAction: "REVIEW_AND_APPROVE_AVAILABILITY_RECOVERY",
       };
     }
     if (decision.decisionType === "SELECT_CONFIRMED_SCHEDULE_ROOM") {

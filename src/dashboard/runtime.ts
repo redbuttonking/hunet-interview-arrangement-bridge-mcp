@@ -1,6 +1,7 @@
 // 대시보드의 사용자 결정 요청을 기존 업무 서비스로 연결한다.
 import { WebClient } from "@slack/web-api";
 import { getConfig } from "../config.js";
+import { BrowserDaouOfficeReservationAdapter } from "../daou-office/adapter.js";
 import { DaouOfficeBrowserController } from "../daou-office/browser.js";
 import { BridgeDatabase, type InterviewSkillDecisionRow } from "../db/database.js";
 import { NinehireRecruitmentWorkflowAdapter } from "../ninehire/adapter.js";
@@ -47,7 +48,17 @@ function createRuntime() {
     slackClient,
   );
   const skills = new InterviewArrangementSkills(db, workflow, readiness);
-  return { db, skills, workflow, slackClient };
+  const daouOfficeBrowser = new DaouOfficeBrowserController(config.daouOffice);
+  const daouOffice = new BrowserDaouOfficeReservationAdapter(config.daouOffice);
+  return {
+    db,
+    skills,
+    workflow,
+    readiness,
+    slackClient,
+    daouOfficeBrowser,
+    daouOffice,
+  };
 }
 
 function createOpenReviewDecision(
@@ -73,6 +84,8 @@ function createOpenReviewDecision(
     decision = runtime.skills.createCandidateTriageDecision(reviewId);
   } else if (review.reviewType === "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED") {
     decision = runtime.skills.createCandidateScheduleResponseDecision(reviewId);
+  } else if (review.reviewType === "WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED") {
+    decision = runtime.skills.createAvailabilityRecoveryDecision(reviewId);
   } else {
     throw new Error(`Dashboard decision is not available for review type: ${review.reviewType}`);
   }
@@ -94,7 +107,10 @@ export async function createDashboardTriageDecision(reviewId: string) {
 
 export async function createDashboardCaseDecision(input: {
   caseId: string;
-  skillKey: "AVAILABILITY_COLLECTION" | "INTERVIEW_SCHEDULING";
+  skillKey:
+    | "AVAILABILITY_COLLECTION"
+    | "INTERVIEW_SCHEDULING"
+    | "CANDIDATE_SCHEDULE_PROPOSAL";
 }) {
   const runtime = createRuntime();
   try {
@@ -105,8 +121,10 @@ export async function createDashboardCaseDecision(input: {
     let decision: InterviewSkillDecisionRow;
     if (input.skillKey === "AVAILABILITY_COLLECTION") {
       decision = runtime.skills.createAvailabilityCollectionDecision(input.caseId);
-    } else {
+    } else if (input.skillKey === "INTERVIEW_SCHEDULING") {
       decision = runtime.skills.createInterviewSchedulingDecision(input.caseId);
+    } else {
+      decision = runtime.skills.createCandidateScheduleProposalDecision(input.caseId);
     }
     return { decision, dismissOnClose: true };
   } finally {
@@ -184,8 +202,48 @@ export async function resolveDashboardDecision(input: {
     if (caseId && nextAction === "CREATE_INTERVIEW_SCHEDULING_DECISION") {
       followUp = runtime.skills.createInterviewSchedulingDecision(caseId);
     }
+    if (caseId && nextAction === "MAP_INTERVIEWER_TO_SLACK") {
+      const bundle = runtime.db.getCaseBundle(caseId);
+      if (!bundle) throw new Error(`Case not found: ${caseId}`);
+      followUp = {
+        kind: "INTERVIEWER_SLACK_MAPPING",
+        caseId,
+        interviewers: bundle.interviewers
+          .filter(
+            (interviewer) =>
+              interviewer.active &&
+              interviewer.required &&
+              !interviewer.slackUserId &&
+              interviewer.ninehireUserId,
+          )
+          .map((interviewer) => ({
+            ninehireUserId: interviewer.ninehireUserId!,
+            displayName: interviewer.displayName,
+            email: interviewer.email,
+          })),
+      };
+    }
     if (caseId && nextAction === "CREATE_INTERVIEWER_SCHEDULE_CONFIRMATION_DRAFT") {
-      followUp = runtime.workflow.createScheduleConfirmationDraft(caseId);
+      followUp = {
+        draft: runtime.workflow.createScheduleConfirmationDraft(caseId),
+        decision: runtime.skills.createCandidateScheduleProposalDecision(caseId),
+      };
+    }
+    if (caseId && nextAction === "SYNC_DAOU_MEETING_ROOM_BLOCKS") {
+      const interviewCase = runtime.db.getCase(caseId);
+      if (!interviewCase) throw new Error(`Case not found: ${caseId}`);
+      const blocks = await runtime.daouOffice.listMeetingRoomBlocks(
+        interviewCase.proposalDates,
+      );
+      const synced = runtime.db.syncMeetingRoomBlocks(
+        interviewCase.proposalDates,
+        blocks,
+      );
+      followUp = {
+        kind: "DAOU_MEETING_ROOM_SYNC",
+        blockCount: synced.filter((block) => block.active).length,
+        decision: runtime.skills.createInterviewSchedulingDecision(caseId),
+      };
     }
     if (nextAction === "PREVIEW_RECRUITMENT_INTERVIEW_TEMPLATE") {
       const context = resolved.outcome.context;
@@ -202,6 +260,137 @@ export async function resolveDashboardDecision(input: {
       };
     }
     return { ...resolved, followUp };
+  } finally {
+    runtime.db.close();
+  }
+}
+
+export async function getDashboardOperationalReadiness(input?: {
+  checkExternal?: boolean;
+}) {
+  const runtime = createRuntime();
+  try {
+    return {
+      readiness: await runtime.readiness.inspect({
+        checkExternal: input?.checkExternal === true,
+      }),
+      retryJobs: runtime.db.listIntegrationRetryJobs({ limit: 20 }),
+    };
+  } finally {
+    runtime.db.close();
+  }
+}
+
+export async function openDashboardDaouOfficeLogin() {
+  const runtime = createRuntime();
+  try {
+    return runtime.daouOfficeBrowser.openLoginWindow();
+  } finally {
+    runtime.db.close();
+  }
+}
+
+export async function syncDashboardDaouMeetingRooms(caseId: string) {
+  const runtime = createRuntime();
+  try {
+    const interviewCase = runtime.db.getCase(caseId);
+    if (!interviewCase) throw new Error(`Case not found: ${caseId}`);
+    const blocks = await runtime.daouOffice.listMeetingRoomBlocks(
+      interviewCase.proposalDates,
+    );
+    const synced = runtime.db.syncMeetingRoomBlocks(interviewCase.proposalDates, blocks);
+    return {
+      caseId,
+      blockCount: synced.filter((block) => block.active).length,
+      dates: interviewCase.proposalDates,
+    };
+  } finally {
+    runtime.db.close();
+  }
+}
+
+export async function searchDashboardSlackUsers(query: string) {
+  const runtime = createRuntime();
+  try {
+    if (!runtime.slackClient) {
+      throw new Error("Slack bot token is not configured.");
+    }
+    const normalized = query.trim().toLocaleLowerCase("ko-KR");
+    if (normalized.length < 2) {
+      throw new Error("Enter at least two characters to search Slack users.");
+    }
+    const response = await runtime.slackClient.users.list({ limit: 200 });
+    return (response.members ?? [])
+      .flatMap((member) => {
+        const name = member.real_name ?? member.name;
+        const email = member.profile?.email;
+        const haystack = [name, member.name, email]
+          .filter((value): value is string => Boolean(value))
+          .join(" ")
+          .toLocaleLowerCase("ko-KR");
+        if (
+          !member.id ||
+          !name ||
+          member.deleted ||
+          member.is_bot ||
+          !haystack.includes(normalized)
+        ) return [];
+        return [{ id: member.id, name, email: email ?? null }];
+      })
+      .slice(0, 20);
+  } finally {
+    runtime.db.close();
+  }
+}
+
+export async function mapDashboardInterviewerToSlack(input: {
+  caseId: string;
+  ninehireUserId: string;
+  slackUserId: string;
+  displayName: string;
+  email?: string | null;
+}) {
+  const runtime = createRuntime();
+  try {
+    runtime.db.upsertIdentityMapping({
+      ninehireUserId: input.ninehireUserId,
+      slackUserId: input.slackUserId,
+      displayName: input.displayName,
+      ...(input.email ? { email: input.email } : {}),
+    });
+    const synced = await runtime.workflow.syncCaseInterviewers(input.caseId);
+    return { mapped: true, synced };
+  } finally {
+    runtime.db.close();
+  }
+}
+
+export async function setDashboardCaseInterviewPlan(input: {
+  caseId: string;
+  mode: "COMBINED" | "SEQUENTIAL";
+  stepIds?: string[];
+  interviewerIds?: string[];
+  sessions?: Array<{ stepId: string; interviewerIds: string[] }>;
+}) {
+  const runtime = createRuntime();
+  try {
+    if (input.mode === "COMBINED") {
+      if (!input.stepIds || !input.interviewerIds) {
+        throw new Error("Combined interview stages and interviewers are required.");
+      }
+      return runtime.workflow.setCaseCombinedInterviewPlan({
+        caseId: input.caseId,
+        stepIds: input.stepIds,
+        interviewerIds: input.interviewerIds,
+      });
+    }
+    if (!input.sessions) {
+      throw new Error("Sequential interview sessions are required.");
+    }
+    return runtime.workflow.setCaseSequentialInterviewPlan({
+      caseId: input.caseId,
+      sessions: input.sessions,
+    });
   } finally {
     runtime.db.close();
   }

@@ -28,7 +28,7 @@ type ActionItem = {
   decision?: Decision;
   review?: Review;
   caseId?: string;
-  caseSkillKey?: "AVAILABILITY_COLLECTION" | "INTERVIEW_SCHEDULING";
+  caseSkillKey?: "AVAILABILITY_COLLECTION" | "INTERVIEW_SCHEDULING" | "CANDIDATE_SCHEDULE_PROPOSAL";
 };
 
 type ActiveDecision = {
@@ -66,6 +66,7 @@ const supportedReviewDecisionTypes = new Set([
   "RECRUITMENT_TEMPLATE_UPDATE_REQUIRED",
   "RECRUITMENT_TEMPLATE_CHECK_REQUIRED",
   "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED",
+  "WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED",
 ]);
 
 function formatDate(value: string | null | undefined) {
@@ -187,6 +188,18 @@ function caseAction(interviewCase: CandidateCase): ActionItem | undefined {
     };
   }
   if (interviewCase.status === "AWAITING_CANDIDATE_CONFIRMATION") {
+    if (!interviewCase.candidateScheduleProposalSent) {
+      return {
+        ...base,
+        priority: "urgent",
+        category: "후보자 일정 제안 확인",
+        title: "나인하이어 일정 제안 발송 여부를 확인해 주세요.",
+        description: formatSchedule(interviewCase),
+        meta: "발송이 끝났다면 완료를 기록하고, 아직 발송 전이면 나인하이어에서 먼저 처리합니다.",
+        actionLabel: "발송 완료 기록",
+        caseSkillKey: "CANDIDATE_SCHEDULE_PROPOSAL",
+      };
+    }
     return {
       ...base,
       priority: "normal",
@@ -479,6 +492,133 @@ function TemplatePreviewDialog({ preview, onClose, onSave, loading, error }: {
 
 const actionJourneySteps = ["조율 시작", "면접관 일정", "시간·회의실", "후보자 응답", "최종 확정"];
 
+type InterviewerSlackMappingRequest = {
+  kind: "INTERVIEWER_SLACK_MAPPING";
+  caseId: string;
+  interviewers: Array<{
+    ninehireUserId: string;
+    displayName: string;
+    email: string | null;
+  }>;
+};
+
+type SlackUserSearchResult = {
+  id: string;
+  name: string;
+  email: string | null;
+};
+
+function InterviewerSlackMappingDialog({
+  request,
+  onClose,
+  onFinished,
+}: {
+  request: InterviewerSlackMappingRequest;
+  onClose: () => void;
+  onFinished: () => Promise<void>;
+}) {
+  const [index, setIndex] = useState(0);
+  const [query, setQuery] = useState(request.interviewers[0]?.displayName ?? "");
+  const [users, setUsers] = useState<SlackUserSearchResult[]>([]);
+  const [selectedUserId, setSelectedUserId] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const interviewer = request.interviewers[index];
+
+  useEffect(() => {
+    setIndex(0);
+    setQuery(request.interviewers[0]?.displayName ?? "");
+    setUsers([]);
+    setSelectedUserId("");
+  }, [request]);
+
+  const search = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/slack/users?query=${encodeURIComponent(query)}`);
+      const result = await response.json() as { users?: SlackUserSearchResult[]; error?: string };
+      if (!response.ok) throw new Error(result.error ?? "Slack 사용자를 검색하지 못했습니다.");
+      setUsers(result.users ?? []);
+      setSelectedUserId("");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Slack 사용자를 검색하지 못했습니다.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const mapSelectedUser = async () => {
+    if (!interviewer || !selectedUserId) return;
+    const selected = users.find((user) => user.id === selectedUserId);
+    if (!selected) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/cases/${request.caseId}/interviewers/map`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ninehireUserId: interviewer.ninehireUserId,
+          slackUserId: selected.id,
+          displayName: interviewer.displayName,
+          email: interviewer.email,
+        }),
+      });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error ?? "Slack 사용자 연결을 저장하지 못했습니다.");
+      if (index + 1 >= request.interviewers.length) {
+        await onFinished();
+        return;
+      }
+      const next = request.interviewers[index + 1]!;
+      setIndex((current) => current + 1);
+      setQuery(next.displayName);
+      setUsers([]);
+      setSelectedUserId("");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Slack 사용자 연결을 저장하지 못했습니다.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (!interviewer) return null;
+  return (
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="max-w-xl">
+        <DialogHeader>
+          <p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">SLACK USER MAPPING</p>
+          <DialogTitle>면접관 Slack 사용자 연결</DialogTitle>
+          <DialogDescription>나인하이어의 면접관과 실제 Slack 사용자를 한 번 연결하면 이후 같은 사람은 자동으로 재사용합니다.</DialogDescription>
+        </DialogHeader>
+        <div className="rounded-xl border border-blue-100 bg-blue-50/60 p-4">
+          <p className="text-base font-semibold text-slate-950">{interviewer.displayName}</p>
+          <p className="mt-1 text-sm text-slate-600">{interviewer.email ?? "나인하이어 이메일 정보가 없습니다."}</p>
+          <p className="mt-3 text-sm font-medium text-blue-800">{index + 1} / {request.interviewers.length}명 연결 중</p>
+        </div>
+        <div className="flex gap-2">
+          <input className="h-11 min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-3 text-base outline-none transition-colors focus:border-blue-500 focus:ring-2 focus:ring-blue-100" onChange={(event) => setQuery(event.target.value)} value={query} />
+          <Button disabled={loading || query.trim().length < 2} onClick={() => void search()} type="button" variant="outline">{loading ? <Loader2 className="size-4 animate-spin" /> : null}검색</Button>
+        </div>
+        <div className="max-h-64 overflow-y-auto rounded-xl border border-slate-200">
+          {users.length === 0 ? <p className="p-4 text-sm text-slate-600">이름 또는 이메일을 입력하고 검색해 주세요.</p> : users.map((user) => (
+            <label className={`flex cursor-pointer items-center gap-3 border-b border-slate-100 p-4 last:border-b-0 ${selectedUserId === user.id ? "bg-blue-50/70" : "hover:bg-slate-50"}`} key={user.id}>
+              <input checked={selectedUserId === user.id} className="size-4 accent-blue-600" name="slack-user" onChange={() => setSelectedUserId(user.id)} type="radio" />
+              <span><strong className="block text-base text-slate-950">{user.name}</strong><small className="mt-1 block text-sm text-slate-600">{user.email ?? user.id}</small></span>
+            </label>
+          ))}
+        </div>
+        {error ? <p className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">{error}</p> : null}
+        <DialogFooter>
+          <Button disabled={loading} onClick={onClose} variant="outline">나중에 연결</Button>
+          <Button disabled={loading || !selectedUserId} onClick={() => void mapSelectedUser()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}연결 저장</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function ActionJourney({ currentIndex }: { currentIndex: number }) {
   return (
     <div className="overflow-x-auto pb-1">
@@ -501,10 +641,80 @@ function ActionJourney({ currentIndex }: { currentIndex: number }) {
   );
 }
 
+type OperationalReadinessPayload = {
+  readiness: {
+    overallStatus: string;
+    checks: Record<string, Record<string, unknown>>;
+    externalChecks: { performed: boolean; checks: Record<string, Record<string, unknown>> };
+  };
+  retryJobs: Array<{
+    id: string;
+    jobType: string;
+    status: string;
+    attemptCount: number;
+    lastError: string | null;
+  }>;
+};
+
+function OperationsReadinessCard() {
+  const [data, setData] = useState<OperationalReadinessPayload | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = async (external: boolean) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/operations/readiness?external=${external}`);
+      const result = await response.json() as OperationalReadinessPayload & { error?: string };
+      if (!response.ok) throw new Error(result.error ?? "운영 상태를 확인하지 못했습니다.");
+      setData(result);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "운영 상태를 확인하지 못했습니다.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const openDaouLogin = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/operations/daou-login", { method: "POST" });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error ?? "다우오피스 로그인 창을 열지 못했습니다.");
+      await load(false);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "다우오피스 로그인 창을 열지 못했습니다.");
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { void load(false); }, []);
+  const daou = data?.readiness.checks.daouOfficeBrowser;
+  const daouConnected = daou?.connected === true;
+  const retries = data?.retryJobs ?? [];
+
+  return (
+    <Card className="mt-6">
+      <CardHeader className="flex-row items-start justify-between gap-4 border-b border-slate-200">
+        <div><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">INTEGRATION HEALTH</p><CardTitle className="mt-2">연동 상태와 복구</CardTitle><CardDescription className="mt-2">자동 재시도는 워커가 처리합니다. 여기서는 현재 상태를 확인하고 다우오피스 로그인을 다시 열 수 있습니다.</CardDescription></div>
+        <Badge variant={data?.readiness.overallStatus === "READY" ? "success" : "warning"}>{data?.readiness.overallStatus ?? "확인 중"}</Badge>
+      </CardHeader>
+      <CardContent className="grid gap-5 p-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] lg:items-start">
+        <div className="rounded-xl border border-slate-200 p-4"><p className="text-sm font-medium text-slate-500">다우오피스 전용 브라우저</p><p className="mt-2 text-lg font-semibold text-slate-950">{daouConnected ? "연결됨" : "로그인 또는 연결 확인 필요"}</p><p className="mt-2 text-sm leading-6 text-slate-600">{daou?.latestMeetingRoomSyncAt ? `마지막 회의실 동기화. ${formatDateTime(String(daou.latestMeetingRoomSyncAt))}` : "회의실을 추천하기 전 해당 후보자 기준으로 동기화합니다."}</p></div>
+        <div className="rounded-xl border border-slate-200 p-4"><p className="text-sm font-medium text-slate-500">연동 재시도 대기열</p><p className="mt-2 text-lg font-semibold text-slate-950">{retries.length}건</p><p className="mt-2 text-sm leading-6 text-slate-600">{retries.length > 0 ? retries.slice(0, 2).map((job) => `${job.jobType} · ${job.status}`).join("\n") : "대기 중인 연동 재시도가 없습니다."}</p></div>
+        <div className="flex flex-wrap gap-2 lg:justify-end"><Button disabled={loading} onClick={() => void load(true)} variant="outline">{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}연결 다시 진단</Button>{!daouConnected ? <Button disabled={loading} onClick={() => void openDaouLogin()} variant="outline">다우오피스 로그인</Button> : null}</div>
+        {error ? <p className="lg:col-span-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">{error}</p> : null}
+      </CardContent>
+    </Card>
+  );
+}
+
 function ActionRow({ item, onCreateReviewDecision, onCreateCaseDecision, onOpenDecision, loading }: {
   item: ActionItem;
   onCreateReviewDecision: (review: Review) => void;
-  onCreateCaseDecision: (caseId: string, skillKey: "AVAILABILITY_COLLECTION" | "INTERVIEW_SCHEDULING") => void;
+  onCreateCaseDecision: (caseId: string, skillKey: "AVAILABILITY_COLLECTION" | "INTERVIEW_SCHEDULING" | "CANDIDATE_SCHEDULE_PROPOSAL") => void;
   onOpenDecision: (decision: Decision) => void;
   loading: boolean;
 }) {
@@ -572,6 +782,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
   const [data, setData] = useState(initialData);
   const [activeDecision, setActiveDecision] = useState<ActiveDecision | null>(null);
   const [templatePreview, setTemplatePreview] = useState<{ preview: RecruitmentTemplatePreview["preview"]; reviewId: string | null } | null>(null);
+  const [interviewerMapping, setInterviewerMapping] = useState<InterviewerSlackMappingRequest | null>(null);
   const [loadingId, setLoadingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -603,7 +814,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
 
   const createCaseDecision = async (
     caseId: string,
-    skillKey: "AVAILABILITY_COLLECTION" | "INTERVIEW_SCHEDULING",
+    skillKey: "AVAILABILITY_COLLECTION" | "INTERVIEW_SCHEDULING" | "CANDIDATE_SCHEDULE_PROPOSAL",
   ) => {
     setLoadingId(`case:${caseId}`);
     setError(null);
@@ -656,6 +867,14 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
           preview: (result.followUp as RecruitmentTemplatePreview).preview,
           reviewId: decision.reviewId,
         });
+      } else if (
+        result.followUp
+        && typeof result.followUp === "object"
+        && "kind" in result.followUp
+        && (result.followUp as { kind?: unknown }).kind === "INTERVIEWER_SLACK_MAPPING"
+      ) {
+        setActiveDecision(null);
+        setInterviewerMapping(result.followUp as InterviewerSlackMappingRequest);
       } else {
         setActiveDecision(null);
       }
@@ -806,6 +1025,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
           <Card><CardContent className="flex items-start gap-4 p-5"><span className="grid size-10 place-items-center rounded-lg bg-rose-50 text-rose-700"><Wifi className="size-5" /></span><div><p className="text-sm font-medium text-slate-600">연동 재시도</p><p className="mt-1 text-2xl font-semibold tracking-tight">{summary.pendingIntegrationRetries + summary.failedIntegrationRetries}</p><p className="mt-1 text-sm leading-5 text-slate-500">Slack·나인하이어 동기화 오류를 확인합니다.</p></div></CardContent></Card>
           <Card><CardContent className="flex items-start gap-4 p-5"><span className="grid size-10 place-items-center rounded-lg bg-blue-50 text-blue-700"><ClipboardList className="size-5" /></span><div><p className="text-sm font-medium text-slate-600">데이터 갱신</p><p className="mt-1 text-2xl font-semibold tracking-tight">{formatGeneratedAt(data.dashboard.generatedAt)}</p><p className="mt-1 text-sm leading-5 text-slate-500">30초마다 로컬 상태를 다시 확인합니다.</p></div></CardContent></Card>
         </section>
+        <OperationsReadinessCard />
       </main>
 
       {activeDecision ? <DecisionModal activeDecision={activeDecision} evaluationSummary={activeReview?.evaluationSummary} loading={loadingId === activeDecision.decision.id} onClose={() => void closeDecision()} onResolve={resolveDecision} /> : null}
@@ -815,6 +1035,14 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
         onClose={() => setTemplatePreview(null)}
         onSave={(steps) => void saveRecruitmentTemplate(steps)}
         preview={templatePreview.preview}
+      /> : null}
+      {interviewerMapping ? <InterviewerSlackMappingDialog
+        onClose={() => setInterviewerMapping(null)}
+        onFinished={async () => {
+          setInterviewerMapping(null);
+          await refresh();
+        }}
+        request={interviewerMapping}
       /> : null}
     </div>
   );

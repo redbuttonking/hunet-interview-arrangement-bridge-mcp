@@ -2278,6 +2278,9 @@ export class BridgeDatabase {
           scheduledDate: interviewCase.scheduledDate,
           scheduledStartTime: interviewCase.scheduledStartTime,
           scheduledEndTime: interviewCase.scheduledEndTime,
+          candidateScheduleProposalSent: this.hasCandidateScheduleProposalSent(
+            interviewCase.id,
+          ),
           interviewPlan: plan
             ? {
                 mode: plan.mode,
@@ -2500,6 +2503,35 @@ export class BridgeDatabase {
       `)
       .all(candidateName, recruitmentName) as SqlRow[];
     return rows.map(toCase);
+  }
+
+  hasCandidateScheduleProposalSent(caseId: string): boolean {
+    const row = this.connection
+      .prepare(`
+        SELECT 1
+        FROM case_events
+        WHERE case_id = ? AND event_type = 'CANDIDATE_SCHEDULE_PROPOSAL_SENT'
+        LIMIT 1
+      `)
+      .get(caseId) as SqlRow | undefined;
+    return Boolean(row);
+  }
+
+  recordCandidateScheduleProposalSent(caseId: string): InterviewCaseRow {
+    const interviewCase = this.getCase(caseId);
+    if (!interviewCase) throw new Error(`Case not found: ${caseId}`);
+    if (interviewCase.status === "CONFIRMED") return interviewCase;
+    if (interviewCase.status !== "AWAITING_CANDIDATE_CONFIRMATION") {
+      throw new Error("Only an internally confirmed interview can be marked as proposed to the candidate.");
+    }
+    if (this.hasCandidateScheduleProposalSent(caseId)) return interviewCase;
+    this.addEvent(caseId, "CANDIDATE_SCHEDULE_PROPOSAL_SENT", "USER", {
+      date: interviewCase.scheduledDate,
+      startTime: interviewCase.scheduledStartTime,
+      endTime: interviewCase.scheduledEndTime,
+      roomName: interviewCase.scheduledRoomName,
+    });
+    return this.getCase(caseId)!;
   }
 
   confirmCandidateSchedule(input: {

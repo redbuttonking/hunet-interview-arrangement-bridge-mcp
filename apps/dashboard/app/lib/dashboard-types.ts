@@ -22,6 +22,7 @@ export type CandidateCase = {
   scheduledDate: string | null;
   scheduledStartTime: string | null;
   scheduledEndTime: string | null;
+  candidateScheduleProposalSent: boolean;
   interviewerResponses: {
     required: number;
     submitted: number;
