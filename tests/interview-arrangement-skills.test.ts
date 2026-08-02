@@ -122,6 +122,49 @@ describe("interview arrangement skills", () => {
     ]);
   });
 
+  it("records a candidate triage hold without changing an external system", async () => {
+    db = new BridgeDatabase(":memory:");
+    db.upsertRecruitmentInterviewTemplate({
+      recruitmentId: "R1",
+      recruitmentName: "Recruitment",
+      pipelineHash: "pipeline-hash",
+      steps: [{ stepId: "S1", title: "First interview", name: "First interview", order: 2, mode: "STANDARD", durationMinutes: 60 }],
+      routes: [{ triggerStepId: "S1", mode: "STANDARD", stepIds: ["S1"] }],
+    });
+    const reviewId = db.createReview({
+      reviewType: "INTERVIEW_ARRANGEMENT_START_REQUIRED",
+      reason: "Completed evaluation requires approval.",
+      summary: { context: { candidateName: "Candidate", recruitmentRef: "R1" } },
+    });
+    const skills = createSkills();
+
+    const decision = skills.createCandidateTriageDecision(reviewId);
+    const resolved = await skills.resolveDecision({ decisionId: decision.id, optionId: "HOLD" });
+
+    expect(resolved).toMatchObject({
+      decision: { status: "RESOLVED", selectedOptionId: "HOLD" },
+      outcome: { action: "HOLD", nextAction: "NONE" },
+    });
+    expect(db.getReview(reviewId)).toMatchObject({ status: "RESOLVED", resolution: "HOLD" });
+    expect(db.listOpenReviews()).toEqual([]);
+    expect(db.listHeldReviews()).toMatchObject([{ id: reviewId }]);
+  });
+
+  it("pauses an in-progress case when the user selects hold", async () => {
+    db = new BridgeDatabase(":memory:");
+    const interviewCase = db.createInterviewCase({
+      candidateName: "Candidate",
+      proposalDates: ["2026-08-10"],
+    });
+    const skills = createSkills();
+
+    const decision = skills.createAvailabilityCollectionDecision(interviewCase.id);
+    const resolved = await skills.resolveDecision({ decisionId: decision.id, optionId: "HOLD" });
+
+    expect(resolved.outcome).toMatchObject({ action: "HOLD", case: { status: "ON_HOLD" } });
+    expect(db.getCase(interviewCase.id)).toMatchObject({ status: "ON_HOLD" });
+  });
+
   it("uses a decision to request interviewer synchronization before availability collection", async () => {
     db = new BridgeDatabase(":memory:");
     const interviewCase = db.createInterviewCase({

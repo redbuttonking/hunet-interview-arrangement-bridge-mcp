@@ -8,6 +8,7 @@ export type InterviewCaseStatus =
   | "CONFIRMED"
   | "CANCELLED"
   | "REVIEW_REQUIRED"
+  | "ON_HOLD"
   | "CLOSED";
 
 export type RescheduleAvailabilityPolicy = "REUSE" | "RECOLLECT";

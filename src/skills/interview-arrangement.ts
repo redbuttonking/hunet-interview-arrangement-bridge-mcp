@@ -529,7 +529,26 @@ export class InterviewArrangementSkills {
     optionId: string,
     note?: string,
   ): Promise<Record<string, unknown>> {
-    if (optionId === "HOLD" || optionId === "WAIT") {
+    if (optionId === "HOLD") {
+      const heldCase = decision.caseId
+        ? this.db.holdInterviewCase({
+            caseId: decision.caseId,
+            decisionId: decision.id,
+            reviewId: decision.reviewId,
+            note,
+          })
+        : undefined;
+      if (decision.reviewId) {
+        this.db.resolveReview(decision.reviewId, "HOLD");
+      }
+      return {
+        action: optionId,
+        note: note?.trim() || null,
+        ...(heldCase ? { case: heldCase } : {}),
+        nextAction: "NONE",
+      };
+    }
+    if (optionId === "WAIT") {
       return { action: optionId, note: note?.trim() || null, nextAction: "NONE" };
     }
     if (decision.decisionType === "START_INTERVIEW_ARRANGEMENT") {

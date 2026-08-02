@@ -9,6 +9,7 @@ export type InterviewCaseStatus =
   | "CONFIRMED"
   | "CANCELLED"
   | "REVIEW_REQUIRED"
+  | "ON_HOLD"
   | "CLOSED";
 
 export type CandidateCase = {
@@ -82,6 +83,15 @@ export type Decision = {
   createdAt: string;
 };
 
+export type HeldWork = {
+  id: string;
+  kind: "REVIEW" | "CASE";
+  candidateName: string | null;
+  recruitmentName: string | null;
+  detail: string;
+  heldAt: string;
+};
+
 export type DashboardSnapshot = {
   dashboard: {
     generatedAt: string;
@@ -97,6 +107,7 @@ export type DashboardSnapshot = {
   };
   reviews: Review[];
   decisions: Decision[];
+  heldWork: HeldWork[];
   meetingRoomBlocks: Array<{
     id: string;
     roomName: string;

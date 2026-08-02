@@ -9,7 +9,7 @@ import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog";
-import type { CandidateCase, DashboardSnapshot, Decision, EvaluationSummary, InterviewCaseStatus, Review } from "../lib/dashboard-types";
+import type { CandidateCase, DashboardSnapshot, Decision, EvaluationSummary, HeldWork, InterviewCaseStatus, Review } from "../lib/dashboard-types";
 
 type ActionPriority = "urgent" | "normal" | "watch";
 
@@ -406,6 +406,32 @@ function ActionRow({ item, onCreateReviewDecision, onCreateCaseDecision, onOpenD
   );
 }
 
+function HeldWorkCard({ work, loading, onResume }: {
+  work: HeldWork;
+  loading: boolean;
+  onResume: (work: HeldWork) => void;
+}) {
+  return (
+    <article className="border-b border-slate-200 py-4 first:pt-0 last:border-b-0 last:pb-0">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-base font-semibold text-slate-950">{work.candidateName ?? "후보자 확인 필요"}</p>
+          <p className="mt-1 text-sm text-slate-600">{work.recruitmentName ?? "채용 정보 확인 필요"}</p>
+        </div>
+        <Badge variant="secondary">보류</Badge>
+      </div>
+      <p className="mt-3 text-sm leading-6 text-slate-600">{work.detail}</p>
+      <div className="mt-3 flex items-center justify-between gap-3">
+        <p className="text-xs text-slate-500">{formatDateTime(work.heldAt)} 보류</p>
+        <Button disabled={loading} onClick={() => onResume(work)} size="sm" variant="outline">
+          {loading ? <Loader2 className="size-3.5 animate-spin" /> : null}
+          보류 해제
+        </Button>
+      </div>
+    </article>
+  );
+}
+
 export function DashboardClient({ initialData }: { initialData: DashboardSnapshot }) {
   const [data, setData] = useState(initialData);
   const [activeDecision, setActiveDecision] = useState<ActiveDecision | null>(null);
@@ -518,6 +544,26 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
     }
   };
 
+  const resumeHeldWork = async (work: HeldWork) => {
+    const loadingKey = `hold:${work.kind}:${work.id}`;
+    setLoadingId(loadingKey);
+    setError(null);
+    try {
+      const resource = work.kind === "REVIEW" ? "reviews" : "cases";
+      const response = await fetch(`/api/holds/${resource}/${work.id}/resume`, { method: "POST" });
+      const result = await response.json() as { decision?: Decision; error?: string };
+      if (!response.ok) throw new Error(result.error ?? "보류한 조율을 다시 시작하지 못했습니다.");
+      if (result.decision) {
+        setActiveDecision({ decision: result.decision, dismissOnClose: false });
+      }
+      await refresh();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "보류한 조율을 다시 시작하지 못했습니다.");
+    } finally {
+      setLoadingId(null);
+    }
+  };
+
   const actionItems = useMemo(() => buildActionItems(data), [data]);
   const upcoming = useMemo(() => data.dashboard.cases
     .filter((interviewCase) => interviewCase.scheduledDate && interviewCase.scheduledStartTime && ["CONFIRMED", "AWAITING_CANDIDATE_CONFIRMATION"].includes(interviewCase.status))
@@ -559,6 +605,11 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
           </Card>
 
           <aside className="grid h-fit gap-6 sm:grid-cols-2 xl:grid-cols-1">
+            {data.heldWork.length > 0 ? <Card>
+              <CardHeader><p className="text-xs font-bold uppercase tracking-[0.16em] text-slate-500">PAUSED</p><CardTitle className="mt-2 flex items-center gap-2">보류한 조율 <Badge variant="secondary">{data.heldWork.length}</Badge></CardTitle><CardDescription>나인하이어와 Slack에는 변경하지 않고 로컬 조율만 멈춘 상태입니다.</CardDescription></CardHeader>
+              <CardContent><div>{data.heldWork.map((work) => <HeldWorkCard key={`${work.kind}:${work.id}`} loading={loadingId === `hold:${work.kind}:${work.id}`} onResume={resumeHeldWork} work={work} />)}</div></CardContent>
+            </Card> : null}
+
             <Card>
               <CardHeader><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">UP NEXT</p><CardTitle className="mt-2">다가오는 인터뷰</CardTitle></CardHeader>
               <CardContent>

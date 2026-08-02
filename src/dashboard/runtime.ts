@@ -50,32 +50,39 @@ function createRuntime() {
   return { db, skills, workflow, slackClient };
 }
 
+function createOpenReviewDecision(
+  runtime: ReturnType<typeof createRuntime>,
+  reviewId: string,
+) {
+  const review = runtime.db.getReview(reviewId);
+  if (!review || review.status !== "OPEN") {
+    throw new Error(`Open review not found: ${reviewId}`);
+  }
+  const existing = runtime.db
+    .listInterviewSkillDecisions({ status: "PENDING" })
+    .find((decision) => decision.reviewId === reviewId);
+  if (existing) return { decision: existing, dismissOnClose: false };
+  let decision: InterviewSkillDecisionRow;
+  if (
+    [
+      "INTERVIEW_ARRANGEMENT_START_REQUIRED",
+      "RECRUITMENT_TEMPLATE_UPDATE_REQUIRED",
+      "RECRUITMENT_TEMPLATE_CHECK_REQUIRED",
+    ].includes(review.reviewType)
+  ) {
+    decision = runtime.skills.createCandidateTriageDecision(reviewId);
+  } else if (review.reviewType === "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED") {
+    decision = runtime.skills.createCandidateScheduleResponseDecision(reviewId);
+  } else {
+    throw new Error(`Dashboard decision is not available for review type: ${review.reviewType}`);
+  }
+  return { decision, dismissOnClose: true };
+}
+
 export async function createDashboardReviewDecision(reviewId: string) {
   const runtime = createRuntime();
   try {
-    const review = runtime.db.getReview(reviewId);
-    if (!review || review.status !== "OPEN") {
-      throw new Error(`Open review not found: ${reviewId}`);
-    }
-    const existing = runtime.db
-      .listInterviewSkillDecisions({ status: "PENDING" })
-      .find((decision) => decision.reviewId === reviewId);
-    if (existing) return { decision: existing, dismissOnClose: false };
-    let decision: InterviewSkillDecisionRow;
-    if (
-      [
-        "INTERVIEW_ARRANGEMENT_START_REQUIRED",
-        "RECRUITMENT_TEMPLATE_UPDATE_REQUIRED",
-        "RECRUITMENT_TEMPLATE_CHECK_REQUIRED",
-      ].includes(review.reviewType)
-    ) {
-      decision = runtime.skills.createCandidateTriageDecision(reviewId);
-    } else if (review.reviewType === "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED") {
-      decision = runtime.skills.createCandidateScheduleResponseDecision(reviewId);
-    } else {
-      throw new Error(`Dashboard decision is not available for review type: ${review.reviewType}`);
-    }
-    return { decision, dismissOnClose: true };
+    return createOpenReviewDecision(runtime, reviewId);
   } finally {
     runtime.db.close();
   }
@@ -111,6 +118,43 @@ export async function dismissDashboardDecision(decisionId: string) {
   const runtime = createRuntime();
   try {
     return runtime.db.discardPendingInterviewSkillDecision(decisionId);
+  } finally {
+    runtime.db.close();
+  }
+}
+
+export async function resumeDashboardHeldReview(reviewId: string) {
+  const runtime = createRuntime();
+  try {
+    runtime.db.reopenHeldReview(reviewId);
+    return createOpenReviewDecision(runtime, reviewId);
+  } finally {
+    runtime.db.close();
+  }
+}
+
+export async function resumeDashboardHeldCase(caseId: string) {
+  const runtime = createRuntime();
+  try {
+    const resumed = runtime.db.resumeHeldInterviewCase(caseId);
+    const heldReview = resumed.heldReviewId
+      ? runtime.db.getReview(resumed.heldReviewId)
+      : undefined;
+    if (
+      heldReview
+      && heldReview.status === "RESOLVED"
+      && heldReview.resolution === "HOLD"
+      && [
+        "INTERVIEW_ARRANGEMENT_START_REQUIRED",
+        "RECRUITMENT_TEMPLATE_UPDATE_REQUIRED",
+        "RECRUITMENT_TEMPLATE_CHECK_REQUIRED",
+        "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED",
+      ].includes(heldReview.reviewType)
+    ) {
+      runtime.db.reopenHeldReview(heldReview.id);
+      return { ...resumed, ...createOpenReviewDecision(runtime, heldReview.id) };
+    }
+    return resumed;
   } finally {
     runtime.db.close();
   }

@@ -65,6 +65,37 @@ describe("BridgeDatabase", () => {
     expect(db.discardPendingInterviewSkillDecision(decision.id)).toBe(false);
   });
 
+  it("removes a held case from operations and restores its previous local status", () => {
+    db = new BridgeDatabase(":memory:");
+    const interviewCase = db.createInterviewCase({
+      candidateName: "Held candidate",
+      proposalDates: ["2026-08-10"],
+    });
+    db.setCaseStatus(interviewCase.id, "READY_TO_SCHEDULE");
+
+    db.holdInterviewCase({ caseId: interviewCase.id, reviewId: "review-1" });
+
+    expect(db.getCase(interviewCase.id)).toMatchObject({ status: "ON_HOLD" });
+    expect(db.listOperationalCases()).toEqual([]);
+    expect(db.getOperationsDashboard()).toMatchObject({
+      summary: { caseCountsByStatus: { ON_HOLD: 1 } },
+    });
+
+    const resumed = db.resumeHeldInterviewCase(interviewCase.id);
+
+    expect(resumed).toMatchObject({
+      heldReviewId: "review-1",
+      interviewCase: { status: "READY_TO_SCHEDULE" },
+    });
+    expect(db.listOperationalCases()).toMatchObject([
+      { id: interviewCase.id, status: "READY_TO_SCHEDULE" },
+    ]);
+    expect(db.listCaseEvents(interviewCase.id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ eventType: "INTERVIEW_ARRANGEMENT_HELD" }),
+      expect.objectContaining({ eventType: "INTERVIEW_ARRANGEMENT_RESUMED" }),
+    ]));
+  });
+
   it("stores a recruitment template and a candidate-specific combined plan", () => {
     db = new BridgeDatabase(":memory:");
     const interviewCase = db.createInterviewCase({

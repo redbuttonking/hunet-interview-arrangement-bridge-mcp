@@ -121,4 +121,28 @@ describe("dashboard service", () => {
       expect.objectContaining({ eventType: "CASE_CREATED", caseId: interviewCase.id }),
     ]));
   });
+
+  it("separates held interview work from the active action queue", () => {
+    db = new BridgeDatabase(":memory:");
+    const heldCase = db.createInterviewCase({
+      candidateName: "Held candidate",
+      recruitmentName: "Recruitment",
+      proposalDates: ["2026-08-10"],
+    });
+    db.holdInterviewCase({ caseId: heldCase.id });
+    const heldReviewId = db.createReview({
+      reviewType: "INTERVIEW_ARRANGEMENT_START_REQUIRED",
+      reason: "Approval is postponed.",
+      summary: { context: { candidateName: "Held review candidate", recruitmentName: "Recruitment" } },
+    });
+    db.resolveReview(heldReviewId, "HOLD");
+
+    const snapshot = getDashboardSnapshot(db);
+
+    expect(snapshot.dashboard.cases).toEqual([]);
+    expect(snapshot.heldWork).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: heldCase.id, kind: "CASE", candidateName: "Held candidate" }),
+      expect.objectContaining({ id: heldReviewId, kind: "REVIEW", candidateName: "Held review candidate" }),
+    ]));
+  });
 });

@@ -37,6 +37,7 @@ function statusLabel(status: string) {
     AWAITING_CANDIDATE_CONFIRMATION: "후보자 응답 대기",
     CONFIRMED: "최종 확정",
     REVIEW_REQUIRED: "예외 검토",
+    ON_HOLD: "조율 보류",
     CANCELLED: "취소",
     CLOSED: "종료",
   };
@@ -45,7 +46,7 @@ function statusLabel(status: string) {
 
 function statusVariant(status: string) {
   if (status === "CONFIRMED") return "success" as const;
-  if (["REVIEW_REQUIRED", "CANCELLED"].includes(status)) return "warning" as const;
+  if (["REVIEW_REQUIRED", "CANCELLED", "ON_HOLD"].includes(status)) return "warning" as const;
   return "default" as const;
 }
 
@@ -65,6 +66,7 @@ function nextAction(status: string, pendingResponses: number) {
     AWAITING_CANDIDATE_CONFIRMATION: { title: "후보자의 일정 답변을 기다리고 있습니다.", description: "나인하이어에서 후보자가 확정하면 로컬 운영 상태에 반영됩니다." },
     CONFIRMED: { title: "인터뷰가 최종 확정되었습니다.", description: "면접관 안내 메시지 발송 여부와 일정 정보를 확인해 주세요." },
     REVIEW_REQUIRED: { title: "예외 상황을 확인하고 다음 조치를 결정해 주세요.", description: "재조율, 보류, 취소 중 하나를 사용자의 판단으로 선택합니다." },
+    ON_HOLD: { title: "인터뷰 조율을 보류한 상태입니다.", description: "운영 보드에서 보류 해제를 선택하면 이전 조율 단계로 돌아갑니다." },
     CANCELLED: { title: "인터뷰 조율이 취소된 상태입니다.", description: "다우오피스의 기존 회의실 예약 블록은 그대로 유지합니다." },
   };
   if (["REQUEST_SENT", "COLLECTING_AVAILABILITY"].includes(status)) {

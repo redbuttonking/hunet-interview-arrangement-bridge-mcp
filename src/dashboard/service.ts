@@ -153,11 +153,42 @@ export function getDashboardSnapshot(db: BridgeDatabase, limit = 100) {
   const decisions = db
     .listInterviewSkillDecisions({ status: "PENDING", limit })
     .map(decisionSummary);
+  const heldReviewWork = db
+    .listHeldReviews(limit)
+    .filter((review) => !review.caseId)
+    .map((review) => {
+      const context = reviewContext(review);
+      return {
+        id: review.id,
+        kind: "REVIEW" as const,
+        candidateName: context.candidateName,
+        recruitmentName: context.recruitmentName,
+        detail: context.currentStepName
+          ? `${context.currentStepName} 단계의 조율 시작을 보류했습니다.`
+          : "인터뷰 조율 시작을 보류했습니다.",
+        heldAt: review.resolvedAt ?? review.createdAt,
+      };
+    });
+  const heldCaseWork = db.listCases("ON_HOLD", limit).map((interviewCase) => {
+    const plan = db.getCaseInterviewPlan(interviewCase.id);
+    return {
+      id: interviewCase.id,
+      kind: "CASE" as const,
+      candidateName: interviewCase.candidateName,
+      recruitmentName: interviewCase.recruitmentName,
+      detail: plan
+        ? `${plan.stepNames.join(plan.mode === "SEQUENTIAL" ? " → " : " + ")} 조율을 보류했습니다.`
+        : "인터뷰 조율을 보류했습니다.",
+      heldAt: interviewCase.updatedAt,
+    };
+  });
 
   return {
     dashboard,
     reviews,
     decisions,
+    heldWork: [...heldReviewWork, ...heldCaseWork]
+      .sort((left, right) => right.heldAt.localeCompare(left.heldAt)),
     meetingRoomBlocks: db.listMeetingRoomBlocks().map((block) => ({
       id: block.id,
       roomName: block.roomName,

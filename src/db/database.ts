@@ -282,6 +282,22 @@ function nullableString(value: unknown): string | null {
   return value === null || value === undefined ? null : String(value);
 }
 
+function isInterviewCaseStatus(value: unknown): value is InterviewCaseStatus {
+  return [
+    "READY_FOR_DRAFT",
+    "DRAFT_CREATED",
+    "REQUEST_SENT",
+    "COLLECTING_AVAILABILITY",
+    "READY_TO_SCHEDULE",
+    "AWAITING_CANDIDATE_CONFIRMATION",
+    "CONFIRMED",
+    "CANCELLED",
+    "REVIEW_REQUIRED",
+    "ON_HOLD",
+    "CLOSED",
+  ].includes(String(value));
+}
+
 function isDate(value: string): boolean {
   return /^\d{4}-\d{2}-\d{2}$/.test(value);
 }
@@ -1600,6 +1616,19 @@ export class BridgeDatabase {
     ).map(toReview);
   }
 
+  listHeldReviews(limit = 100): ReviewRow[] {
+    return (
+      this.connection
+        .prepare(`
+          SELECT * FROM workflow_reviews
+          WHERE status = 'RESOLVED' AND resolution = 'HOLD'
+          ORDER BY resolved_at DESC, created_at DESC
+          LIMIT ?
+        `)
+        .all(limit) as SqlRow[]
+    ).map(toReview);
+  }
+
   getReview(id: string): ReviewRow | undefined {
     const row = this.connection
       .prepare("SELECT * FROM workflow_reviews WHERE id = ?")
@@ -1639,6 +1668,20 @@ export class BridgeDatabase {
     if (Number(result.changes) !== 1) {
       throw new Error(`Open review not found: ${id}`);
     }
+  }
+
+  reopenHeldReview(id: string): ReviewRow {
+    const result = this.connection
+      .prepare(`
+        UPDATE workflow_reviews
+        SET status = 'OPEN', resolution = NULL, resolved_at = NULL
+        WHERE id = ? AND status = 'RESOLVED' AND resolution = 'HOLD'
+      `)
+      .run(id);
+    if (Number(result.changes) !== 1) {
+      throw new Error(`Held review not found: ${id}`);
+    }
+    return this.getReview(id)!;
   }
 
   createOrGetPendingInterviewSkillDecision(
@@ -1829,6 +1872,7 @@ export class BridgeDatabase {
   private operationalCasePredicate(tableAlias: string): string {
     return `
       ${tableAlias}.status != 'CLOSED'
+      AND ${tableAlias}.status != 'ON_HOLD'
       AND (
         ${tableAlias}.status != 'CANCELLED'
         OR EXISTS (
@@ -2001,6 +2045,7 @@ export class BridgeDatabase {
       CONFIRMED: 0,
       CANCELLED: 0,
       REVIEW_REQUIRED: 0,
+      ON_HOLD: 0,
       CLOSED: 0,
     };
     const countRows = this.connection
@@ -2017,6 +2062,9 @@ export class BridgeDatabase {
     }
     const scalar = (sql: string): number =>
       Number((this.connection.prepare(sql).get() as SqlRow).count);
+    statusCounts.ON_HOLD = scalar(
+      "SELECT COUNT(*) AS count FROM interview_cases WHERE status = 'ON_HOLD'",
+    );
     const cases = this.listOperationalCases(limit);
     const reviews = this.listOpenReviews(limit);
     const reviewCountByCase = new Map<string, number>();
@@ -2142,7 +2190,7 @@ export class BridgeDatabase {
           WHERE interviewer.active = 1
             AND interviewer.required = 1
             AND interviewer.status = 'PENDING'
-            AND interview_case.status NOT IN ('CANCELLED', 'CLOSED')
+            AND interview_case.status NOT IN ('CANCELLED', 'CLOSED', 'ON_HOLD')
         `),
         pendingIntegrationRetries: scalar(
           "SELECT COUNT(*) AS count FROM integration_retry_jobs WHERE status = 'PENDING'",
@@ -3521,6 +3569,66 @@ export class BridgeDatabase {
       `)
       .run(status, new Date().toISOString(), id);
     if (Number(result.changes) !== 1) throw new Error(`Case not found: ${id}`);
+  }
+
+  holdInterviewCase(input: {
+    caseId: string;
+    decisionId?: string;
+    reviewId?: string;
+    note?: string;
+  }): InterviewCaseRow {
+    const interviewCase = this.getCase(input.caseId);
+    if (!interviewCase) throw new Error(`Case not found: ${input.caseId}`);
+    if (interviewCase.status === "ON_HOLD") return interviewCase;
+    if (["CANCELLED", "CLOSED"].includes(interviewCase.status)) {
+      throw new Error(`A closed case cannot be held: ${input.caseId}`);
+    }
+    const now = new Date().toISOString();
+    this.connection
+      .prepare(`
+        UPDATE interview_cases SET status = 'ON_HOLD', updated_at = ? WHERE id = ?
+      `)
+      .run(now, input.caseId);
+    this.addEvent(input.caseId, "INTERVIEW_ARRANGEMENT_HELD", "USER", {
+      previousStatus: interviewCase.status,
+      decisionId: input.decisionId ?? null,
+      reviewId: input.reviewId ?? null,
+      note: input.note?.trim() || null,
+    });
+    return this.getCase(input.caseId)!;
+  }
+
+  resumeHeldInterviewCase(caseId: string): {
+    interviewCase: InterviewCaseRow;
+    heldReviewId: string | null;
+  } {
+    const interviewCase = this.getCase(caseId);
+    if (!interviewCase || interviewCase.status !== "ON_HOLD") {
+      throw new Error(`Held case not found: ${caseId}`);
+    }
+    const row = this.connection
+      .prepare(`
+        SELECT detail_json FROM case_events
+        WHERE case_id = ? AND event_type = 'INTERVIEW_ARRANGEMENT_HELD'
+        ORDER BY created_at DESC LIMIT 1
+      `)
+      .get(caseId) as SqlRow | undefined;
+    const detail = row ? jsonRecord(asString(row.detail_json)) : null;
+    const previousStatus = detail?.previousStatus;
+    const restoredStatus = isInterviewCaseStatus(previousStatus) && previousStatus !== "ON_HOLD"
+      ? previousStatus
+      : "REVIEW_REQUIRED";
+    const heldReviewId = nullableString(detail?.reviewId);
+    this.connection
+      .prepare(`
+        UPDATE interview_cases SET status = ?, updated_at = ? WHERE id = ?
+      `)
+      .run(restoredStatus, new Date().toISOString(), caseId);
+    this.addEvent(caseId, "INTERVIEW_ARRANGEMENT_RESUMED", "USER", {
+      restoredStatus,
+      heldReviewId,
+    });
+    return { interviewCase: this.getCase(caseId)!, heldReviewId };
   }
 
   setCaseDuration(id: string, durationMinutes: number): void {
