@@ -16,7 +16,7 @@ type ActionPriority = "urgent" | "normal" | "watch";
 type ActionItem = {
   id: string;
   priority: ActionPriority;
-  progressLabel: string;
+  journeyIndex: number;
   category: string;
   title: string;
   description: string;
@@ -106,31 +106,16 @@ function stageLabel(interviewCase: CandidateCase) {
   return name;
 }
 
-function progressLabel(status: InterviewCaseStatus) {
-  const labels: Record<InterviewCaseStatus, string> = {
-    READY_FOR_DRAFT: "1. 조율 시작",
-    DRAFT_CREATED: "1. 조율 시작",
-    REQUEST_SENT: "2. 면접관 일정",
-    COLLECTING_AVAILABILITY: "2. 면접관 일정",
-    READY_TO_SCHEDULE: "3. 시간·회의실",
-    REVIEW_REQUIRED: "3. 시간·회의실",
-    AWAITING_CANDIDATE_CONFIRMATION: "4. 후보자 응답",
-    CONFIRMED: "5. 최종 확정",
-    ON_HOLD: "조율 보류",
-    CANCELLED: "조율 취소",
-    CLOSED: "조율 종료",
-  };
-  return labels[status];
+function journeyIndexForStatus(status: InterviewCaseStatus) {
+  if (["READY_FOR_DRAFT", "DRAFT_CREATED"].includes(status)) return 0;
+  if (["REQUEST_SENT", "COLLECTING_AVAILABILITY"].includes(status)) return 1;
+  if (["READY_TO_SCHEDULE", "REVIEW_REQUIRED"].includes(status)) return 2;
+  if (status === "AWAITING_CANDIDATE_CONFIRMATION") return 3;
+  return 4;
 }
 
-function reviewProgressLabel(review: Review) {
-  if (review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED") {
-    return "1. 조율 시작";
-  }
-  if (review.reviewType === "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED") {
-    return "일정 예외 검토";
-  }
-  return "규칙 확인";
+function journeyIndexForReview(review: Review) {
+  return review.reviewType === "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED" ? 3 : 0;
 }
 
 function reviewCategory(review: Review) {
@@ -148,7 +133,7 @@ function caseAction(interviewCase: CandidateCase): ActionItem | undefined {
   const base = {
     id: `case:${interviewCase.id}`,
     caseId: interviewCase.id,
-    progressLabel: progressLabel(interviewCase.status),
+    journeyIndex: journeyIndexForStatus(interviewCase.status),
     candidateName: interviewCase.candidateName,
     recruitmentName: interviewCase.recruitmentName,
     href: `/cases/${interviewCase.id}`,
@@ -235,9 +220,9 @@ function buildActionItems(data: DashboardSnapshot): ActionItem[] {
   const decisionItems: ActionItem[] = data.decisions.map((decision) => ({
     id: `decision:${decision.id}`,
     priority: "urgent",
-    progressLabel: decision.caseId && casesById.get(decision.caseId)
-      ? progressLabel(casesById.get(decision.caseId)!.status)
-      : "1. 조율 시작",
+    journeyIndex: decision.caseId && casesById.get(decision.caseId)
+      ? journeyIndexForStatus(casesById.get(decision.caseId)!.status)
+      : 0,
     category: "선택 대기",
     title: decision.title,
     description: decision.prompt,
@@ -253,7 +238,9 @@ function buildActionItems(data: DashboardSnapshot): ActionItem[] {
     .map((review) => ({
       id: `review:${review.id}`,
       priority: supportedReviewDecisionTypes.has(review.reviewType) ? "urgent" : "normal",
-      progressLabel: reviewProgressLabel(review),
+      journeyIndex: review.caseId && casesById.get(review.caseId)
+        ? journeyIndexForStatus(casesById.get(review.caseId)!.status)
+        : journeyIndexForReview(review),
       category: reviewCategory(review),
       title: review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED"
         ? "인터뷰 조율을 시작할지 확인해 주세요."
@@ -490,6 +477,30 @@ function TemplatePreviewDialog({ preview, onClose, onSave, loading, error }: {
   );
 }
 
+const actionJourneySteps = ["조율 시작", "면접관 일정", "시간·회의실", "후보자 응답", "최종 확정"];
+
+function ActionJourney({ currentIndex }: { currentIndex: number }) {
+  return (
+    <div className="overflow-x-auto pb-1">
+      <ol aria-label="인터뷰 조율 진행 상태" className="grid min-w-[34rem] grid-cols-5">
+        {actionJourneySteps.map((step, index) => {
+          const isComplete = index < currentIndex;
+          const isCurrent = index === currentIndex;
+          return (
+            <li className="relative grid justify-items-center gap-2 text-center" key={step}>
+              {index < actionJourneySteps.length - 1 ? <span className={`absolute left-[calc(50%+1.25rem)] top-5 h-px w-[calc(100%-2.5rem)] ${isComplete ? "bg-emerald-400" : "bg-slate-200"}`} /> : null}
+              <span aria-current={isCurrent ? "step" : undefined} className={`relative z-10 grid size-10 place-items-center rounded-full text-sm font-bold ${isComplete ? "bg-emerald-600 text-white" : isCurrent ? "bg-blue-600 text-white ring-4 ring-blue-100" : "bg-slate-100 text-slate-500"}`}>
+                {isComplete ? <CheckCircle2 className="size-5" /> : index + 1}
+              </span>
+              <span className={`whitespace-nowrap text-sm font-semibold ${isCurrent ? "text-slate-950" : isComplete ? "text-emerald-700" : "text-slate-500"}`}>{step}</span>
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
+}
+
 function ActionRow({ item, onCreateReviewDecision, onCreateCaseDecision, onOpenDecision, loading }: {
   item: ActionItem;
   onCreateReviewDecision: (review: Review) => void;
@@ -508,12 +519,12 @@ function ActionRow({ item, onCreateReviewDecision, onCreateCaseDecision, onOpenD
         <div className="flex flex-wrap items-center gap-2">
           <span className={`size-2 rounded-full ${priority.dot}`} />
           <Badge variant={priority.badge}>{priority.label}</Badge>
-          <Badge className="border-blue-200 bg-blue-50 text-blue-700" variant="outline">진행 {item.progressLabel}</Badge>
           <span className="text-sm text-slate-500">{item.category}</span>
           {item.meta ? <span className="text-sm text-slate-500">· {item.meta}</span> : null}
         </div>
         <h3 className="mt-3 text-xl font-semibold tracking-[-0.025em] text-slate-950">{item.candidateName ?? "후보자 확인 필요"}</h3>
         <p className="mt-1 text-base text-slate-600">{item.recruitmentName ?? "채용 정보 확인 필요"}</p>
+        <div className="mt-4 border-y border-slate-100 py-4"><ActionJourney currentIndex={item.journeyIndex} /></div>
         <p className="mt-4 text-base font-medium leading-6 text-slate-800">{item.title}</p>
         <p className="mt-1 text-sm leading-6 text-slate-600">{item.description}</p>
       </div>
