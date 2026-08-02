@@ -50,6 +50,7 @@ export interface NinehireInterviewer {
 export interface InterviewerLookup {
   interviewers: NinehireInterviewer[];
   unresolvedUserGroups: string[];
+  reason?: string;
 }
 
 export interface NinehireRecruitmentSummary {

@@ -282,28 +282,30 @@ describe("NineHire approval adapter", () => {
     ]);
   });
 
-  it("uses direct recruitment participants and leaves user groups unresolved", async () => {
+  it("uses participants in the active score sheet and leaves user groups unresolved", async () => {
     const adapter = new NinehireRecruitmentWorkflowAdapter({
       async callTool(name) {
-        if (name !== "get_recruitment") {
+        if (name !== "get_applicant_progress") {
           throw new Error(`Unexpected tool: ${name}`);
         }
         return {
           structuredContent: {
-            participants: [
+            applicantProgressId: "A1",
+            name: "Candidate",
+            scoreSheets: [
               {
-                type: { code: "user", name: "개별 멤버" },
-                user: {
-                  userId: "N1",
-                  name: "면접관",
-                  email: "interviewer@example.com",
-                },
-                userGroup: null,
-              },
-              {
-                type: { code: "user_group", name: "유저 그룹" },
-                user: null,
-                userGroup: { userGroupId: "G1", name: "개발팀" },
+                status: { code: "waiting", name: "Waiting" },
+                participants: [
+                  {
+                    userId: "N1",
+                    name: "Interviewer",
+                    email: "interviewer@example.com",
+                  },
+                  {
+                    type: { code: "user_group", name: "User group" },
+                    userGroup: { userGroupId: "G1", name: "Engineering" },
+                  },
+                ],
               },
             ],
           },
@@ -313,17 +315,55 @@ describe("NineHire approval adapter", () => {
 
     const lookup = await adapter.listInterviewers({
       recruitmentRef: "J456",
+      candidateRef: "A1",
+      candidateName: "Candidate",
     });
 
     expect(lookup.interviewers).toEqual([
       {
         ninehireUserId: "N1",
-        displayName: "면접관",
+        displayName: "Interviewer",
         email: "interviewer@example.com",
         required: true,
       },
     ]);
-    expect(lookup.unresolvedUserGroups).toEqual(["개발팀"]);
+    expect(lookup.unresolvedUserGroups).toEqual(["Engineering"]);
+  });
+
+  it("does not fall back to recruitment-wide participants when no active score sheet exists", async () => {
+    const adapter = new NinehireRecruitmentWorkflowAdapter({
+      async callTool(name) {
+        if (name !== "get_applicant_progress") {
+          throw new Error(`Unexpected tool: ${name}`);
+        }
+        return {
+          structuredContent: {
+            applicantProgressId: "A1",
+            name: "Candidate",
+            scoreSheets: [
+              {
+                status: { code: "done", name: "완료" },
+                participants: [
+                  { userId: "N1", name: "이전 평가자" },
+                ],
+              },
+            ],
+          },
+        };
+      },
+    });
+
+    await expect(
+      adapter.listInterviewers({
+        recruitmentRef: "R1",
+        candidateRef: "A1",
+        candidateName: "Candidate",
+      }),
+    ).resolves.toEqual({
+      interviewers: [],
+      unresolvedUserGroups: [],
+      reason: "현재 단계에 배정된 미완료 평가표를 찾지 못했습니다.",
+    });
   });
 
   it("reads an ordered recruitment pipeline from NineHire", async () => {

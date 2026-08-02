@@ -1879,7 +1879,8 @@ export class WorkflowService {
         caseId,
         reviewType: "INTERVIEWER_LOOKUP_REQUIRED",
         reason:
-          "나인하이어 채용 참여자에서 개별 사용자를 찾지 못했습니다. 면접관을 건별로 직접 추가하세요.",
+          upstream.reason ??
+          "현재 단계의 나인하이어 평가표에서 개별 평가자를 찾지 못했습니다. 평가표의 등록 평가자를 확인하거나 면접관을 건별로 직접 추가하세요.",
       });
       return {
         addedOrUpdated: 0,

@@ -141,7 +141,7 @@ function applicantProgressIdFromReference(
 }
 
 function codeOf(value: unknown): string | undefined {
-  return text(asRecord(value)?.code);
+  return text(value) ?? text(asRecord(value)?.code);
 }
 
 function nameOf(value: unknown): string | undefined {
@@ -238,6 +238,67 @@ function summarizeCompletedScoreSheets(
               ? { order: detail.stepOrder }
               : {}),
           },
+        }
+      : {}),
+  };
+}
+
+function activeScoreSheetInterviewers(
+  detail: Record<string, unknown>,
+): InterviewerLookup {
+  const activeScoreSheets = records(detail.scoreSheets).filter(
+    (sheet) => codeOf(sheet.status) !== "done",
+  );
+  if (activeScoreSheets.length === 0) {
+    return {
+      interviewers: [],
+      unresolvedUserGroups: [],
+      reason: "현재 단계에 배정된 미완료 평가표를 찾지 못했습니다.",
+    };
+  }
+
+  const seenUserIds = new Set<string>();
+  const seenGroupNames = new Set<string>();
+  const interviewers: NinehireInterviewer[] = [];
+  const unresolvedUserGroups: string[] = [];
+
+  for (const scoreSheet of activeScoreSheets) {
+    for (const participant of records(scoreSheet.participants)) {
+      const participantType = codeOf(participant.type);
+      const user = asRecord(participant.user);
+      const userGroup = asRecord(participant.userGroup);
+      const ninehireUserId = text(participant.userId) ?? text(user?.userId);
+      const displayName = text(participant.name) ?? text(user?.name);
+
+      if (participantType === "user_group" || userGroup) {
+        const groupName = text(userGroup?.name) ?? text(participant.name);
+        if (groupName && !seenGroupNames.has(groupName)) {
+          seenGroupNames.add(groupName);
+          unresolvedUserGroups.push(groupName);
+        }
+        continue;
+      }
+      if (!ninehireUserId || !displayName || seenUserIds.has(ninehireUserId)) {
+        continue;
+      }
+      seenUserIds.add(ninehireUserId);
+      const email = text(participant.email) ?? text(user?.email);
+      interviewers.push({
+        ninehireUserId,
+        displayName,
+        ...(email ? { email } : {}),
+        required: true,
+      });
+    }
+  }
+
+  return {
+    interviewers,
+    unresolvedUserGroups,
+    ...(interviewers.length === 0
+      ? {
+          reason:
+            "현재 단계 평가표에서 개별 평가자를 찾지 못했습니다. 평가표의 등록 평가자를 확인하세요.",
         }
       : {}),
   };
@@ -592,40 +653,44 @@ export class NinehireRecruitmentWorkflowAdapter
   async listInterviewers(
     context: CandidateContext,
   ): Promise<InterviewerLookup> {
-    const recruitmentId = identifierFromReference(context.recruitmentRef);
-    if (!recruitmentId) {
-      return { interviewers: [], unresolvedUserGroups: [] };
+    const recruitmentId = recruitmentIdFromReference(context.recruitmentRef);
+    if (!recruitmentId || !context.candidateName) {
+      return {
+        interviewers: [],
+        unresolvedUserGroups: [],
+        reason: "지원자 또는 채용 식별 정보가 없어 현재 단계 평가표를 조회할 수 없습니다.",
+      };
     }
-    const recruitment = asRecord(
+    const applicant = await this.findApplicant(context, recruitmentId);
+    if (!applicant.value) {
+      return {
+        interviewers: [],
+        unresolvedUserGroups: [],
+        reason: applicant.reason,
+      };
+    }
+    const applicantProgressId = text(applicant.value.applicantProgressId);
+    if (!applicantProgressId) {
+      return {
+        interviewers: [],
+        unresolvedUserGroups: [],
+        reason: "조회한 지원자에 applicantProgressId가 없습니다.",
+      };
+    }
+    const detail = asRecord(
       upstreamPayload(
-        await this.gateway.callTool("get_recruitment", { recruitmentId }),
+        await this.gateway.callTool("get_applicant_progress", {
+          applicantProgressId,
+        }),
       ),
     );
-    if (!recruitment) {
-      throw new Error("NineHire recruitment result format is invalid.");
+    if (!detail) {
+      return {
+        interviewers: [],
+        unresolvedUserGroups: [],
+        reason: "지원자 상세 조회 결과 형식이 예상과 다릅니다.",
+      };
     }
-    const unresolvedUserGroups = records(recruitment.participants)
-      .filter((participant) => codeOf(participant.type) === "user_group")
-      .map((participant) => text(asRecord(participant.userGroup)?.name))
-      .filter((name): name is string => Boolean(name));
-    const seenUserIds = new Set<string>();
-    const interviewers: NinehireInterviewer[] = [];
-    for (const participant of records(recruitment.participants)) {
-      if (codeOf(participant.type) !== "user") continue;
-      const user = asRecord(participant.user);
-      const ninehireUserId = text(user?.userId);
-      const displayName = text(user?.name);
-      if (!ninehireUserId || !displayName || seenUserIds.has(ninehireUserId)) {
-        continue;
-      }
-      seenUserIds.add(ninehireUserId);
-      interviewers.push({
-        ninehireUserId,
-        displayName,
-        ...(text(user?.email) ? { email: text(user?.email) } : {}),
-        required: true,
-      });
-    }
-    return { interviewers, unresolvedUserGroups };
+    return activeScoreSheetInterviewers(detail);
   }
 }
