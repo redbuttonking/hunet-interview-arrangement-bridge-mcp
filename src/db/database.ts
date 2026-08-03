@@ -28,6 +28,8 @@ import { firstReminderAt, secondReminderAt } from "../domain/calendar.js";
 
 type SqlRow = Record<string, unknown>;
 
+const DRAFT_SEND_LEASE_MS = 2 * 60 * 1000;
+
 export interface InterviewCaseRow {
   id: string;
   notificationId: string | null;
@@ -78,8 +80,9 @@ export interface DraftRow {
     | "SCHEDULE_CONFIRMATION"
     | "SCHEDULE_CHANGE"
     | "SCHEDULE_CANCELLATION";
-  status: "DRAFT" | "APPROVED" | "SENT" | "CANCELLED";
+  status: "DRAFT" | "APPROVED" | "SENDING" | "SENT" | "CANCELLED";
   approvedAt: string | null;
+  sendingStartedAt: string | null;
   sentAt: string | null;
   slackMessageTs: string | null;
   workflowReviewId: string | null;
@@ -278,6 +281,14 @@ function asString(value: unknown): string {
   return String(value);
 }
 
+function safeErrorSummary(value: string): string {
+  return value
+    .split(/\r?\n/u, 1)[0]!
+    .replace(/\b(?:xox[abpr]-)[A-Za-z0-9-]+/gu, "[REDACTED_SLACK_TOKEN]")
+    .replace(/\b(?:api[-_ ]?key|authorization|token|secret)\s*[:=]\s*\S+/giu, "[REDACTED_SECRET]")
+    .slice(0, 500);
+}
+
 function nullableString(value: unknown): string | null {
   return value === null || value === undefined ? null : String(value);
 }
@@ -365,6 +376,7 @@ function toDraft(row: SqlRow): DraftRow {
     messageType: asString(row.message_type) as DraftRow["messageType"],
     status: asString(row.status) as DraftRow["status"],
     approvedAt: nullableString(row.approved_at),
+    sendingStartedAt: nullableString(row.sending_started_at),
     sentAt: nullableString(row.sent_at),
     slackMessageTs: nullableString(row.slack_message_ts),
     workflowReviewId: nullableString(row.workflow_review_id),
@@ -676,6 +688,7 @@ export class BridgeDatabase {
         payload_hash TEXT NOT NULL,
         status TEXT NOT NULL,
         approved_at TEXT,
+        sending_started_at TEXT,
         sent_at TEXT,
         slack_message_ts TEXT,
         created_at TEXT NOT NULL
@@ -1192,6 +1205,25 @@ export class BridgeDatabase {
         )
         .run();
     }
+
+    const versionSixteen = this.connection
+      .prepare("SELECT version FROM schema_migrations WHERE version = 16")
+      .get() as SqlRow | undefined;
+    if (!versionSixteen) {
+      const draftColumns = this.connection
+        .prepare("PRAGMA table_info(message_drafts)")
+        .all() as SqlRow[];
+      if (!draftColumns.some((column) => asString(column.name) === "sending_started_at")) {
+        this.connection.exec(
+          "ALTER TABLE message_drafts ADD COLUMN sending_started_at TEXT",
+        );
+      }
+      this.connection
+        .prepare(
+          "INSERT INTO schema_migrations(version, applied_at) VALUES (16, datetime('now'))",
+        )
+        .run();
+    }
   }
 
   transaction<T>(operation: () => T): T {
@@ -1332,7 +1364,7 @@ export class BridgeDatabase {
         SET last_heartbeat_at = ?, last_error_message = ?
         WHERE worker_key = ?
       `)
-      .run(now.toISOString(), errorMessage, workerKey);
+      .run(now.toISOString(), safeErrorSummary(errorMessage), workerKey);
   }
 
   enqueueIntegrationRetry(input: {
@@ -1448,6 +1480,7 @@ export class BridgeDatabase {
       throw new Error(`Pending integration retry job not found: ${id}`);
     }
     const attemptCount = job.attemptCount + 1;
+    const safeMessage = safeErrorSummary(errorMessage);
     const exhausted = attemptCount >= job.maxAttempts;
     const nextAttemptAt = new Date(
       now.getTime() + retryDelayMs(attemptCount + 1),
@@ -1462,7 +1495,7 @@ export class BridgeDatabase {
       .run(
         attemptCount,
         nextAttemptAt,
-        errorMessage,
+        safeMessage,
         exhausted ? "FAILED" : "PENDING",
         exhausted ? now.toISOString() : null,
         now.toISOString(),
@@ -1795,6 +1828,28 @@ export class BridgeDatabase {
         input.decisionId,
       );
     return this.getInterviewSkillDecision(input.decisionId)!;
+  }
+
+  reopenResolvedInterviewSkillDecision(id: string, reason: string): InterviewSkillDecisionRow {
+    const decision = this.getInterviewSkillDecision(id);
+    if (!decision) throw new Error(`Interview skill decision not found: ${id}`);
+    if (decision.status === "PENDING") return decision;
+    const now = new Date().toISOString();
+    this.connection
+      .prepare(`
+        UPDATE interview_skill_decisions
+        SET status = 'PENDING', selected_option_id = NULL, resolution_json = NULL,
+            updated_at = ?, resolved_at = NULL
+        WHERE id = ? AND status = 'RESOLVED'
+      `)
+      .run(now, id);
+    if (decision.caseId) {
+      this.addEvent(decision.caseId, "INTERVIEW_SKILL_DECISION_REOPENED", "SYSTEM", {
+        decisionId: id,
+        reason: safeErrorSummary(reason),
+      });
+    }
+    return this.getInterviewSkillDecision(id)!;
   }
 
   createInterviewCase(input: {
@@ -2144,6 +2199,15 @@ export class BridgeDatabase {
     const blockById = new Map(
       this.listMeetingRoomBlocks(undefined, false).map((block) => [block.id, block]),
     );
+    const activeAllocationsByCase = new Map<string, RoomAllocationRow[]>();
+    const activeAllocations = this.listRoomAllocations().filter(
+      (allocation) => allocation.status === "ACTIVE",
+    );
+    for (const allocation of activeAllocations) {
+      const allocations = activeAllocationsByCase.get(allocation.caseId) ?? [];
+      allocations.push(allocation);
+      activeAllocationsByCase.set(allocation.caseId, allocations);
+    }
     const roomMetrics = new Map<
       string,
       {
@@ -2153,7 +2217,7 @@ export class BridgeDatabase {
         allocatedMinutes: number;
       }
     >();
-    for (const allocation of this.listRoomAllocations().filter((item) => item.status === "ACTIVE")) {
+    for (const allocation of activeAllocations) {
       const block = blockById.get(allocation.roomBlockId);
       if (!block) continue;
       const key = `${block.roomId}:${block.roomName}`;
@@ -2236,7 +2300,9 @@ export class BridgeDatabase {
             attemptCount: job.attemptCount,
             maxAttempts: job.maxAttempts,
             nextAttemptAt: job.nextAttemptAt,
-            lastError: job.lastError,
+            lastError: job.lastError
+              ? "연동 작업이 실패했습니다. 상세 오류는 로컬 로그를 확인하세요."
+              : null,
             status: job.status,
             createdAt: job.createdAt,
         })),
@@ -2268,6 +2334,38 @@ export class BridgeDatabase {
         const pendingCancellationExternalFollowUps = caseFollowUps.filter(
           (followUp) => followUp.status === "PENDING",
         ).length;
+        const scheduledSegments = (activeAllocationsByCase.get(interviewCase.id) ?? [])
+          .map((allocation) => {
+            const block = blockById.get(allocation.roomBlockId);
+            return block
+              ? {
+                  stepId: allocation.interviewStepId,
+                  roomName: block.roomName,
+                  date: allocation.date,
+                  startTime: allocation.startTime,
+                  endTime: allocation.endTime,
+                }
+              : null;
+          })
+          .filter((segment): segment is NonNullable<typeof segment> => Boolean(segment))
+          .sort((left, right) =>
+            `${left.date}T${left.startTime}`.localeCompare(`${right.date}T${right.startTime}`),
+          );
+        if (
+          scheduledSegments.length === 0 &&
+          interviewCase.scheduledDate &&
+          interviewCase.scheduledRoomName &&
+          interviewCase.scheduledStartTime &&
+          interviewCase.scheduledEndTime
+        ) {
+          scheduledSegments.push({
+            stepId: null,
+            roomName: interviewCase.scheduledRoomName,
+            date: interviewCase.scheduledDate,
+            startTime: interviewCase.scheduledStartTime,
+            endTime: interviewCase.scheduledEndTime,
+          });
+        }
         return {
           id: interviewCase.id,
           candidateName: interviewCase.candidateName,
@@ -2278,6 +2376,7 @@ export class BridgeDatabase {
           scheduledDate: interviewCase.scheduledDate,
           scheduledStartTime: interviewCase.scheduledStartTime,
           scheduledEndTime: interviewCase.scheduledEndTime,
+          scheduledSegments,
           candidateScheduleProposalSent: this.hasCandidateScheduleProposalSent(
             interviewCase.id,
           ),
@@ -3020,63 +3119,65 @@ export class BridgeDatabase {
       throw new Error("Room allocation must fit the room block and case duration.");
     }
 
-    const existingForCase = this.connection
-      .prepare(`
-        SELECT * FROM room_allocations
-        WHERE case_id = ? AND status = 'ACTIVE'
-      `)
-      .get(input.caseId) as SqlRow | undefined;
-    if (existingForCase) {
-      const existing = toRoomAllocation(existingForCase);
-      if (
-        existing.roomBlockId === input.roomBlockId &&
-        existing.startTime === input.startTime &&
-        existing.endTime === input.endTime
-      ) {
-        return existing;
+    return this.transaction(() => {
+      const existingForCase = this.connection
+        .prepare(`
+          SELECT * FROM room_allocations
+          WHERE case_id = ? AND status = 'ACTIVE'
+        `)
+        .get(input.caseId) as SqlRow | undefined;
+      if (existingForCase) {
+        const existing = toRoomAllocation(existingForCase);
+        if (
+          existing.roomBlockId === input.roomBlockId &&
+          existing.startTime === input.startTime &&
+          existing.endTime === input.endTime
+        ) {
+          return existing;
+        }
+        throw new Error("This case already has an active room allocation.");
       }
-      throw new Error("This case already has an active room allocation.");
-    }
 
-    const conflict = this.connection
-      .prepare(`
-        SELECT id FROM room_allocations
-        WHERE room_block_id = ?
-          AND status = 'ACTIVE'
-          AND start_time < ?
-          AND end_time > ?
-        LIMIT 1
-      `)
-      .get(input.roomBlockId, input.endTime, input.startTime) as SqlRow | undefined;
-    if (conflict) throw new Error("The selected room slot is already allocated.");
+      const conflict = this.connection
+        .prepare(`
+          SELECT id FROM room_allocations
+          WHERE room_block_id = ?
+            AND status = 'ACTIVE'
+            AND start_time < ?
+            AND end_time > ?
+          LIMIT 1
+        `)
+        .get(input.roomBlockId, input.endTime, input.startTime) as SqlRow | undefined;
+      if (conflict) throw new Error("The selected room slot is already allocated.");
 
-    const id = randomUUID();
-    const now = new Date().toISOString();
-    this.connection
-      .prepare(`
-        INSERT INTO room_allocations(
-          id, case_id, room_block_id, date, start_time, end_time,
-          status, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)
-      `)
-      .run(
-        id,
-        input.caseId,
-        input.roomBlockId,
-        block.date,
-        input.startTime,
-        input.endTime,
-        now,
-        now,
-      );
-    this.addEvent(input.caseId, "ROOM_ALLOCATED", "USER", {
-      allocationId: id,
-      roomBlockId: input.roomBlockId,
-      date: block.date,
-      startTime: input.startTime,
-      endTime: input.endTime,
+      const id = randomUUID();
+      const now = new Date().toISOString();
+      this.connection
+        .prepare(`
+          INSERT INTO room_allocations(
+            id, case_id, room_block_id, date, start_time, end_time,
+            status, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)
+        `)
+        .run(
+          id,
+          input.caseId,
+          input.roomBlockId,
+          block.date,
+          input.startTime,
+          input.endTime,
+          now,
+          now,
+        );
+      this.addEvent(input.caseId, "ROOM_ALLOCATED", "USER", {
+        allocationId: id,
+        roomBlockId: input.roomBlockId,
+        date: block.date,
+        startTime: input.startTime,
+        endTime: input.endTime,
+      });
+      return this.listRoomAllocations(input.caseId).find((row) => row.id === id)!;
     });
-    return this.listRoomAllocations(input.caseId).find((row) => row.id === id)!;
   }
 
   allocateSequentialRoomBlocks(input: {
@@ -4092,7 +4193,7 @@ export class BridgeDatabase {
         SELECT * FROM message_drafts
         WHERE case_id = ? AND payload_hash = ? AND message_type = ?
           AND workflow_review_id IS ?
-          AND status IN ('DRAFT', 'APPROVED', 'SENT')
+          AND status IN ('DRAFT', 'APPROVED', 'SENDING', 'SENT')
         ORDER BY created_at DESC LIMIT 1
       `)
       .get(
@@ -4147,7 +4248,7 @@ export class BridgeDatabase {
       .prepare(`
         SELECT * FROM message_drafts
         WHERE workflow_review_id = ? AND message_type = ?
-          AND status IN ('DRAFT', 'APPROVED', 'SENT')
+          AND status IN ('DRAFT', 'APPROVED', 'SENDING', 'SENT')
         ORDER BY created_at DESC
         LIMIT 1
       `)
@@ -4194,6 +4295,7 @@ export class BridgeDatabase {
   }
 
   approveDraft(id: string): DraftRow {
+    const now = new Date();
     const result = this.connection
       .prepare(`
         UPDATE message_drafts
@@ -4203,8 +4305,73 @@ export class BridgeDatabase {
       .run(new Date().toISOString(), id);
     if (Number(result.changes) !== 1) {
       const existing = this.getDraft(id);
+      if (existing?.status === "SENT") return existing;
       if (existing?.status === "APPROVED") return existing;
+      if (existing?.status === "SENDING") {
+        const startedAt = existing.sendingStartedAt
+          ? Date.parse(existing.sendingStartedAt)
+          : Number.NaN;
+        if (!Number.isFinite(startedAt) || now.getTime() - startedAt >= DRAFT_SEND_LEASE_MS) {
+          this.connection
+            .prepare(`
+              UPDATE message_drafts
+              SET status = 'APPROVED', sending_started_at = NULL
+              WHERE id = ? AND status = 'SENDING'
+            `)
+            .run(id);
+          return this.getDraft(id)!;
+        }
+        throw new Error("Draft is currently being sent by another operation.");
+      }
       throw new Error(`Draft is not awaiting approval: ${id}`);
+    }
+    return this.getDraft(id)!;
+  }
+
+  claimDraftForSending(id: string, now = new Date()): DraftRow | undefined {
+    const draft = this.getDraft(id);
+    if (!draft) throw new Error(`Draft not found: ${id}`);
+    if (draft.status === "SENT") return draft;
+    if (draft.status === "SENDING") {
+      const startedAt = draft.sendingStartedAt
+        ? Date.parse(draft.sendingStartedAt)
+        : Number.NaN;
+      if (
+        Number.isFinite(startedAt) &&
+        now.getTime() - startedAt < DRAFT_SEND_LEASE_MS
+      ) {
+        return undefined;
+      }
+      this.connection
+        .prepare(`
+          UPDATE message_drafts
+          SET status = 'APPROVED', sending_started_at = NULL
+          WHERE id = ? AND status = 'SENDING'
+        `)
+        .run(id);
+    }
+    const result = this.connection
+      .prepare(`
+        UPDATE message_drafts
+        SET status = 'SENDING', sending_started_at = ?
+        WHERE id = ? AND status = 'APPROVED'
+      `)
+      .run(now.toISOString(), id);
+    return Number(result.changes) === 1 ? this.getDraft(id)! : undefined;
+  }
+
+  resetDraftSending(id: string): DraftRow {
+    const result = this.connection
+      .prepare(`
+        UPDATE message_drafts
+        SET status = 'APPROVED', sending_started_at = NULL
+        WHERE id = ? AND status = 'SENDING'
+      `)
+      .run(id);
+    if (Number(result.changes) !== 1) {
+      const draft = this.getDraft(id);
+      if (draft?.status === "APPROVED" || draft?.status === "SENT") return draft;
+      throw new Error(`Draft is not being sent: ${id}`);
     }
     return this.getDraft(id)!;
   }
@@ -4214,6 +4381,9 @@ export class BridgeDatabase {
     if (!draft) throw new Error(`Draft not found: ${id}`);
     if (draft.status === "SENT") {
       throw new Error("A sent draft cannot be cancelled.");
+    }
+    if (draft.status === "SENDING") {
+      throw new Error("A draft being sent cannot be cancelled.");
     }
     this.connection
       .prepare(`
@@ -4231,15 +4401,15 @@ export class BridgeDatabase {
     const draft = this.getDraft(id);
     if (!draft) throw new Error(`Draft not found: ${id}`);
     if (draft.status === "SENT") return draft;
-    if (draft.status !== "APPROVED") {
+    if (draft.status !== "APPROVED" && draft.status !== "SENDING") {
       throw new Error(`Draft must be approved before sending: ${id}`);
     }
     this.transaction(() => {
       this.connection
         .prepare(`
           UPDATE message_drafts
-          SET status = 'SENT', sent_at = ?, slack_message_ts = ?
-          WHERE id = ?
+          SET status = 'SENT', sending_started_at = NULL, sent_at = ?, slack_message_ts = ?
+          WHERE id = ? AND status IN ('APPROVED', 'SENDING')
         `)
         .run(sentAt.toISOString(), slackMessageTs, id);
       if (draft.messageType === "INTERVIEWER_REQUEST") {

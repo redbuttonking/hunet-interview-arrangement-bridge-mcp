@@ -25,6 +25,7 @@ const config: AppConfig = {
     url: "https://example.invalid/mcp",
     authHeader: "Authorization",
     authScheme: "Bearer",
+    timeoutMs: 30_000,
   },
 };
 
@@ -763,6 +764,14 @@ describe("evaluation approval workflow", () => {
           candidateName: "수동 확정 지원자",
           status: "CONFIRMED",
           scheduledRoomName: "[818호] 행복룸",
+          scheduledSegments: [
+            expect.objectContaining({
+              roomName: "[818호] 행복룸",
+              date: "2026-08-04",
+              startTime: "16:00",
+              endTime: "17:00",
+            }),
+          ],
         },
       ],
     });

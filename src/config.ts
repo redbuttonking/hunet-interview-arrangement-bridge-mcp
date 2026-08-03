@@ -24,6 +24,7 @@ export interface AppConfig {
     apiKey?: string;
     authHeader: string;
     authScheme: string;
+    timeoutMs: number;
   };
 }
 
@@ -96,6 +97,7 @@ export function getConfig(): AppConfig {
         process.env.NINEHIRE_MCP_AUTH_SCHEME === undefined
           ? "Bearer"
           : process.env.NINEHIRE_MCP_AUTH_SCHEME.trim(),
+      timeoutMs: positiveInteger("NINEHIRE_MCP_TIMEOUT_MS", 30_000),
     },
   };
 }

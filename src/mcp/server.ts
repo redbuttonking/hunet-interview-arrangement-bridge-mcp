@@ -88,7 +88,7 @@ export function createBridgeMcpServer(
   const slackClient =
     dependencies?.slackClient ??
     (config.slack.botToken
-      ? new WebClient(config.slack.botToken)
+      ? new WebClient(config.slack.botToken, { timeout: 30_000 })
       : undefined);
   const identityResolver = slackClient
     ? new WebClientIdentityResolver(slackClient)

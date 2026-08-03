@@ -28,6 +28,7 @@ describe("bridge MCP server", () => {
         url: "https://example.invalid/mcp",
         authHeader: "Authorization",
         authScheme: "Bearer",
+        timeoutMs: 30_000,
       },
     };
     const fakeNinehire: NinehireWorkflowAdapter = {

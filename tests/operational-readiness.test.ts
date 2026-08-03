@@ -30,6 +30,7 @@ const config: AppConfig = {
     apiKey: "test-key",
     authHeader: "Authorization",
     authScheme: "Bearer",
+    timeoutMs: 30_000,
   },
 };
 

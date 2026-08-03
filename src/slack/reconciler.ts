@@ -24,6 +24,7 @@ export class SlackReconciler {
     message: SlackMessage,
   ): Promise<void> {
     if (channelId !== this.config.slack.sourceChannelId || !message.ts) return;
+    if (!message.bot_id) return;
     if (
       this.config.slack.ninehireBotId &&
       message.bot_id !== this.config.slack.ninehireBotId
@@ -32,6 +33,7 @@ export class SlackReconciler {
     }
     if (message.subtype && message.subtype !== "bot_message") return;
     const parsed = parseNinehireSlackMessage(message);
+    if (parsed.eventType === "OTHER") return;
     await this.workflow.ingestSlackNotification({
       channelId,
       messageTs: message.ts,

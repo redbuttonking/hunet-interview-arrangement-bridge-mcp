@@ -22,6 +22,13 @@ export type CandidateCase = {
   scheduledDate: string | null;
   scheduledStartTime: string | null;
   scheduledEndTime: string | null;
+  scheduledSegments: Array<{
+    stepId: string | null;
+    roomName: string;
+    date: string;
+    startTime: string;
+    endTime: string;
+  }>;
   candidateScheduleProposalSent: boolean;
   interviewerResponses: {
     required: number;

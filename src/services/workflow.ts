@@ -104,6 +104,11 @@ function suggestedInterviewMode(
     : "STANDARD";
 }
 
+function suggestedInterviewDuration(step: { title: string; name: string }): number {
+  const normalized = `${step.title} ${step.name}`.replace(/\s/gu, "").toLowerCase();
+  return normalized.includes("시강") ? 30 : 60;
+}
+
 type RecruitmentInterviewRouteSelection = {
   triggerStepId: string;
   mode: InterviewPlanMode;
@@ -299,14 +304,18 @@ function classifyInterviewArrangementEligibility(
 
   const decisions = finalDecisionTitles(scoreSheet);
 
-  const hasPass = decisions.some(
-    (title) => title.includes("합격") && !title.includes("불합격"),
-  );
+  const normalized = decisions.map((title) => title.replace(/\s/gu, ""));
+  const isAmbiguous = (title: string) =>
+    /(판단|어렵|여부|미정|검토|확인|추가|불확실)/u.test(title);
+  const isPass = (title: string) =>
+    title.includes("합격") && !title.includes("불합격") && !title.includes("보류") && !isAmbiguous(title);
+  const isReject = (title: string) =>
+    title.includes("불합격") && !title.includes("보류") && !isAmbiguous(title);
+  const isHold = (title: string) => title.includes("보류") && !isAmbiguous(title);
+  const hasPass = normalized.some(isPass);
   if (hasPass) return "ELIGIBLE";
 
-  const hasOnlyRejectOrHold = decisions.every(
-    (title) => title.includes("불합격") || title.includes("보류"),
-  );
+  const hasOnlyRejectOrHold = normalized.every((title) => isReject(title) || isHold(title));
   return hasOnlyRejectOrHold ? "NOT_ELIGIBLE" : "REVIEW_REQUIRED";
 }
 
@@ -382,7 +391,7 @@ export class WorkflowService {
           .map((step) => ({
             ...step,
             mode: suggestedInterviewMode(step),
-            durationMinutes: 60,
+            durationMinutes: suggestedInterviewDuration(step),
           })),
       ),
       steps: pipeline.steps.map((step) => ({
@@ -391,7 +400,7 @@ export class WorkflowService {
         suggestedMode: isSuggestedInterviewStep(step)
           ? suggestedInterviewMode(step)
           : null,
-        defaultDurationMinutes: 60,
+        defaultDurationMinutes: suggestedInterviewDuration(step),
       })),
     };
   }
@@ -443,7 +452,7 @@ export class WorkflowService {
           name: step.name,
           order: step.order,
           mode: selection.mode,
-          durationMinutes: selection.durationMinutes ?? 60,
+          durationMinutes: selection.durationMinutes ?? suggestedInterviewDuration(step),
         };
       })
       .sort((left, right) => left.order - right.order);
@@ -559,6 +568,9 @@ export class WorkflowService {
       const step = template.steps.find((item) => item.stepId === session.stepId);
       if (!step || session.interviewerIds.length === 0) {
         throw new Error("Each sequential stage needs a configured step and at least one interviewer.");
+      }
+      if (step.durationMinutes !== 60) {
+        throw new Error("A 30-minute interview stage cannot be included in a sequential interview.");
       }
       return {
         stepId: step.stepId,
@@ -2217,27 +2229,40 @@ export class WorkflowService {
     }
 
     const approved = this.db.approveDraft(draftId);
-    const previouslySentTs = await this.findSlackMessageForDraft(
-      approved,
-      client,
-      slackMetadataEventType(messageType),
-    );
-    if (previouslySentTs) {
-      return this.db.markDraftSent(approved.id, previouslySentTs);
+    if (approved.status === "SENT") return approved;
+    const claimed = this.db.claimDraftForSending(approved.id);
+    if (!claimed) {
+      const latest = this.db.getDraft(approved.id);
+      if (latest?.status === "SENT") return latest;
+      throw new Error("Draft is currently being sent by another operation.");
     }
-    const response = await client.chat.postMessage({
-      channel: approved.channelId,
-      text: approved.previewText,
-      blocks: JSON.parse(approved.blocksJson) as never,
-      metadata: {
-        event_type: slackMetadataEventType(messageType),
-        event_payload: { draft_id: approved.id },
-      },
-    });
-    if (!response.ts) {
-      throw new Error("Slack accepted the request but did not return a message ts.");
+    try {
+      const previouslySentTs = await this.findSlackMessageForDraft(
+        claimed,
+        client,
+        slackMetadataEventType(messageType),
+      );
+      if (previouslySentTs) {
+        return this.db.markDraftSent(claimed.id, previouslySentTs);
+      }
+      const response = await client.chat.postMessage({
+        channel: claimed.channelId,
+        text: claimed.previewText,
+        blocks: JSON.parse(claimed.blocksJson) as never,
+        metadata: {
+          event_type: slackMetadataEventType(messageType),
+          event_payload: { draft_id: claimed.id },
+        },
+      });
+      if (!response.ts) {
+        throw new Error("Slack accepted the request but did not return a message ts.");
+      }
+      return this.db.markDraftSent(claimed.id, response.ts);
+    } catch (error) {
+      const latest = this.db.getDraft(claimed.id);
+      if (latest?.status === "SENDING") this.db.resetDraftSending(claimed.id);
+      throw error;
     }
-    return this.db.markDraftSent(approved.id, response.ts);
   }
 
   private createScheduleUpdateDraft(

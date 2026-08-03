@@ -81,6 +81,7 @@ Slack 알림 채널 조회와 나인하이어 평가표 조회가 일시적으�
 - 재시도는 최대 3회이며, 모두 실패한 나인하이어 평가표 조회는 `EVALUATION_LOOKUP_FAILED` 검토 건으로 전환한다.
 - Slack 알림 채널 조회가 모두 실패한 경우에는 대시보드의 실패 재시도 항목에서 사유를 확인한 뒤, 워커·Slack 권한·네트워크를 점검한다.
 - 재시도 대기열은 조회 작업만 처리한다. Slack 메시지 발송은 기존과 같이 사용자 승인 없이는 재시도하거나 자동 발송하지 않는다.
+- 승인된 Slack 초안은 발송 직전에 짧은 DB lease를 확보한다. 같은 초안을 동시에 발송하거나 발송 직후 프로세스가 중단되어 재시도하는 경우에도 기존 Slack 메시지를 먼저 찾아 중복 발송을 막는다.
 
 ## 다우오피스 전용 브라우저 프로필
 
@@ -313,6 +314,7 @@ NINEHIRE_MCP_URL=https://api.ninehire.com/developer/mcp
 NINEHIRE_MCP_API_KEY=실제_키
 NINEHIRE_MCP_AUTH_HEADER=Authorization
 NINEHIRE_MCP_AUTH_SCHEME=Bearer
+NINEHIRE_MCP_TIMEOUT_MS=30000
 ```
 
 인증 헤더·스킴은 나인하이어 설정 화면이 제공하는 연결 예시와 반드시 대조하세요. 이 저장소에는 실제 키를 넣지 않습니다.

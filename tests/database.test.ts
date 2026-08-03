@@ -8,7 +8,36 @@ describe("BridgeDatabase", () => {
   it("applies every schema migration when the database opens", () => {
     db = new BridgeDatabase(":memory:");
 
-    expect(db.getLatestSchemaVersion()).toBe(15);
+    expect(db.getLatestSchemaVersion()).toBe(16);
+  });
+
+  it("leases an approved draft so concurrent send attempts cannot duplicate Slack messages", () => {
+    const database = (db = new BridgeDatabase(":memory:"));
+    const interviewCase = database.createInterviewCase({
+      candidateName: "Candidate",
+      proposalDates: ["2026-08-10"],
+    });
+    const draft = database.createDraft({
+      caseId: interviewCase.id,
+      channelId: "C1",
+      previewText: "Availability request",
+      blocksJson: "[]",
+      payloadHash: "draft-hash",
+      messageType: "INTERVIEWER_REQUEST",
+    });
+    const approved = database.approveDraft(draft.id);
+    const startedAt = new Date();
+    const claimed = database.claimDraftForSending(approved.id, startedAt);
+
+    expect(claimed).toMatchObject({ status: "SENDING", sendingStartedAt: startedAt.toISOString() });
+    expect(database.claimDraftForSending(approved.id, new Date(startedAt.getTime() + 60_000))).toBeUndefined();
+    expect(() => database.approveDraft(approved.id)).toThrow("currently being sent");
+
+    const recovered = database.claimDraftForSending(
+      approved.id,
+      new Date(startedAt.getTime() + 3 * 60_000),
+    );
+    expect(recovered).toMatchObject({ status: "SENDING" });
   });
 
   it("stores one pending interview skill decision and records the selected option", () => {
@@ -45,6 +74,16 @@ describe("BridgeDatabase", () => {
       resolution: { caseId: "C1" },
     });
     expect(db.listInterviewSkillDecisions({ status: "PENDING" })).toEqual([]);
+
+    const reopened = db.reopenResolvedInterviewSkillDecision(
+      first.id,
+      "대시보드 후속 작업 생성 실패",
+    );
+    expect(reopened).toMatchObject({
+      status: "PENDING",
+      selectedOptionId: null,
+      resolution: null,
+    });
   });
 
   it("discards a pending decision when the user closes an unsubmitted selection", () => {

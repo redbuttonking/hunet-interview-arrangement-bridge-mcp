@@ -94,6 +94,9 @@ export function suggestSequentialInterviewSlotsWithRooms(
   if (!plan || plan.mode !== "SEQUENTIAL" || plan.sessions.length < 2) {
     throw new Error("Configure a sequential interview plan before requesting suggestions.");
   }
+  if (plan.durationMinutes !== plan.sessions.length * 60) {
+    throw new Error("Sequential interview plans must use 60-minute stages.");
+  }
   const missingRequiredResponses = bundle.interviewers
     .filter((interviewer) => plan.interviewerIds.includes(interviewer.id))
     .filter((interviewer) => interviewer.status !== "SUBMITTED")

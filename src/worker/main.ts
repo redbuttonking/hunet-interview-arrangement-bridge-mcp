@@ -33,6 +33,7 @@ const app = new App({
   token: config.slack.botToken,
   appToken: config.slack.appToken,
   socketMode: true,
+  clientOptions: { timeout: 30_000 },
   logLevel: LogLevel.INFO,
 });
 const gateway = new NinehireMcpGateway(config.ninehire);

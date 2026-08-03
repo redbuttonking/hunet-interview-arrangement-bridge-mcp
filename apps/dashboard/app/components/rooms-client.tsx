@@ -2,7 +2,7 @@
 // 다우오피스 회의실 예약과 인터뷰 배정을 공통 캘린더 화면으로 보여준다.
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { CalendarDays, ChevronLeft, ChevronRight, Clock3, UsersRound } from "lucide-react";
 import { AppHeader, PageHeader } from "./app-shell";
 import { Badge } from "./ui/badge";
@@ -58,6 +58,11 @@ function timeCardStyle(startTime: string, endTime: string) {
   };
 }
 
+type ScheduledCalendarItem = Pick<
+  CandidateCase,
+  "id" | "candidateName" | "status" | "scheduledRoomName" | "scheduledStartTime" | "scheduledEndTime"
+> & { caseId: string };
+
 function RoomCalendarRow({
   roomName,
   blocks,
@@ -65,7 +70,7 @@ function RoomCalendarRow({
 }: {
   roomName: string;
   blocks: DashboardSnapshot["meetingRoomBlocks"];
-  scheduled: CandidateCase[];
+  scheduled: ScheduledCalendarItem[];
 }) {
   return (
     <section className="grid min-w-[1140px] grid-cols-[180px_minmax(960px,1fr)] border-t border-slate-200 first:border-t-0">
@@ -86,7 +91,7 @@ function RoomCalendarRow({
           <Link
             aria-label={`${interviewCase.candidateName ?? "후보자"} ${interviewCase.scheduledStartTime}부터 ${interviewCase.scheduledEndTime}까지 ${scheduleStatusLabel(interviewCase.status)}`}
             className={`absolute top-14 bottom-3 grid min-w-1 content-center gap-1 overflow-hidden rounded-lg border px-3 py-2 shadow-sm transition-transform hover:z-10 hover:-translate-y-0.5 ${interviewCase.status === "AWAITING_CANDIDATE_CONFIRMATION" ? "border-amber-300 bg-amber-50 text-amber-900" : "border-blue-300 bg-blue-50 text-blue-950"}`}
-            href={`/cases/${interviewCase.id}`}
+            href={`/cases/${interviewCase.caseId}`}
             key={interviewCase.id}
             style={timeCardStyle(interviewCase.scheduledStartTime ?? "09:00", interviewCase.scheduledEndTime ?? "09:00")}
             title={`${interviewCase.candidateName ?? "후보자 확인 필요"} · ${interviewCase.scheduledStartTime} – ${interviewCase.scheduledEndTime}`}
@@ -103,17 +108,37 @@ function RoomCalendarRow({
 export function RoomsClient({ data }: { data: DashboardSnapshot }) {
   const dates = useMemo(() => [...new Set([
     ...data.meetingRoomBlocks.map((block) => block.date),
-    ...data.dashboard.cases.map((interviewCase) => interviewCase.scheduledDate).filter((date): date is string => Boolean(date)),
+    ...data.dashboard.cases.flatMap((interviewCase) => interviewCase.scheduledSegments.map((segment) => segment.date)),
   ])].sort(), [data]);
-  const [selectedDate, setSelectedDate] = useState(dates[0] ?? todayInSeoul());
+  const preferredDate = useMemo(() => {
+    const today = todayInSeoul();
+    return dates.includes(today) ? today : dates.find((date) => date >= today) ?? dates[0] ?? today;
+  }, [dates]);
+  const [selectedDate, setSelectedDate] = useState(preferredDate);
+  useEffect(() => {
+    setSelectedDate((current) => dates.includes(current) ? current : preferredDate);
+  }, [dates, preferredDate]);
   const roomNames = useMemo(() => [...new Set([
     ...data.meetingRoomBlocks.map((block) => block.roomName),
-    ...data.dashboard.cases.map((interviewCase) => interviewCase.scheduledRoomName).filter((roomName): roomName is string => Boolean(roomName)),
+    ...data.dashboard.cases.flatMap((interviewCase) => interviewCase.scheduledSegments.map((segment) => segment.roomName)),
   ])].sort((left, right) => roomOrder(left) - roomOrder(right) || left.localeCompare(right, "ko-KR")), [data]);
   const blocks = data.meetingRoomBlocks.filter((block) => block.date === selectedDate);
-  const scheduled = data.dashboard.cases.filter((interviewCase) =>
-    interviewCase.scheduledDate === selectedDate &&
+  const scheduledCases = data.dashboard.cases.filter((interviewCase) =>
+    interviewCase.scheduledSegments.some((segment) => segment.date === selectedDate) &&
     ["CONFIRMED", "AWAITING_CANDIDATE_CONFIRMATION"].includes(interviewCase.status),
+  );
+  const scheduled = scheduledCases.flatMap((interviewCase) =>
+    interviewCase.scheduledSegments
+      .filter((segment) => segment.date === selectedDate)
+      .map((segment) => ({
+        id: `${interviewCase.id}-${segment.stepId ?? segment.startTime}`,
+        caseId: interviewCase.id,
+        candidateName: interviewCase.candidateName,
+        status: interviewCase.status,
+        scheduledRoomName: segment.roomName,
+        scheduledStartTime: segment.startTime,
+        scheduledEndTime: segment.endTime,
+      })),
   );
 
   return (
@@ -159,7 +184,7 @@ export function RoomsClient({ data }: { data: DashboardSnapshot }) {
         </Card>
 
         <div className="mt-5 flex items-center gap-2 text-sm leading-6 text-slate-600"><Clock3 className="size-4 shrink-0 text-slate-400" />예약 블록은 취소하지 않고 유지합니다. 인터뷰를 취소하거나 변경해도 다우오피스의 기존 회의실 예약에는 영향을 주지 않습니다.</div>
-        {scheduled.length > 0 ? <div className="mt-4 flex items-center gap-2 text-sm text-slate-600"><UsersRound className="size-4 text-blue-600" />선택한 날짜에 인터뷰 {scheduled.length}건이 배정되어 있습니다.</div> : null}
+        {scheduledCases.length > 0 ? <div className="mt-4 flex items-center gap-2 text-sm text-slate-600"><UsersRound className="size-4 text-blue-600" />선택한 날짜에 인터뷰 {scheduledCases.length}건이 배정되어 있습니다.</div> : null}
       </main>
     </div>
   );

@@ -33,7 +33,9 @@ function createRuntime() {
   const db = new BridgeDatabase(config.dbPath);
   const gateway = new NinehireMcpGateway(config.ninehire);
   const ninehire = new NinehireRecruitmentWorkflowAdapter(gateway);
-  const slackClient = config.slack.botToken ? new WebClient(config.slack.botToken) : undefined;
+  const slackClient = config.slack.botToken
+    ? new WebClient(config.slack.botToken, { timeout: 30_000 })
+    : undefined;
   const workflow = new WorkflowService(
     db,
     config,
@@ -260,6 +262,15 @@ export async function resolveDashboardDecision(input: {
       };
     }
     return { ...resolved, followUp };
+  } catch (error) {
+    const decision = runtime.db.getInterviewSkillDecision(input.decisionId);
+    if (decision?.status === "RESOLVED") {
+      runtime.db.reopenResolvedInterviewSkillDecision(
+        decision.id,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    throw error;
   } finally {
     runtime.db.close();
   }
@@ -274,7 +285,17 @@ export async function getDashboardOperationalReadiness(input?: {
       readiness: await runtime.readiness.inspect({
         checkExternal: input?.checkExternal === true,
       }),
-      retryJobs: runtime.db.listIntegrationRetryJobs({ limit: 20 }),
+      retryJobs: runtime.db.listIntegrationRetryJobs({ limit: 20 }).map((job) => ({
+        id: job.id,
+        jobType: job.jobType,
+        status: job.status,
+        attemptCount: job.attemptCount,
+        maxAttempts: job.maxAttempts,
+        nextAttemptAt: job.nextAttemptAt,
+        lastError: job.lastError ? "연동 작업이 실패했습니다. 로컬 로그를 확인해 주세요." : null,
+        createdAt: job.createdAt,
+        updatedAt: job.updatedAt,
+      })),
     };
   } finally {
     runtime.db.close();
@@ -319,8 +340,18 @@ export async function searchDashboardSlackUsers(query: string) {
     if (normalized.length < 2) {
       throw new Error("Enter at least two characters to search Slack users.");
     }
-    const response = await runtime.slackClient.users.list({ limit: 200 });
-    return (response.members ?? [])
+    type SlackMember = NonNullable<Awaited<ReturnType<WebClient["users"]["list"]>>["members"]>[number];
+    const members: SlackMember[] = [];
+    let cursor: string | undefined;
+    do {
+      const response = await runtime.slackClient.users.list({
+        limit: 200,
+        ...(cursor ? { cursor } : {}),
+      });
+      members.push(...(response.members ?? []));
+      cursor = response.response_metadata?.next_cursor || undefined;
+    } while (cursor);
+    return members
       .flatMap((member) => {
         const name = member.real_name ?? member.name;
         const email = member.profile?.email;

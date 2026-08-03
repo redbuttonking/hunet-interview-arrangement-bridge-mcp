@@ -154,6 +154,7 @@ export class BrowserDaouOfficeReservationAdapter
     return page.evaluate(async (requestPath) => {
       const response = await fetch(requestPath, {
         credentials: "same-origin",
+        signal: AbortSignal.timeout(10_000),
       });
       if (!response.ok) {
         throw new Error(`DaouOffice request failed: ${response.status}`);

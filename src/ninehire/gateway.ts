@@ -10,6 +10,11 @@ export interface UpstreamTool {
   annotations?: Record<string, unknown>;
 }
 
+type ConnectedClient = {
+  client: Client;
+  clearTimeout: () => void;
+};
+
 export class NinehireMcpGateway {
   constructor(private readonly config: AppConfig["ninehire"]) {}
 
@@ -17,7 +22,7 @@ export class NinehireMcpGateway {
     return Boolean(this.config.apiKey);
   }
 
-  private async connect(): Promise<Client> {
+  private async connect(): Promise<ConnectedClient> {
     if (!this.config.apiKey) {
       throw new Error(
         "NINEHIRE_MCP_API_KEY is not configured. Put it in the local .env file.",
@@ -28,23 +33,32 @@ export class NinehireMcpGateway {
       ? `${this.config.authScheme} ${this.config.apiKey}`
       : this.config.apiKey;
     headers.set(this.config.authHeader, authValue);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.config.timeoutMs);
+    const clearTimeout = () => globalThis.clearTimeout(timeout);
 
     const transport = new StreamableHTTPClientTransport(
       new URL(this.config.url),
-      { requestInit: { headers } },
+      { requestInit: { headers, signal: controller.signal } },
     );
     const client = new Client({
       name: "interview-arrangement-bridge",
       version: "0.1.0",
     });
-    await client.connect(transport);
-    return client;
+    try {
+      await client.connect(transport);
+      return { client, clearTimeout };
+    } catch (error) {
+      clearTimeout();
+      await client.close().catch(() => undefined);
+      throw error;
+    }
   }
 
   async listTools(): Promise<UpstreamTool[]> {
-    const client = await this.connect();
+    const connection = await this.connect();
     try {
-      const result = await client.listTools();
+      const result = await connection.client.listTools();
       return result.tools.map((tool) => ({
         name: tool.name,
         ...(tool.description ? { description: tool.description } : {}),
@@ -57,7 +71,8 @@ export class NinehireMcpGateway {
           : {}),
       }));
     } finally {
-      await client.close();
+      connection.clearTimeout();
+      await connection.client.close();
     }
   }
 
@@ -65,9 +80,9 @@ export class NinehireMcpGateway {
     name: string,
     args: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
-    const client = await this.connect();
+    const connection = await this.connect();
     try {
-      const result = await client.callTool({ name, arguments: args });
+      const result = await connection.client.callTool({ name, arguments: args });
       if ("isError" in result && result.isError) {
         throw new Error(
           `NineHire tool ${name} returned an error: ${JSON.stringify(result.content)}`,
@@ -75,7 +90,8 @@ export class NinehireMcpGateway {
       }
       return result as Record<string, unknown>;
     } finally {
-      await client.close();
+      connection.clearTimeout();
+      await connection.client.close();
     }
   }
 }
