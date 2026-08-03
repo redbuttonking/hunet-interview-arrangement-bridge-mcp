@@ -84,7 +84,7 @@ export default async function CaseDetailPage({ params }: { params: Promise<{ id:
   const { id } = await params;
   const data = loadCaseDetail(id);
   if (!data) notFound();
-  const { bundle, plan, template, events } = data;
+  const { bundle, plan, template, scheduledSegments, events } = data;
   const interviewCase = bundle.interviewCase;
   const activeInterviewers = bundle.interviewers.filter(
     (interviewer) => interviewer.active,
@@ -151,17 +151,19 @@ export default async function CaseDetailPage({ params }: { params: Promise<{ id:
         <section className="mt-6 grid gap-5 lg:grid-cols-2" data-case-detail-panels>
           <Card>
             <CardHeader><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">INTERVIEW DETAILS</p><CardTitle className="mt-2">인터뷰 요약</CardTitle></CardHeader>
-            <CardContent><dl className="grid gap-4">{[
-              ["인터뷰 유형", interviewType],
-              ["소요 시간", `${duration}분`],
-              ["일정", interviewCase.scheduledDate ? `${interviewCase.scheduledDate} ${interviewCase.scheduledStartTime}–${interviewCase.scheduledEndTime}` : "아직 확정된 일정이 없습니다."],
-              ["회의실", interviewCase.scheduledRoomName ?? "회의실 선택 또는 확인 필요"],
-            ].map(([label, value]) => <div className="grid grid-cols-[104px_minmax(0,1fr)] gap-5" key={label}><dt className="text-sm font-medium text-slate-500">{label}</dt><dd className="m-0 text-base font-semibold leading-6 text-slate-900">{value}</dd></div>)}</dl></CardContent>
+            <CardContent><dl className="grid gap-4">
+              <div className="grid grid-cols-[104px_minmax(0,1fr)] gap-5"><dt className="text-sm font-medium text-slate-500">인터뷰 유형</dt><dd className="m-0 text-base font-semibold leading-6 text-slate-900">{interviewType}</dd></div>
+              <div className="grid grid-cols-[104px_minmax(0,1fr)] gap-5"><dt className="text-sm font-medium text-slate-500">소요 시간</dt><dd className="m-0 text-base font-semibold leading-6 text-slate-900">{duration}분</dd></div>
+              <div className="grid grid-cols-[104px_minmax(0,1fr)] gap-5"><dt className="text-sm font-medium text-slate-500">일정</dt><dd className="m-0 grid gap-2 text-base font-semibold leading-6 text-slate-900">
+                {scheduledSegments.length > 0 ? scheduledSegments.map((segment) => <span className="rounded-lg bg-slate-50 px-3 py-2" key={`${segment.date}-${segment.startTime}-${segment.roomName}-${segment.stepId ?? "single"}`}>{segment.date} {segment.startTime}–{segment.endTime} · {segment.roomName}</span>) : interviewCase.scheduledDate ? `${interviewCase.scheduledDate} ${interviewCase.scheduledStartTime}–${interviewCase.scheduledEndTime}` : "아직 확정된 일정이 없습니다."}
+              </dd></div>
+              <div className="grid grid-cols-[104px_minmax(0,1fr)] gap-5"><dt className="text-sm font-medium text-slate-500">회의실</dt><dd className="m-0 text-base font-semibold leading-6 text-slate-900">{scheduledSegments.length > 0 ? "세그먼트별 배정" : interviewCase.scheduledRoomName ?? "회의실 선택 또는 확인 필요"}</dd></div>
+            </dl></CardContent>
           </Card>
 
           <Card>
             <CardHeader><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">INTERVIEWERS</p><CardTitle className="mt-2">면접관 일정 제출</CardTitle></CardHeader>
-            <CardContent>{activeInterviewers.length > 0 ? <div className="divide-y divide-slate-200">{activeInterviewers.map((interviewer) => <div className="flex items-center justify-between gap-4 py-4 first:pt-0 last:pb-0" key={interviewer.id}><div><p className="text-base font-semibold">{interviewer.displayName}</p><p className="mt-1 text-sm text-slate-600">{interviewer.required ? "필수 면접관" : "선택 면접관"}</p></div><Badge variant={interviewer.status === "SUBMITTED" ? "success" : interviewer.status === "DECLINED_PENDING_REVIEW" ? "warning" : "secondary"}>{interviewerStatus(interviewer.status)}</Badge></div>)}</div> : <p className="text-base text-slate-600">동기화된 면접관이 없습니다.</p>}</CardContent>
+            <CardContent>{activeInterviewers.length > 0 ? <div className="max-h-80 overflow-y-auto pr-1"><div className="divide-y divide-slate-200">{activeInterviewers.map((interviewer) => <div className="flex items-center justify-between gap-4 py-4 first:pt-0 last:pb-0" key={interviewer.id}><div><p className="text-base font-semibold">{interviewer.displayName}</p><p className="mt-1 text-sm text-slate-600">{interviewer.required ? "필수 면접관" : "선택 면접관"}</p></div><Badge variant={interviewer.status === "SUBMITTED" ? "success" : interviewer.status === "DECLINED_PENDING_REVIEW" ? "warning" : "secondary"}>{interviewerStatus(interviewer.status)}</Badge></div>)}</div></div> : <p className="text-base text-slate-600">동기화된 면접관이 없습니다.</p>}</CardContent>
           </Card>
 
           <Card>
@@ -171,7 +173,7 @@ export default async function CaseDetailPage({ params }: { params: Promise<{ id:
 
           <Card>
             <CardHeader><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">ACTIVITY LOG</p><CardTitle className="mt-2">업무 이력</CardTitle></CardHeader>
-            <CardContent>{events.length > 0 ? <ol className="divide-y divide-slate-200">{events.map((event) => <li className="grid grid-cols-[minmax(0,1fr)_auto] gap-4 py-4 first:pt-0 last:pb-0" key={event.id}><div><p className="text-base font-semibold text-slate-950">{activityEventLabel(event.eventType)}</p><p className="mt-1 text-sm text-slate-500">{event.eventType} · {formatDateTime(event.createdAt)}</p></div><span className="text-sm text-slate-500">{activityActorLabel(event.actor)}</span></li>)}</ol> : <p className="text-base text-slate-600">기록된 업무 이력이 없습니다.</p>}</CardContent>
+            <CardContent>{events.length > 0 ? <div className="max-h-80 overflow-y-auto pr-1"><ol className="divide-y divide-slate-200">{events.map((event) => <li className="grid grid-cols-[minmax(0,1fr)_auto] gap-4 py-4 first:pt-0 last:pb-0" key={event.id}><div><p className="text-base font-semibold text-slate-950">{activityEventLabel(event.eventType)}</p><p className="mt-1 text-sm text-slate-500">{event.eventType} · {formatDateTime(event.createdAt)}</p></div><span className="text-sm text-slate-500">{activityActorLabel(event.actor)}</span></li>)}</ol></div> : <p className="text-base text-slate-600">기록된 업무 이력이 없습니다.</p>}</CardContent>
           </Card>
         </section>
       </main>

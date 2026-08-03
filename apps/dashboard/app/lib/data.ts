@@ -20,12 +20,29 @@ export function loadCaseDetail(caseId: string) {
   try {
     const bundle = db.getCaseBundle(caseId);
     if (!bundle) return undefined;
+    const roomBlocks = new Map(db.listMeetingRoomBlocks(undefined, false).map((block) => [block.id, block]));
+    const scheduledSegments = db.listRoomAllocations(caseId)
+      .filter((allocation) => allocation.status === "ACTIVE")
+      .map((allocation) => {
+        const block = roomBlocks.get(allocation.roomBlockId);
+        return block ? {
+          stepId: allocation.interviewStepId,
+          roomName: block.roomName,
+          date: allocation.date,
+          startTime: allocation.startTime,
+          endTime: allocation.endTime,
+          sequenceIndex: allocation.sequenceIndex,
+        } : null;
+      })
+      .filter((segment): segment is NonNullable<typeof segment> => Boolean(segment))
+      .sort((left, right) => left.sequenceIndex - right.sequenceIndex || `${left.date}T${left.startTime}`.localeCompare(`${right.date}T${right.startTime}`));
     return {
       bundle,
       plan: db.getCaseInterviewPlan(caseId) ?? null,
       template: bundle.interviewCase.recruitmentRef
         ? db.getRecruitmentInterviewTemplate(bundle.interviewCase.recruitmentRef) ?? null
         : null,
+      scheduledSegments,
       events: db.listCaseEvents(caseId, 100),
     };
   } finally {

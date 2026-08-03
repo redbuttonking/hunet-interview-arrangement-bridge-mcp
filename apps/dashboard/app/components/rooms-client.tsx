@@ -118,10 +118,15 @@ export function RoomsClient({ data }: { data: DashboardSnapshot }) {
   useEffect(() => {
     setSelectedDate((current) => dates.includes(current) ? current : preferredDate);
   }, [dates, preferredDate]);
-  const roomNames = useMemo(() => [...new Set([
-    ...data.meetingRoomBlocks.map((block) => block.roomName),
-    ...data.dashboard.cases.flatMap((interviewCase) => interviewCase.scheduledSegments.map((segment) => segment.roomName)),
-  ])].sort((left, right) => roomOrder(left) - roomOrder(right) || left.localeCompare(right, "ko-KR")), [data]);
+  const roomNames = useMemo(() => {
+    const discovered = [...new Set([
+      ...data.meetingRoomBlocks.map((block) => block.roomName),
+      ...data.dashboard.cases.flatMap((interviewCase) => interviewCase.scheduledSegments.map((segment) => segment.roomName)),
+    ])];
+    const preferred = roomDisplayOrder.map((room) => discovered.find((name) => name.includes(room) || (room === "의문당" && name.includes("疑問堂"))) ?? room);
+    const additional = discovered.filter((name) => !preferred.some((preferredName) => preferredName === name));
+    return [...preferred, ...additional].sort((left, right) => roomOrder(left) - roomOrder(right) || left.localeCompare(right, "ko-KR"));
+  }, [data]);
   const blocks = data.meetingRoomBlocks.filter((block) => block.date === selectedDate);
   const scheduledCases = data.dashboard.cases.filter((interviewCase) =>
     interviewCase.scheduledSegments.some((segment) => segment.date === selectedDate) &&

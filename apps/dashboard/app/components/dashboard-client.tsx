@@ -3,7 +3,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertCircle, ArrowRight, CalendarClock, CheckCircle2, ClipboardList, Loader2, RefreshCw, UsersRound, Wifi } from "lucide-react";
+import { AlertCircle, ArrowRight, CalendarClock, CheckCircle2, ClipboardList, Clock3, Loader2, RefreshCw, Search, TriangleAlert, UsersRound, Wifi } from "lucide-react";
 import { AppHeader, PageHeader } from "./app-shell";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
@@ -12,9 +12,11 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import type { CandidateCase, DashboardSnapshot, Decision, EvaluationSummary, HeldWork, InterviewCaseStatus, Review } from "../lib/dashboard-types";
 
 type ActionPriority = "urgent" | "normal" | "watch";
+type ActionQueue = "ACTION" | "WAITING" | "EXCEPTION";
 
 type ActionItem = {
   id: string;
+  queue: ActionQueue;
   priority: ActionPriority;
   journeyIndex: number;
   category: string;
@@ -29,6 +31,7 @@ type ActionItem = {
   review?: Review;
   caseId?: string;
   caseSkillKey?: "AVAILABILITY_COLLECTION" | "INTERVIEW_SCHEDULING" | "CANDIDATE_SCHEDULE_PROPOSAL";
+  relatedItems?: ActionItem[];
 };
 
 type ActiveDecision = {
@@ -143,6 +146,7 @@ function caseAction(interviewCase: CandidateCase): ActionItem | undefined {
   if (interviewCase.status === "READY_FOR_DRAFT") {
     return {
       ...base,
+      queue: "ACTION",
       priority: "urgent",
       category: "면접관 일정 준비",
       title: "면접관 가능 일정 요청을 준비해 주세요.",
@@ -155,6 +159,7 @@ function caseAction(interviewCase: CandidateCase): ActionItem | undefined {
   if (["REQUEST_SENT", "COLLECTING_AVAILABILITY"].includes(interviewCase.status)) {
     return {
       ...base,
+      queue: "WAITING",
       priority: "normal",
       category: "면접관 일정 수집",
       title: "면접관 가능 일정 제출 상태를 확인해 주세요.",
@@ -167,6 +172,7 @@ function caseAction(interviewCase: CandidateCase): ActionItem | undefined {
   if (interviewCase.status === "READY_TO_SCHEDULE") {
     return {
       ...base,
+      queue: "ACTION",
       priority: "urgent",
       category: "시간·회의실 검토",
       title: "인터뷰 시간과 회의실을 선택할 수 있습니다.",
@@ -179,6 +185,7 @@ function caseAction(interviewCase: CandidateCase): ActionItem | undefined {
   if (interviewCase.status === "DRAFT_CREATED") {
     return {
       ...base,
+      queue: "ACTION",
       priority: "normal",
       category: "면접관 요청 초안",
       title: "면접관에게 보낼 일정 요청 초안을 검토해 주세요.",
@@ -191,6 +198,7 @@ function caseAction(interviewCase: CandidateCase): ActionItem | undefined {
     if (!interviewCase.candidateScheduleProposalSent) {
       return {
         ...base,
+        queue: "ACTION",
         priority: "urgent",
         category: "후보자 일정 제안 확인",
         title: "나인하이어 일정 제안 발송 여부를 확인해 주세요.",
@@ -202,6 +210,7 @@ function caseAction(interviewCase: CandidateCase): ActionItem | undefined {
     }
     return {
       ...base,
+      queue: "WAITING",
       priority: "normal",
       category: "후보자 응답 대기",
       title: "내부 확정된 인터뷰 일정의 후보자 응답을 기다리고 있습니다.",
@@ -213,6 +222,7 @@ function caseAction(interviewCase: CandidateCase): ActionItem | undefined {
   if (interviewCase.status === "REVIEW_REQUIRED") {
     return {
       ...base,
+      queue: "EXCEPTION",
       priority: "urgent",
       category: "예외 확인",
       title: "조율을 계속하기 전에 운영 확인이 필요합니다.",
@@ -232,6 +242,7 @@ function buildActionItems(data: DashboardSnapshot): ActionItem[] {
 
   const decisionItems: ActionItem[] = data.decisions.map((decision) => ({
     id: `decision:${decision.id}`,
+    queue: "ACTION",
     priority: "urgent",
     journeyIndex: decision.caseId && casesById.get(decision.caseId)
       ? journeyIndexForStatus(casesById.get(decision.caseId)!.status)
@@ -250,6 +261,7 @@ function buildActionItems(data: DashboardSnapshot): ActionItem[] {
     .filter((review) => !reviewIdsWithDecision.has(review.id))
     .map((review) => ({
       id: `review:${review.id}`,
+      queue: review.reviewType === "WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED" || !supportedReviewDecisionTypes.has(review.reviewType) ? "EXCEPTION" : "ACTION",
       priority: supportedReviewDecisionTypes.has(review.reviewType) ? "urgent" : "normal",
       journeyIndex: review.caseId && casesById.get(review.caseId)
         ? journeyIndexForStatus(casesById.get(review.caseId)!.status)
@@ -281,8 +293,28 @@ function buildActionItems(data: DashboardSnapshot): ActionItem[] {
     .map(caseAction)
     .filter((item): item is ActionItem => Boolean(item));
 
-  return [...decisionItems, ...reviewItems, ...caseItems]
-    .sort((left, right) => ({ urgent: 0, normal: 1, watch: 2 }[left.priority] - { urgent: 0, normal: 1, watch: 2 }[right.priority]));
+  return groupActionItems([...decisionItems, ...reviewItems, ...caseItems]
+    .sort((left, right) => ({ urgent: 0, normal: 1, watch: 2 }[left.priority] - { urgent: 0, normal: 1, watch: 2 }[right.priority])));
+}
+
+function actionGroupKey(item: ActionItem) {
+  if (item.caseId) return `${item.queue}:case:${item.caseId}`;
+  if (item.candidateName && item.recruitmentName) return `${item.queue}:candidate:${item.candidateName}:${item.recruitmentName}`;
+  return `${item.queue}:${item.id}`;
+}
+
+function groupActionItems(items: ActionItem[]) {
+  const groups = new Map<string, ActionItem>();
+  for (const item of items) {
+    const key = actionGroupKey(item);
+    const current = groups.get(key);
+    if (!current) {
+      groups.set(key, { ...item });
+      continue;
+    }
+    current.relatedItems = [...(current.relatedItems ?? []), item];
+  }
+  return [...groups.values()];
 }
 
 function priorityStyle(priority: ActionPriority) {
@@ -619,7 +651,29 @@ function InterviewerSlackMappingDialog({
   );
 }
 
-function ActionJourney({ currentIndex }: { currentIndex: number }) {
+function ActionJourney({ currentIndex, compact = false }: { currentIndex: number; compact?: boolean }) {
+  if (compact) {
+    return (
+      <div aria-label={`인터뷰 조율 진행 상태. ${currentIndex + 1}단계 ${actionJourneySteps[currentIndex] ?? "확인 필요"}`} className="grid gap-2">
+        <ol className="flex items-center gap-1.5" aria-label="인터뷰 조율 5단계">
+          {actionJourneySteps.map((step, index) => {
+            const isComplete = index < currentIndex;
+            const isCurrent = index === currentIndex;
+            return (
+              <li className="flex items-center gap-1.5" key={step}>
+                <span aria-current={isCurrent ? "step" : undefined} className={`grid size-7 place-items-center rounded-full text-xs font-bold ${isComplete ? "bg-emerald-600 text-white" : isCurrent ? "bg-blue-600 text-white ring-4 ring-blue-100" : "bg-slate-100 text-slate-500"}`}>
+                  {isComplete ? <CheckCircle2 className="size-4" /> : index + 1}
+                </span>
+                {index < actionJourneySteps.length - 1 ? <span className={`h-px w-5 ${isComplete ? "bg-emerald-400" : "bg-slate-200"}`} /> : null}
+              </li>
+            );
+          })}
+        </ol>
+        <p className="text-sm font-medium text-slate-600"><span className="font-semibold text-slate-900">현재 단계.</span> {currentIndex + 1}. {actionJourneySteps[currentIndex] ?? "확인 필요"}</p>
+      </div>
+    );
+  }
+
   return (
     <div className="overflow-x-auto pb-1">
       <ol aria-label="인터뷰 조율 진행 상태" className="grid min-w-[34rem] grid-cols-5">
@@ -734,9 +788,30 @@ function ActionRow({ item, onCreateReviewDecision, onCreateCaseDecision, onOpenD
         </div>
         <h3 className="mt-3 text-xl font-semibold tracking-[-0.025em] text-slate-950">{item.candidateName ?? "후보자 확인 필요"}</h3>
         <p className="mt-1 text-base text-slate-600">{item.recruitmentName ?? "채용 정보 확인 필요"}</p>
-        <div className="mt-4 border-y border-slate-100 py-4"><ActionJourney currentIndex={item.journeyIndex} /></div>
+        <div className="mt-4 border-y border-slate-100 py-4"><ActionJourney compact currentIndex={item.journeyIndex} /></div>
         <p className="mt-4 text-base font-medium leading-6 text-slate-800">{item.title}</p>
         <p className="mt-1 text-sm leading-6 text-slate-600">{item.description}</p>
+        {item.relatedItems?.length ? (
+          <details className="mt-4 rounded-lg border border-slate-200 bg-slate-50/70 px-3 py-2">
+            <summary className="cursor-pointer list-none text-sm font-semibold text-slate-700">추가 검토 {item.relatedItems.length}건</summary>
+            <div className="mt-2 grid gap-2 border-t border-slate-200 pt-2">
+              {item.relatedItems.map((related) => {
+                const relatedReview = related.review;
+                const relatedDecision = related.decision;
+                const relatedActionableReview = Boolean(relatedReview && supportedReviewDecisionTypes.has(relatedReview.reviewType));
+                return (
+                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-white px-3 py-2" key={related.id}>
+                    <div className="min-w-0"><p className="truncate text-sm font-medium text-slate-800">{related.title}</p><p className="mt-0.5 text-xs text-slate-500">{related.category}</p></div>
+                    {relatedDecision ? <Button onClick={() => onOpenDecision(relatedDecision)} size="sm" variant="decision">결정 계속하기</Button> : null}
+                    {!relatedDecision && relatedActionableReview && relatedReview ? <Button disabled={loading} onClick={() => onCreateReviewDecision(relatedReview)} size="sm" variant="outline">검토하기</Button> : null}
+                    {!relatedDecision && !relatedActionableReview && related.caseSkillKey && related.caseId ? <Button disabled={loading} onClick={() => onCreateCaseDecision(related.caseId!, related.caseSkillKey!)} size="sm">결정하기</Button> : null}
+                    {!relatedDecision && !relatedActionableReview && !related.caseSkillKey && related.href ? <Button asChild size="sm" variant="outline"><Link href={related.href}>상세 보기<ArrowRight className="size-3.5" /></Link></Button> : null}
+                  </div>
+                );
+              })}
+            </div>
+          </details>
+        ) : null}
       </div>
       <div className="flex shrink-0 items-center sm:justify-end">
         {directDecision ? <Button variant="decision" onClick={() => onOpenDecision(directDecision)}>결정 계속하기</Button> : null}
@@ -778,6 +853,13 @@ function HeldWorkCard({ work, loading, onResume }: {
   );
 }
 
+const queueTabs: Array<{ id: "ACTION" | "WAITING" | "EXCEPTION" | "ALL"; label: string }> = [
+  { id: "ACTION", label: "내가 처리할 일" },
+  { id: "WAITING", label: "응답 대기" },
+  { id: "EXCEPTION", label: "예외·오류" },
+  { id: "ALL", label: "전체" },
+];
+
 export function DashboardClient({ initialData }: { initialData: DashboardSnapshot }) {
   const [data, setData] = useState(initialData);
   const [activeDecision, setActiveDecision] = useState<ActiveDecision | null>(null);
@@ -785,6 +867,10 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
   const [interviewerMapping, setInterviewerMapping] = useState<InterviewerSlackMappingRequest | null>(null);
   const [loadingId, setLoadingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [queueTab, setQueueTab] = useState<"ACTION" | "WAITING" | "EXCEPTION" | "ALL">("ACTION");
+  const [query, setQuery] = useState("");
+  const [pageSize, setPageSize] = useState(10);
+  const [page, setPage] = useState(1);
 
   const refresh = useCallback(async () => {
     const response = await fetch("/api/dashboard", { cache: "no-store" });
@@ -954,6 +1040,33 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
   };
 
   const actionItems = useMemo(() => buildActionItems(data), [data]);
+  const queueCounts = useMemo(() => ({
+    ACTION: actionItems.filter((item) => item.queue === "ACTION").length,
+    WAITING: actionItems.filter((item) => item.queue === "WAITING").length,
+    EXCEPTION: actionItems.filter((item) => item.queue === "EXCEPTION").length,
+    ALL: actionItems.length,
+  }), [actionItems]);
+  const filteredActionItems = useMemo(() => {
+    const normalizedQuery = query.trim().toLocaleLowerCase();
+    return actionItems.filter((item) => {
+      const matchesTab = queueTab === "ALL" || item.queue === queueTab;
+      if (!matchesTab) return false;
+      if (!normalizedQuery) return true;
+      const haystack = [item.candidateName, item.recruitmentName, item.title, item.description, item.category, item.meta]
+        .filter(Boolean)
+        .join(" ")
+        .toLocaleLowerCase();
+      return haystack.includes(normalizedQuery);
+    });
+  }, [actionItems, query, queueTab]);
+  const pageCount = Math.max(1, Math.ceil(filteredActionItems.length / pageSize));
+  const visibleActionItems = useMemo(() => filteredActionItems.slice((page - 1) * pageSize, page * pageSize), [filteredActionItems, page, pageSize]);
+  useEffect(() => {
+    setPage(1);
+  }, [pageSize, query, queueTab]);
+  useEffect(() => {
+    setPage((current) => Math.min(current, pageCount));
+  }, [pageCount]);
   const upcoming = useMemo(() => data.dashboard.cases
     .filter((interviewCase) => interviewCase.scheduledDate && interviewCase.scheduledStartTime && ["CONFIRMED", "AWAITING_CANDIDATE_CONFIRMATION"].includes(interviewCase.status))
     .sort((left, right) => `${left.scheduledDate}T${left.scheduledStartTime}`.localeCompare(`${right.scheduledDate}T${right.scheduledStartTime}`))
@@ -982,21 +1095,60 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
 
         {error ? <div className="mb-6 flex items-center gap-2 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-800"><AlertCircle className="size-4" />{error}</div> : null}
 
+        <section className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-5" aria-label="운영 요약">
+          <button className={`rounded-xl border bg-white p-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-blue-300 hover:shadow-md ${queueTab === "ACTION" ? "border-blue-500 ring-2 ring-blue-100" : "border-slate-200"}`} onClick={() => setQueueTab("ACTION")} type="button">
+            <div className="flex items-center justify-between gap-2"><span className="text-sm font-medium text-slate-600">내 결정 필요</span><ClipboardList className="size-5 text-blue-600" /></div>
+            <p className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">{queueCounts.ACTION}</p>
+            <p className="mt-1 text-xs text-slate-500">승인하거나 다음 단계로 넘길 후보자</p>
+          </button>
+          <button className={`rounded-xl border bg-white p-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-blue-300 hover:shadow-md ${queueTab === "WAITING" ? "border-blue-500 ring-2 ring-blue-100" : "border-slate-200"}`} onClick={() => setQueueTab("WAITING")} type="button">
+            <div className="flex items-center justify-between gap-2"><span className="text-sm font-medium text-slate-600">응답 대기</span><Clock3 className="size-5 text-amber-600" /></div>
+            <p className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">{queueCounts.WAITING}</p>
+            <p className="mt-1 text-xs text-slate-500">면접관·후보자 회신을 기다리는 건</p>
+          </button>
+          <button className={`rounded-xl border bg-white p-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-blue-300 hover:shadow-md ${queueTab === "EXCEPTION" ? "border-blue-500 ring-2 ring-blue-100" : "border-slate-200"}`} onClick={() => setQueueTab("EXCEPTION")} type="button">
+            <div className="flex items-center justify-between gap-2"><span className="text-sm font-medium text-slate-600">예외·오류</span><TriangleAlert className="size-5 text-rose-600" /></div>
+            <p className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">{queueCounts.EXCEPTION}</p>
+            <p className="mt-1 text-xs text-slate-500">재조율 확인 필요 · 연동 재시도 {summary.pendingIntegrationRetries + summary.failedIntegrationRetries}건</p>
+          </button>
+          <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div className="flex items-center justify-between gap-2"><span className="text-sm font-medium text-slate-600">다가오는 인터뷰</span><CalendarClock className="size-5 text-emerald-600" /></div>
+            <p className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">{data.dashboard.cases.filter((interviewCase) => interviewCase.scheduledDate && ["CONFIRMED", "AWAITING_CANDIDATE_CONFIRMATION"].includes(interviewCase.status)).length}</p>
+            <p className="mt-1 text-xs text-slate-500">확정 또는 후보자 응답 대기</p>
+          </div>
+          <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div className="flex items-center justify-between gap-2"><span className="text-sm font-medium text-slate-600">워커 상태</span><Wifi className="size-5 text-slate-500" /></div>
+            <p className="mt-2 text-lg font-semibold tracking-tight text-slate-950">{summary.worker.status === "RUNNING" ? "정상 작동" : summary.worker.status}</p>
+            <p className="mt-1 text-xs text-slate-500">마지막 갱신 {formatGeneratedAt(data.dashboard.generatedAt)}</p>
+          </div>
+        </section>
+
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
           <Card className="overflow-hidden">
             <CardHeader className="flex-row items-start justify-between gap-4 border-b border-slate-200 p-6 sm:p-7">
-              <div><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">PRIORITY QUEUE</p><CardTitle className="mt-2 flex items-center gap-2 text-2xl">지금 처리할 일 <Badge>{actionItems.length}</Badge></CardTitle></div>
-              <CardDescription className="max-w-xs text-right">후보자별 중복을 제거한 우선순위 목록입니다.</CardDescription>
+              <div><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">PRIORITY QUEUE</p><CardTitle className="mt-2 flex items-center gap-2 text-2xl">인터뷰 운영 큐 <Badge>{filteredActionItems.length}</Badge></CardTitle><CardDescription className="mt-2">한 화면에서는 지금 확인할 후보자만 보여주고, 나머지는 페이지로 나눠 관리합니다.</CardDescription></div>
+              <div className="flex shrink-0 items-center gap-2"><label className="sr-only" htmlFor="action-page-size">페이지 표시 수</label><select aria-label="페이지 표시 수" className="h-10 rounded-lg border border-slate-200 bg-white px-2 text-sm font-medium text-slate-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" id="action-page-size" onChange={(event) => setPageSize(Number(event.target.value))} value={pageSize}><option value="10">10건</option><option value="25">25건</option><option value="50">50건</option></select></div>
             </CardHeader>
-            {actionItems.length === 0 ? (
-              <CardContent className="grid min-h-64 place-items-center p-8 text-center"><div><CheckCircle2 className="mx-auto size-8 text-emerald-600" /><p className="mt-4 text-lg font-semibold">지금 바로 처리할 업무가 없습니다.</p><p className="mt-2 text-base text-slate-600">면접관 응답과 후보자 답변을 기다리고 있습니다.</p></div></CardContent>
-            ) : <div className="divide-y divide-slate-200">{actionItems.map((item) => <ActionRow key={item.id} item={item} loading={loadingId === item.id} onCreateCaseDecision={createCaseDecision} onCreateReviewDecision={createReviewDecision} onOpenDecision={(decision) => setActiveDecision({ decision, dismissOnClose: false })} />)}</div>}
+            <div className="border-b border-slate-200 px-6 py-4 sm:px-7">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                <div className="flex flex-wrap gap-2" role="tablist" aria-label="운영 큐 필터">
+                  {queueTabs.map((tab) => <button aria-selected={queueTab === tab.id} className={`rounded-full px-3 py-2 text-sm font-semibold transition-colors ${queueTab === tab.id ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`} key={tab.id} onClick={() => setQueueTab(tab.id)} role="tab" type="button">{tab.label} <span className="ml-1 opacity-75">{queueCounts[tab.id]}</span></button>)}
+                </div>
+                <label className="relative block w-full lg:max-w-xs"><Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" /><span className="sr-only">후보자 또는 채용 검색</span><input className="h-10 w-full rounded-lg border border-slate-200 bg-white pl-9 pr-3 text-sm text-slate-900 outline-none placeholder:text-slate-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100" onChange={(event) => setQuery(event.target.value)} placeholder="후보자·채용·업무 검색" type="search" value={query} /></label>
+              </div>
+            </div>
+            {filteredActionItems.length === 0 ? (
+              <CardContent className="grid min-h-64 place-items-center p-8 text-center"><div><CheckCircle2 className="mx-auto size-8 text-emerald-600" /><p className="mt-4 text-lg font-semibold">이 조건에 맞는 업무가 없습니다.</p><p className="mt-2 text-base text-slate-600">다른 큐를 선택하거나 검색어를 지워 보세요.</p></div></CardContent>
+            ) : <>
+              <div className="divide-y divide-slate-200">{visibleActionItems.map((item) => <ActionRow key={item.id} item={item} loading={loadingId === item.id} onCreateCaseDecision={createCaseDecision} onCreateReviewDecision={createReviewDecision} onOpenDecision={(decision) => setActiveDecision({ decision, dismissOnClose: false })} />)}</div>
+              <div className="flex flex-col gap-3 border-t border-slate-200 px-6 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-7"><p className="text-sm text-slate-500">전체 {filteredActionItems.length}건 중 {Math.min((page - 1) * pageSize + 1, filteredActionItems.length)}–{Math.min(page * pageSize, filteredActionItems.length)}건</p><div className="flex items-center gap-2"><Button disabled={page <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))} size="sm" variant="outline">이전</Button><span className="min-w-16 text-center text-sm font-semibold text-slate-700">{page} / {pageCount}</span><Button disabled={page >= pageCount} onClick={() => setPage((current) => Math.min(pageCount, current + 1))} size="sm" variant="outline">다음</Button></div></div>
+            </>}
           </Card>
 
           <aside className="grid h-fit gap-6 sm:grid-cols-2 xl:grid-cols-1">
             {data.heldWork.length > 0 ? <Card>
               <CardHeader><p className="text-xs font-bold uppercase tracking-[0.16em] text-slate-500">PAUSED</p><CardTitle className="mt-2 flex items-center gap-2">보류한 조율 <Badge variant="secondary">{data.heldWork.length}</Badge></CardTitle><CardDescription>나인하이어와 Slack에는 변경하지 않고 로컬 조율만 멈춘 상태입니다.</CardDescription></CardHeader>
-              <CardContent><div>{data.heldWork.map((work) => <HeldWorkCard key={`${work.kind}:${work.id}`} loading={loadingId === `hold:${work.kind}:${work.id}`} onResume={resumeHeldWork} work={work} />)}</div></CardContent>
+              <CardContent><div className="max-h-96 overflow-y-auto pr-1">{data.heldWork.map((work) => <HeldWorkCard key={`${work.kind}:${work.id}`} loading={loadingId === `hold:${work.kind}:${work.id}`} onResume={resumeHeldWork} work={work} />)}</div></CardContent>
             </Card> : null}
 
             <Card>
