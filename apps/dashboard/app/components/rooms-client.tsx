@@ -26,7 +26,7 @@ function toMinutes(value: string) {
 }
 
 function formatCalendarDate(date: string) {
-  return new Intl.DateTimeFormat("ko-KR", { year: "numeric", month: "long", day: "numeric", weekday: "short" }).format(
+  return new Intl.DateTimeFormat("ko-KR", { timeZone: "Asia/Seoul", year: "numeric", month: "long", day: "numeric", weekday: "short" }).format(
     new Date(`${date}T00:00:00+09:00`),
   );
 }

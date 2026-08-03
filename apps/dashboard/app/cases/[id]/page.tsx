@@ -16,7 +16,7 @@ export const dynamic = "force-dynamic";
 const journeySteps = ["조율 시작", "면접관 일정", "시간·회의실", "후보자 응답", "최종 확정"];
 
 function formatDateTime(value: string) {
-  return new Intl.DateTimeFormat("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
+  return new Intl.DateTimeFormat("ko-KR", { timeZone: "Asia/Seoul", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
 }
 
 function interviewerStatus(status: string) {

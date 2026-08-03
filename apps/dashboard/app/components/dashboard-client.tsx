@@ -74,13 +74,13 @@ const supportedReviewDecisionTypes = new Set([
 
 function formatDate(value: string | null | undefined) {
   if (!value) return "일정 미정";
-  return new Intl.DateTimeFormat("ko-KR", { month: "numeric", day: "numeric", weekday: "short" }).format(
+  return new Intl.DateTimeFormat("ko-KR", { timeZone: "Asia/Seoul", month: "numeric", day: "numeric", weekday: "short" }).format(
     new Date(`${value}T00:00:00+09:00`),
   );
 }
 
 function formatGeneratedAt(value: string) {
-  return new Intl.DateTimeFormat("ko-KR", { hour: "2-digit", minute: "2-digit" }).format(new Date(value));
+  return new Intl.DateTimeFormat("ko-KR", { timeZone: "Asia/Seoul", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
 }
 
 function formatDateTime(value: string | undefined) {
@@ -88,6 +88,7 @@ function formatDateTime(value: string | undefined) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return new Intl.DateTimeFormat("ko-KR", {
+    timeZone: "Asia/Seoul",
     month: "numeric",
     day: "numeric",
     hour: "2-digit",
