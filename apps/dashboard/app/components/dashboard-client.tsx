@@ -706,9 +706,26 @@ type OperationalReadinessPayload = {
     jobType: string;
     status: string;
     attemptCount: number;
+    maxAttempts?: number;
+    nextAttemptAt?: string;
     lastError: string | null;
   }>;
 };
+
+function retryJobTypeLabel(jobType: string) {
+  const labels: Record<string, string> = {
+    NINEHIRE_EVALUATION_LOOKUP: "나인하이어 평가표 조회",
+    NINEHIRE_SCHEDULE_RECONCILIATION: "나인하이어 확정 일정 확인",
+    SLACK_NOTIFICATION_RECONCILIATION: "Slack 알림 동기화",
+  };
+  return labels[jobType] ?? "외부 연동 확인";
+}
+
+function retryStatusInfo(status: string) {
+  if (status === "PENDING") return { label: "자동 재시도 대기", variant: "warning" as const, detail: "워커가 잠시 후 같은 작업을 다시 시도합니다." };
+  if (status === "FAILED") return { label: "자동 재시도 실패", variant: "destructive" as const, detail: "자동 재시도가 모두 끝났습니다. 연동 상태를 확인해 주세요." };
+  return { label: "처리 완료", variant: "success" as const, detail: "워커가 처리한 기록입니다." };
+}
 
 function OperationsReadinessCard() {
   const [data, setData] = useState<OperationalReadinessPayload | null>(null);
@@ -748,6 +765,9 @@ function OperationsReadinessCard() {
   const daou = data?.readiness.checks.daouOfficeBrowser;
   const daouConnected = daou?.connected === true;
   const retries = data?.retryJobs ?? [];
+  const activeRetries = retries.filter((job) => job.status !== "COMPLETED");
+  const pendingRetries = activeRetries.filter((job) => job.status === "PENDING");
+  const failedRetries = activeRetries.filter((job) => job.status === "FAILED");
 
   return (
     <Card className="mt-6">
@@ -757,7 +777,21 @@ function OperationsReadinessCard() {
       </CardHeader>
       <CardContent className="grid gap-5 p-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] lg:items-start">
         <div className="rounded-xl border border-slate-200 p-4"><p className="text-sm font-medium text-slate-500">다우오피스 전용 브라우저</p><p className="mt-2 text-lg font-semibold text-slate-950">{daouConnected ? "연결됨" : "로그인 또는 연결 확인 필요"}</p><p className="mt-2 text-sm leading-6 text-slate-600">{daou?.latestMeetingRoomSyncAt ? `마지막 회의실 동기화. ${formatDateTime(String(daou.latestMeetingRoomSyncAt))}` : "회의실을 추천하기 전 해당 후보자 기준으로 동기화합니다."}</p></div>
-        <div className="rounded-xl border border-slate-200 p-4"><p className="text-sm font-medium text-slate-500">연동 재시도 대기열</p><p className="mt-2 text-lg font-semibold text-slate-950">{retries.length}건</p><p className="mt-2 text-sm leading-6 text-slate-600">{retries.length > 0 ? retries.slice(0, 2).map((job) => `${job.jobType} · ${job.status}`).join("\n") : "대기 중인 연동 재시도가 없습니다."}</p></div>
+        <div className="rounded-xl border border-slate-200 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2"><p className="text-sm font-medium text-slate-500">자동 복구 대기열</p><div className="flex gap-1.5"><Badge variant="warning">대기 {pendingRetries.length}</Badge><Badge variant="destructive">실패 {failedRetries.length}</Badge></div></div>
+          <p className="mt-2 text-lg font-semibold text-slate-950">확인 필요한 작업 {activeRetries.length}건</p>
+          <p className="mt-2 text-sm leading-6 text-slate-600">Slack·나인하이어 조회가 잠시 실패하면 워커가 자동으로 다시 시도합니다. 외부 메시지 발송은 자동으로 진행하지 않습니다.</p>
+          {activeRetries.length > 0 ? <div className="mt-4 grid max-h-64 gap-2 overflow-y-auto pr-1">{activeRetries.slice(0, 5).map((job) => {
+            const info = retryStatusInfo(job.status);
+            const maxAttempts = job.maxAttempts ?? 3;
+            return <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3" key={job.id}>
+              <div className="flex flex-wrap items-start justify-between gap-2"><p className="text-sm font-semibold text-slate-900">{retryJobTypeLabel(job.jobType)}</p><Badge variant={info.variant}>{info.label}</Badge></div>
+              <p className="mt-1 text-xs leading-5 text-slate-600">{info.detail}</p>
+              <p className="mt-2 text-xs text-slate-500">시도 {job.attemptCount}/{maxAttempts}{job.status === "PENDING" && job.nextAttemptAt ? ` · 다음 확인 ${formatDateTime(job.nextAttemptAt)}` : ""}</p>
+            </div>;
+          })}</div> : <p className="mt-3 rounded-lg bg-emerald-50 px-3 py-2 text-sm leading-6 text-emerald-800">현재 자동으로 복구할 작업이 없습니다.</p>}
+          {activeRetries.length > 5 ? <p className="mt-2 text-xs text-slate-500">최근 5건만 표시합니다. 전체 상태는 연결 진단 결과에서 확인하세요.</p> : null}
+        </div>
         <div className="flex flex-wrap gap-2 lg:justify-end"><Button disabled={loading} onClick={() => void load(true)} variant="outline">{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}연결 다시 진단</Button>{!daouConnected ? <Button disabled={loading} onClick={() => void openDaouLogin()} variant="outline">다우오피스 로그인</Button> : null}</div>
         {error ? <p className="lg:col-span-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">{error}</p> : null}
       </CardContent>
