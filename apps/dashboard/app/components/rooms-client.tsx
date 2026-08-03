@@ -26,9 +26,13 @@ function toMinutes(value: string) {
 }
 
 function formatCalendarDate(date: string) {
-  return new Intl.DateTimeFormat("ko-KR", { timeZone: "Asia/Seoul", year: "numeric", month: "long", day: "numeric", weekday: "short" }).format(
-    new Date(`${date}T00:00:00+09:00`),
-  );
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  if (!match) return "날짜 미정";
+  const [, year, month, day] = match;
+  const weekday = ["일", "월", "화", "수", "목", "금", "토"][
+    new Date(Date.UTC(Number(year), Number(month) - 1, Number(day))).getUTCDay()
+  ];
+  return `${year}년 ${Number(month)}월 ${Number(day)}일 (${weekday})`;
 }
 
 function shiftDate(date: string, amount: number) {
@@ -37,8 +41,10 @@ function shiftDate(date: string, amount: number) {
   return shifted.toISOString().slice(0, 10);
 }
 
-function todayInSeoul() {
-  return new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Seoul" }).format(new Date());
+function todayInSeoul(value?: string) {
+  const base = value ? new Date(value) : new Date();
+  const shifted = new Date(base.getTime() + 9 * 60 * 60 * 1000);
+  return `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, "0")}-${String(shifted.getUTCDate()).padStart(2, "0")}`;
 }
 
 function scheduleStatusLabel(status: CandidateCase["status"]) {
@@ -111,9 +117,9 @@ export function RoomsClient({ data }: { data: DashboardSnapshot }) {
     ...data.dashboard.cases.flatMap((interviewCase) => interviewCase.scheduledSegments.map((segment) => segment.date)),
   ])].sort(), [data]);
   const preferredDate = useMemo(() => {
-    const today = todayInSeoul();
+    const today = todayInSeoul(data.dashboard.generatedAt);
     return dates.includes(today) ? today : dates.find((date) => date >= today) ?? dates[0] ?? today;
-  }, [dates]);
+  }, [data.dashboard.generatedAt, dates]);
   const [selectedDate, setSelectedDate] = useState(preferredDate);
   useEffect(() => {
     setSelectedDate((current) => dates.includes(current) ? current : preferredDate);
@@ -125,7 +131,11 @@ export function RoomsClient({ data }: { data: DashboardSnapshot }) {
     ])];
     const preferred = roomDisplayOrder.map((room) => discovered.find((name) => name.includes(room) || (room === "의문당" && name.includes("疑問堂"))) ?? room);
     const additional = discovered.filter((name) => !preferred.some((preferredName) => preferredName === name));
-    return [...preferred, ...additional].sort((left, right) => roomOrder(left) - roomOrder(right) || left.localeCompare(right, "ko-KR"));
+    return [...preferred, ...additional].sort((left, right) => {
+      const orderDifference = roomOrder(left) - roomOrder(right);
+      if (orderDifference !== 0) return orderDifference;
+      return left < right ? -1 : left > right ? 1 : 0;
+    });
   }, [data]);
   const blocks = data.meetingRoomBlocks.filter((block) => block.date === selectedDate);
   const scheduledCases = data.dashboard.cases.filter((interviewCase) =>

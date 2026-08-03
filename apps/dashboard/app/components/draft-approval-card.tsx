@@ -17,7 +17,13 @@ type DashboardDraft = {
 };
 
 function formatDateTime(value: string) {
-  return new Intl.DateTimeFormat("ko-KR", { timeZone: "Asia/Seoul", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  const shifted = new Date(date.getTime() + 9 * 60 * 60 * 1000);
+  const hour24 = shifted.getUTCHours();
+  const period = hour24 >= 12 ? "오후" : "오전";
+  const hour = hour24 % 12 || 12;
+  return `${shifted.getUTCMonth() + 1}. ${shifted.getUTCDate()}. ${period} ${hour}:${String(shifted.getUTCMinutes()).padStart(2, "0")}`;
 }
 
 function messageTypeLabel(messageType: string) {

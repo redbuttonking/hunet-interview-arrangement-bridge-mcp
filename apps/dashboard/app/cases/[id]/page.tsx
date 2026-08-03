@@ -16,7 +16,13 @@ export const dynamic = "force-dynamic";
 const journeySteps = ["조율 시작", "면접관 일정", "시간·회의실", "후보자 응답", "최종 확정"];
 
 function formatDateTime(value: string) {
-  return new Intl.DateTimeFormat("ko-KR", { timeZone: "Asia/Seoul", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  const shifted = new Date(date.getTime() + 9 * 60 * 60 * 1000);
+  const hour24 = shifted.getUTCHours();
+  const period = hour24 >= 12 ? "오후" : "오전";
+  const hour = hour24 % 12 || 12;
+  return `${shifted.getUTCMonth() + 1}. ${shifted.getUTCDate()}. ${period} ${hour}:${String(shifted.getUTCMinutes()).padStart(2, "0")}`;
 }
 
 function interviewerStatus(status: string) {

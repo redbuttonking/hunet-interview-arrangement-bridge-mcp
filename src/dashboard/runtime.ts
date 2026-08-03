@@ -186,8 +186,23 @@ export async function resolveDashboardDecision(input: {
   note?: string;
 }) {
   const runtime = createRuntime();
+  let didResolve = false;
   try {
+    const existing = runtime.db.getInterviewSkillDecision(input.decisionId);
+    if (existing?.status === "RESOLVED") {
+      if (existing.selectedOptionId !== input.optionId) {
+        throw new Error(
+          `Interview skill decision was already resolved with option: ${existing.selectedOptionId ?? "unknown"}`,
+        );
+      }
+      return {
+        decision: existing,
+        outcome: existing.resolution ?? { action: input.optionId, nextAction: "NONE" },
+        followUp: undefined,
+      };
+    }
     const resolved = await runtime.skills.resolveDecision(input);
+    didResolve = true;
     const caseId = resolved.decision.caseId;
     const nextAction = resolved.outcome.nextAction;
     let followUp: unknown;
@@ -264,7 +279,18 @@ export async function resolveDashboardDecision(input: {
     return { ...resolved, followUp };
   } catch (error) {
     const decision = runtime.db.getInterviewSkillDecision(input.decisionId);
-    if (decision?.status === "RESOLVED") {
+    if (
+      !didResolve
+      && decision?.status === "RESOLVED"
+      && decision.selectedOptionId === input.optionId
+    ) {
+      return {
+        decision,
+        outcome: decision.resolution ?? { action: input.optionId, nextAction: "NONE" },
+        followUp: undefined,
+      };
+    }
+    if (didResolve && decision?.status === "RESOLVED") {
       runtime.db.reopenResolvedInterviewSkillDecision(
         decision.id,
         error instanceof Error ? error.message : String(error),

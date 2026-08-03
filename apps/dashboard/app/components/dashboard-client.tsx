@@ -74,26 +74,34 @@ const supportedReviewDecisionTypes = new Set([
 
 function formatDate(value: string | null | undefined) {
   if (!value) return "일정 미정";
-  return new Intl.DateTimeFormat("ko-KR", { timeZone: "Asia/Seoul", month: "numeric", day: "numeric", weekday: "short" }).format(
-    new Date(`${value}T00:00:00+09:00`),
-  );
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return value;
+  const [, year, month, day] = match;
+  const weekday = ["일", "월", "화", "수", "목", "금", "토"][
+    new Date(Date.UTC(Number(year), Number(month) - 1, Number(day))).getUTCDay()
+  ];
+  return `${Number(month)}. ${Number(day)}. (${weekday})`;
 }
 
 function formatGeneratedAt(value: string) {
-  return new Intl.DateTimeFormat("ko-KR", { timeZone: "Asia/Seoul", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "시각 미확인";
+  const shifted = new Date(date.getTime() + 9 * 60 * 60 * 1000);
+  const hour24 = shifted.getUTCHours();
+  const period = hour24 >= 12 ? "오후" : "오전";
+  const hour = hour24 % 12 || 12;
+  return `${period} ${hour}:${String(shifted.getUTCMinutes()).padStart(2, "0")}`;
 }
 
 function formatDateTime(value: string | undefined) {
   if (!value) return "완료 시각 미확인";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat("ko-KR", {
-    timeZone: "Asia/Seoul",
-    month: "numeric",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(date);
+  const shifted = new Date(date.getTime() + 9 * 60 * 60 * 1000);
+  const hour24 = shifted.getUTCHours();
+  const period = hour24 >= 12 ? "오후" : "오전";
+  const hour = hour24 % 12 || 12;
+  return `${shifted.getUTCMonth() + 1}. ${shifted.getUTCDate()}. ${period} ${hour}:${String(shifted.getUTCMinutes()).padStart(2, "0")}`;
 }
 
 function formatSchedule(interviewCase: CandidateCase) {
@@ -906,6 +914,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
   const [query, setQuery] = useState("");
   const [pageSize, setPageSize] = useState(10);
   const [page, setPage] = useState(1);
+  const [hydrated, setHydrated] = useState(false);
 
   const refresh = useCallback(async () => {
     const response = await fetch("/api/dashboard", { cache: "no-store" });
@@ -914,6 +923,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
   }, []);
 
   useEffect(() => {
+    setHydrated(true);
     const interval = window.setInterval(() => void refresh().catch(() => undefined), 30_000);
     return () => window.clearInterval(interval);
   }, [refresh]);
@@ -958,6 +968,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
   const resolveDecision = async (optionId: string) => {
     if (!activeDecision) return;
     const decision = activeDecision.decision;
+    if (loadingId === decision.id) return;
     setLoadingId(decision.id);
     setError(null);
     try {
@@ -1104,7 +1115,11 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
   }, [pageCount]);
   const upcoming = useMemo(() => data.dashboard.cases
     .filter((interviewCase) => interviewCase.scheduledDate && interviewCase.scheduledStartTime && ["CONFIRMED", "AWAITING_CANDIDATE_CONFIRMATION"].includes(interviewCase.status))
-    .sort((left, right) => `${left.scheduledDate}T${left.scheduledStartTime}`.localeCompare(`${right.scheduledDate}T${right.scheduledStartTime}`))
+    .sort((left, right) => {
+      const leftKey = `${left.scheduledDate}T${left.scheduledStartTime}`;
+      const rightKey = `${right.scheduledDate}T${right.scheduledStartTime}`;
+      return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+    })
     .slice(0, 5), [data.dashboard.cases]);
   const summary = data.dashboard.summary;
   const progress = [
@@ -1154,7 +1169,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
           <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
             <div className="flex items-center justify-between gap-2"><span className="text-sm font-medium text-slate-600">워커 상태</span><Wifi className="size-5 text-slate-500" /></div>
             <p className="mt-2 text-lg font-semibold tracking-tight text-slate-950">{summary.worker.status === "RUNNING" ? "정상 작동" : summary.worker.status}</p>
-            <p className="mt-1 text-xs text-slate-500">마지막 갱신 {formatGeneratedAt(data.dashboard.generatedAt)}</p>
+            <p className="mt-1 text-xs text-slate-500">마지막 갱신 {hydrated ? formatGeneratedAt(data.dashboard.generatedAt) : "초기 데이터 로드"}</p>
           </div>
         </section>
 
@@ -1210,7 +1225,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
         <section className="mt-6 grid gap-4 md:grid-cols-3" aria-label="운영 상태">
           <Card><CardContent className="flex items-start gap-4 p-5"><span className="grid size-10 place-items-center rounded-lg bg-amber-50 text-amber-700"><UsersRound className="size-5" /></span><div><p className="text-sm font-medium text-slate-600">면접관 미응답</p><p className="mt-1 text-2xl font-semibold tracking-tight">{summary.pendingRequiredInterviewerResponses}</p><p className="mt-1 text-sm leading-5 text-slate-500">제출 확인이 필요한 필수 면접관입니다.</p></div></CardContent></Card>
           <Card><CardContent className="flex items-start gap-4 p-5"><span className="grid size-10 place-items-center rounded-lg bg-rose-50 text-rose-700"><Wifi className="size-5" /></span><div><p className="text-sm font-medium text-slate-600">연동 재시도</p><p className="mt-1 text-2xl font-semibold tracking-tight">{summary.pendingIntegrationRetries + summary.failedIntegrationRetries}</p><p className="mt-1 text-sm leading-5 text-slate-500">Slack·나인하이어 동기화 오류를 확인합니다.</p></div></CardContent></Card>
-          <Card><CardContent className="flex items-start gap-4 p-5"><span className="grid size-10 place-items-center rounded-lg bg-blue-50 text-blue-700"><ClipboardList className="size-5" /></span><div><p className="text-sm font-medium text-slate-600">데이터 갱신</p><p className="mt-1 text-2xl font-semibold tracking-tight">{formatGeneratedAt(data.dashboard.generatedAt)}</p><p className="mt-1 text-sm leading-5 text-slate-500">30초마다 로컬 상태를 다시 확인합니다.</p></div></CardContent></Card>
+          <Card><CardContent className="flex items-start gap-4 p-5"><span className="grid size-10 place-items-center rounded-lg bg-blue-50 text-blue-700"><ClipboardList className="size-5" /></span><div><p className="text-sm font-medium text-slate-600">데이터 갱신</p><p className="mt-1 text-2xl font-semibold tracking-tight">{hydrated ? formatGeneratedAt(data.dashboard.generatedAt) : "초기 로드"}</p><p className="mt-1 text-sm leading-5 text-slate-500">30초마다 로컬 상태를 다시 확인합니다.</p></div></CardContent></Card>
         </section>
         <OperationsReadinessCard />
       </main>
