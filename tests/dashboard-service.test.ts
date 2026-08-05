@@ -81,8 +81,18 @@ describe("dashboard service", () => {
       endTime: "12:00",
       sourcePayloadHash: "dashboard-test",
     }]);
+    db.setCursor("sync:slack:last_success", new Date().toISOString());
+    db.setCursor("sync:ninehire:last_success", new Date().toISOString());
 
     const snapshot = getDashboardSnapshot(db);
+
+    expect(snapshot.dashboard.summary).toEqual(expect.objectContaining({
+      freshness: expect.objectContaining({
+        slack: expect.objectContaining({ state: "FRESH" }),
+        ninehire: expect.objectContaining({ state: "FRESH" }),
+        daouOffice: expect.objectContaining({ state: "FRESH" }),
+      }),
+    }));
 
     expect(snapshot.dashboard.cases).toEqual([
       expect.objectContaining({

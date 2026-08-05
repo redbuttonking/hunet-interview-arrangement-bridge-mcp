@@ -1,6 +1,8 @@
 // 로컬 운영 대시보드에 필요한 최소 정보를 조합한다.
 import { BridgeDatabase, type InterviewSkillDecisionRow, type ReviewRow } from "../db/database.js";
 
+const FRESHNESS_THRESHOLD_MS = 10 * 60 * 1000;
+
 type DashboardEvaluationSummary = {
   scoreSheets: Array<{
     title: string;
@@ -140,8 +142,56 @@ function decisionSummary(decision: InterviewSkillDecisionRow) {
   };
 }
 
+function freshness(lastSuccessfulAt: string | null | undefined) {
+  if (!lastSuccessfulAt) {
+    return { lastSuccessfulAt: null, state: "UNKNOWN" as const };
+  }
+  const timestamp = Date.parse(lastSuccessfulAt);
+  if (Number.isNaN(timestamp)) {
+    return { lastSuccessfulAt: null, state: "UNKNOWN" as const };
+  }
+  return {
+    lastSuccessfulAt,
+    state: Date.now() - timestamp <= FRESHNESS_THRESHOLD_MS ? "FRESH" as const : "STALE" as const,
+  };
+}
+
+export function withDashboardFreshness(
+  db: BridgeDatabase,
+  dashboard: Record<string, unknown>,
+) {
+  const dashboardData = dashboard as {
+    cases: unknown[];
+    summary: Record<string, unknown>;
+    [key: string]: unknown;
+  };
+  const dashboardSummary = dashboardData.summary && typeof dashboardData.summary === "object"
+    ? dashboardData.summary
+    : {};
+  const worker = dashboardSummary.worker && typeof dashboardSummary.worker === "object"
+    ? dashboardSummary.worker as Record<string, unknown>
+    : {};
+  const roomSyncAt = db.getLatestMeetingRoomSyncAt() ?? null;
+  const dashboardWithFreshness = {
+    ...dashboardData,
+    summary: {
+      ...dashboardSummary,
+      freshness: {
+        slack: freshness(db.getCursorInfo("sync:slack:last_success")?.updatedAt),
+        ninehire: freshness(db.getCursorInfo("sync:ninehire:last_success")?.updatedAt),
+        daouOffice: freshness(roomSyncAt),
+        worker: freshness(typeof worker.lastSuccessfulCycleAt === "string" ? worker.lastSuccessfulCycleAt : null),
+      },
+    },
+  };
+  return dashboardWithFreshness;
+}
+
 export function getDashboardSnapshot(db: BridgeDatabase, limit = 100) {
-  const dashboard = db.getOperationsDashboard(limit);
+  const dashboardWithFreshness = withDashboardFreshness(
+    db,
+    db.getOperationsDashboard(limit),
+  );
   const reviews = db.listOpenReviews(limit).map((review) => ({
     id: review.id,
     caseId: review.caseId,
@@ -184,7 +234,7 @@ export function getDashboardSnapshot(db: BridgeDatabase, limit = 100) {
   });
 
   return {
-    dashboard,
+    dashboard: dashboardWithFreshness,
     reviews,
     decisions,
     heldWork: [...heldReviewWork, ...heldCaseWork]

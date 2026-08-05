@@ -297,12 +297,33 @@ function buildActionItems(data: DashboardSnapshot): ActionItem[] {
       href: review.caseId ? `/cases/${review.caseId}` : null,
       review,
     }));
+  const cancellationItems: ActionItem[] = data.dashboard.cases.flatMap((interviewCase) => {
+    const pending = interviewCase.cancellationExternalFollowUps.filter(
+      (followUp) => followUp.status === "PENDING" && followUp.followUpType === "NINEHIRE_CANDIDATE_SCHEDULE",
+    );
+    if (pending.length === 0) return [];
+    return [{
+      id: `cancellation-follow-up:${interviewCase.id}`,
+      queue: "EXCEPTION" as const,
+      priority: "urgent" as const,
+      journeyIndex: journeyIndexForStatus(interviewCase.status),
+      category: "취소 반영 확인",
+      title: "나인하이어의 후보자 일정 취소 반영을 확인해 주세요.",
+      description: `${interviewCase.candidateName ?? "후보자 미확인"} · 기존 회의실 예약은 유지합니다.`,
+      candidateName: interviewCase.candidateName,
+      recruitmentName: interviewCase.recruitmentName,
+      meta: "나인하이어에서 취소 상태를 확인한 뒤 이 항목을 정리할 수 있습니다.",
+      actionLabel: "상세 보기",
+      href: `/cases/${interviewCase.id}`,
+      caseId: interviewCase.id,
+    }];
+  });
   const caseItems = data.dashboard.cases
     .filter((interviewCase) => !caseIdsWithDecision.has(interviewCase.id) && !caseIdsWithReview.has(interviewCase.id))
     .map(caseAction)
     .filter((item): item is ActionItem => Boolean(item));
 
-  return groupActionItems([...decisionItems, ...reviewItems, ...caseItems]
+  return groupActionItems([...decisionItems, ...reviewItems, ...cancellationItems, ...caseItems]
     .sort((left, right) => ({ urgent: 0, normal: 1, watch: 2 }[left.priority] - { urgent: 0, normal: 1, watch: 2 }[right.priority])));
 }
 
@@ -736,6 +757,19 @@ function retryStatusInfo(status: string) {
   return { label: "처리 완료", variant: "success" as const, detail: "워커가 처리한 기록입니다." };
 }
 
+function readinessStatusInfo(status: string | undefined) {
+  if (status === "READY") return { label: "연결 정상", variant: "success" as const };
+  if (status === "DEGRADED") return { label: "일부 확인 필요", variant: "warning" as const };
+  if (status === "NOT_READY") return { label: "연결 확인 필요", variant: "warning" as const };
+  return { label: "확인 중", variant: "secondary" as const };
+}
+
+function freshnessStatusInfo(state: "FRESH" | "STALE" | "UNKNOWN" | undefined) {
+  if (state === "FRESH") return { label: "최근 동기화됨", className: "text-emerald-700", dot: "bg-emerald-500" };
+  if (state === "STALE") return { label: "최신 확인 필요", className: "text-amber-700", dot: "bg-amber-500" };
+  return { label: "동기화 기록 없음", className: "text-slate-500", dot: "bg-slate-300" };
+}
+
 function OperationsReadinessCard() {
   const [data, setData] = useState<OperationalReadinessPayload | null>(null);
   const [loading, setLoading] = useState(false);
@@ -773,6 +807,7 @@ function OperationsReadinessCard() {
   useEffect(() => { void load(false); }, []);
   const daou = data?.readiness.checks.daouOfficeBrowser;
   const daouConnected = daou?.connected === true;
+  const readinessStatus = readinessStatusInfo(data?.readiness.overallStatus);
   const retries = data?.retryJobs ?? [];
   const activeRetries = retries.filter((job) => job.status !== "COMPLETED");
   const pendingRetries = activeRetries.filter((job) => job.status === "PENDING");
@@ -782,7 +817,7 @@ function OperationsReadinessCard() {
     <Card className="mt-6">
       <CardHeader className="flex-row items-start justify-between gap-4 border-b border-slate-200">
         <div><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">INTEGRATION HEALTH</p><CardTitle className="mt-2">연동 상태와 복구</CardTitle><CardDescription className="mt-2">자동 재시도는 워커가 처리합니다. 여기서는 현재 상태를 확인하고 다우오피스 로그인을 다시 열 수 있습니다.</CardDescription></div>
-        <Badge variant={data?.readiness.overallStatus === "READY" ? "success" : "warning"}>{data?.readiness.overallStatus ?? "확인 중"}</Badge>
+        <Badge variant={readinessStatus.variant}>{readinessStatus.label}</Badge>
       </CardHeader>
       <CardContent className="grid gap-5 p-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] lg:items-start">
         <div className="rounded-xl border border-slate-200 p-4"><p className="text-sm font-medium text-slate-500">다우오피스 전용 브라우저</p><p className="mt-2 text-lg font-semibold text-slate-950">{daouConnected ? "연결됨" : "로그인 또는 연결 확인 필요"}</p><p className="mt-2 text-sm leading-6 text-slate-600">{daou?.latestMeetingRoomSyncAt ? `마지막 회의실 동기화. ${formatDateTime(String(daou.latestMeetingRoomSyncAt))}` : "회의실을 추천하기 전 해당 후보자 기준으로 동기화합니다."}</p></div>
@@ -802,7 +837,7 @@ function OperationsReadinessCard() {
           {activeRetries.length > 5 ? <p className="mt-2 text-xs text-slate-500">최근 5건만 표시합니다. 전체 상태는 연결 진단 결과에서 확인하세요.</p> : null}
         </div>
         <div className="flex flex-wrap gap-2 lg:justify-end"><Button disabled={loading} onClick={() => void load(true)} variant="outline">{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}연결 다시 진단</Button>{!daouConnected ? <Button disabled={loading} onClick={() => void openDaouLogin()} variant="outline">다우오피스 로그인</Button> : null}</div>
-        {error ? <p className="lg:col-span-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">{error}</p> : null}
+        {error ? <p aria-live="assertive" className="lg:col-span-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">{error}</p> : null}
       </CardContent>
     </Card>
   );
@@ -915,11 +950,17 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
   const [pageSize, setPageSize] = useState(10);
   const [page, setPage] = useState(1);
   const [hydrated, setHydrated] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
   const refresh = useCallback(async () => {
-    const response = await fetch("/api/dashboard", { cache: "no-store" });
-    if (!response.ok) throw new Error("운영 현황을 새로 불러오지 못했습니다.");
-    setData(await response.json() as DashboardSnapshot);
+    setRefreshing(true);
+    try {
+      const response = await fetch("/api/dashboard", { cache: "no-store" });
+      if (!response.ok) throw new Error("운영 현황을 새로 불러오지 못했습니다.");
+      setData(await response.json() as DashboardSnapshot);
+    } finally {
+      setRefreshing(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -1137,7 +1178,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
       <AppHeader active="operations" workerStatus={summary.worker.status} />
       <main className="mx-auto max-w-[1440px] px-5 pb-12 sm:px-8">
         <PageHeader
-          actions={<Button variant="outline" onClick={() => void refresh().catch((caught) => setError(caught.message))}><RefreshCw className="size-4" />새로고침</Button>}
+          actions={<Button disabled={refreshing} variant="outline" onClick={() => void refresh().catch((caught) => setError(caught instanceof Error ? caught.message : "운영 현황을 새로 불러오지 못했습니다."))}>{refreshing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} {refreshing ? "갱신 중" : "새로고침"}</Button>}
           description="판단하거나 처리해야 하는 인터뷰 업무부터 확인하고, 확정된 일정과 운영 상태를 함께 살펴보세요."
           eyebrow="INTERVIEW OPERATIONS"
           title="오늘의 인터뷰 운영"
@@ -1181,8 +1222,8 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
             </CardHeader>
             <div className="border-b border-slate-200 px-6 py-4 sm:px-7">
               <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                <div className="flex flex-wrap gap-2" role="tablist" aria-label="운영 큐 필터">
-                  {queueTabs.map((tab) => <button aria-selected={queueTab === tab.id} className={`rounded-full px-3 py-2 text-sm font-semibold transition-colors ${queueTab === tab.id ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`} key={tab.id} onClick={() => setQueueTab(tab.id)} role="tab" type="button">{tab.label} <span className="ml-1 opacity-75">{queueCounts[tab.id]}</span></button>)}
+                <div className="flex flex-wrap gap-2" role="group" aria-label="운영 큐 필터">
+                  {queueTabs.map((tab) => <button aria-pressed={queueTab === tab.id} className={`rounded-full px-3 py-2 text-sm font-semibold transition-colors ${queueTab === tab.id ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`} key={tab.id} onClick={() => setQueueTab(tab.id)} type="button">{tab.label} <span className="ml-1 opacity-75">{queueCounts[tab.id]}</span></button>)}
                 </div>
                 <label className="relative block w-full lg:max-w-xs"><Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" /><span className="sr-only">후보자 또는 채용 검색</span><input className="h-10 w-full rounded-lg border border-slate-200 bg-white pl-9 pr-3 text-sm text-slate-900 outline-none placeholder:text-slate-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100" onChange={(event) => setQuery(event.target.value)} placeholder="후보자·채용·업무 검색" type="search" value={query} /></label>
               </div>
@@ -1225,7 +1266,35 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
         <section className="mt-6 grid gap-4 md:grid-cols-3" aria-label="운영 상태">
           <Card><CardContent className="flex items-start gap-4 p-5"><span className="grid size-10 place-items-center rounded-lg bg-amber-50 text-amber-700"><UsersRound className="size-5" /></span><div><p className="text-sm font-medium text-slate-600">면접관 미응답</p><p className="mt-1 text-2xl font-semibold tracking-tight">{summary.pendingRequiredInterviewerResponses}</p><p className="mt-1 text-sm leading-5 text-slate-500">제출 확인이 필요한 필수 면접관입니다.</p></div></CardContent></Card>
           <Card><CardContent className="flex items-start gap-4 p-5"><span className="grid size-10 place-items-center rounded-lg bg-rose-50 text-rose-700"><Wifi className="size-5" /></span><div><p className="text-sm font-medium text-slate-600">연동 재시도</p><p className="mt-1 text-2xl font-semibold tracking-tight">{summary.pendingIntegrationRetries + summary.failedIntegrationRetries}</p><p className="mt-1 text-sm leading-5 text-slate-500">Slack·나인하이어 동기화 오류를 확인합니다.</p></div></CardContent></Card>
-          <Card><CardContent className="flex items-start gap-4 p-5"><span className="grid size-10 place-items-center rounded-lg bg-blue-50 text-blue-700"><ClipboardList className="size-5" /></span><div><p className="text-sm font-medium text-slate-600">데이터 갱신</p><p className="mt-1 text-2xl font-semibold tracking-tight">{hydrated ? formatGeneratedAt(data.dashboard.generatedAt) : "초기 로드"}</p><p className="mt-1 text-sm leading-5 text-slate-500">30초마다 로컬 상태를 다시 확인합니다.</p></div></CardContent></Card>
+          <Card><CardContent className="flex items-start gap-4 p-5"><span className="grid size-10 place-items-center rounded-lg bg-blue-50 text-blue-700"><ClipboardList className="size-5" /></span><div><p className="text-sm font-medium text-slate-600">화면 조회 시각</p><p className="mt-1 text-2xl font-semibold tracking-tight">{hydrated ? formatGeneratedAt(data.dashboard.generatedAt) : "초기 로드"}</p><p className="mt-1 text-sm leading-5 text-slate-500">외부 연동 성공 시각은 아래 신선도 카드에서 확인합니다.</p></div></CardContent></Card>
+        </section>
+        <section className="mt-6" aria-label="데이터 신선도">
+          <Card>
+            <CardHeader className="border-b border-slate-200 py-5">
+              <div>
+                <p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">DATA FRESHNESS</p>
+                <CardTitle className="mt-2 text-xl">외부 데이터가 언제 확인됐는지</CardTitle>
+                <CardDescription className="mt-2">화면을 연 시각과 실제 연동 성공 시각을 구분해 보여줍니다. 최신 확인이 필요한 항목은 새로고침이나 워커 상태를 점검하세요.</CardDescription>
+              </div>
+            </CardHeader>
+            <CardContent className="grid gap-3 p-5 sm:grid-cols-2 xl:grid-cols-4">
+              {([
+                ["Slack 알림", summary.freshness?.slack],
+                ["나인하이어 일정", summary.freshness?.ninehire],
+                ["다우오피스 회의실", summary.freshness?.daouOffice],
+                ["워커 처리", summary.freshness?.worker],
+              ] as const).map(([label, source]) => {
+                const info = freshnessStatusInfo(source?.state);
+                return (
+                  <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-4" key={label}>
+                    <p className="text-sm font-semibold text-slate-900">{label}</p>
+                    <p className={`mt-2 flex items-center gap-2 text-sm font-medium ${info.className}`}><span aria-hidden="true" className={`size-2 rounded-full ${info.dot}`} />{info.label}</p>
+                    <p className="mt-2 text-xs text-slate-500">{source?.lastSuccessfulAt ? formatDateTime(source.lastSuccessfulAt) : "성공 기록이 아직 없습니다."}</p>
+                  </div>
+                );
+              })}
+            </CardContent>
+          </Card>
         </section>
         <OperationsReadinessCard />
       </main>

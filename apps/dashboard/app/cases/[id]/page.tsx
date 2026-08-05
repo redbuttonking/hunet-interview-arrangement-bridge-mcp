@@ -92,8 +92,12 @@ export default async function CaseDetailPage({ params }: { params: Promise<{ id:
   if (!data) notFound();
   const { bundle, plan, template, scheduledSegments, events } = data;
   const interviewCase = bundle.interviewCase;
+  const plannedInterviewerIds = new Set(
+    plan?.sessions.flatMap((session) => session.interviewerIds) ?? [],
+  );
   const activeInterviewers = bundle.interviewers.filter(
-    (interviewer) => interviewer.active,
+    (interviewer) => interviewer.active &&
+      (plannedInterviewerIds.size === 0 || plannedInterviewerIds.has(interviewer.id)),
   );
   const currentJourneyIndex = journeyIndex(interviewCase.status);
   const action = nextAction(
@@ -169,7 +173,7 @@ export default async function CaseDetailPage({ params }: { params: Promise<{ id:
 
           <Card>
             <CardHeader><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">INTERVIEWERS</p><CardTitle className="mt-2">면접관 일정 제출</CardTitle></CardHeader>
-            <CardContent>{activeInterviewers.length > 0 ? <div className="max-h-80 overflow-y-auto pr-1"><div className="divide-y divide-slate-200">{activeInterviewers.map((interviewer) => <div className="flex items-center justify-between gap-4 py-4 first:pt-0 last:pb-0" key={interviewer.id}><div><p className="text-base font-semibold">{interviewer.displayName}</p><p className="mt-1 text-sm text-slate-600">{interviewer.required ? "필수 면접관" : "선택 면접관"}</p></div><Badge variant={interviewer.status === "SUBMITTED" ? "success" : interviewer.status === "DECLINED_PENDING_REVIEW" ? "warning" : "secondary"}>{interviewerStatus(interviewer.status)}</Badge></div>)}</div></div> : <p className="text-base text-slate-600">동기화된 면접관이 없습니다.</p>}</CardContent>
+            <CardContent>{activeInterviewers.length > 0 ? <div className="max-h-80 overflow-y-auto pr-1"><div className="divide-y divide-slate-200">{activeInterviewers.map((interviewer) => <div className="flex items-center justify-between gap-4 py-4 first:pt-0 last:pb-0" key={interviewer.id}><div><p className="text-base font-semibold">{interviewer.displayName}</p><p className="mt-1 text-sm text-slate-600">{interviewer.source === "NINEHIRE" ? "나인하이어 인터뷰 평가표 등록 평가자" : interviewer.required ? "필수 면접관" : "선택 면접관"}</p></div><Badge variant={interviewer.status === "SUBMITTED" ? "success" : interviewer.status === "DECLINED_PENDING_REVIEW" ? "warning" : "secondary"}>{interviewerStatus(interviewer.status)}</Badge></div>)}</div></div> : <p className="text-base text-slate-600">현재 단계의 평가표에 등록된 면접관이 없습니다. 나인하이어 평가표 설정을 확인하거나 직접 지정해 주세요.</p>}</CardContent>
           </Card>
 
           <Card>

@@ -28,6 +28,11 @@
   button:not(:disabled) {
     cursor: pointer;
   }
+
+  :where(a, button, input, select, summary):focus-visible {
+    outline: 2px solid #2563eb;
+    outline-offset: 2px;
+  }
 }
 
 [data-case-detail-panels] > :nth-child(3) > :last-child,

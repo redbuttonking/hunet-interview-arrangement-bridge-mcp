@@ -30,6 +30,14 @@ export type CandidateCase = {
     endTime: string;
   }>;
   candidateScheduleProposalSent: boolean;
+  cancellationExternalFollowUps: Array<{
+    id: string;
+    followUpType: "NINEHIRE_CANDIDATE_SCHEDULE" | "DAOU_ROOM_RESERVATION";
+    status: "PENDING" | "CONFIRMED" | "NOT_REQUIRED";
+    createdAt: string;
+    resolvedAt: string | null;
+    resolutionNote: string | null;
+  }>;
   interviewerResponses: {
     required: number;
     submitted: number;
@@ -110,6 +118,12 @@ export type DashboardSnapshot = {
       pendingIntegrationRetries: number;
       failedIntegrationRetries: number;
       worker: { status: string; lastSuccessfulCycleAt?: string | null };
+      freshness: {
+        slack: DataFreshness;
+        ninehire: DataFreshness;
+        daouOffice: DataFreshness;
+        worker: DataFreshness;
+      };
     };
     cases: CandidateCase[];
   };
@@ -123,4 +137,9 @@ export type DashboardSnapshot = {
     startTime: string;
     endTime: string;
   }>;
+};
+
+export type DataFreshness = {
+  lastSuccessfulAt: string | null;
+  state: "FRESH" | "STALE" | "UNKNOWN";
 };

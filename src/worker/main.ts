@@ -268,6 +268,7 @@ async function ensureDailyDatabaseBackup(): Promise<void> {
 async function reconcileSlackNotifications(): Promise<void> {
   try {
     await reconciler.reconcile();
+    db.setCursor("sync:slack:last_success", new Date().toISOString());
     db.completePendingIntegrationRetryByDedupeKey(
       "SLACK_NOTIFICATION_RECONCILIATION",
       slackReconciliationDedupeKey,
@@ -286,6 +287,7 @@ async function reconcileSlackNotifications(): Promise<void> {
 async function reconcileNinehireConfirmedSchedules(): Promise<void> {
   try {
     await workflow.reconcileNinehireConfirmedSchedules();
+    db.setCursor("sync:ninehire:last_success", new Date().toISOString());
     db.completePendingIntegrationRetryByDedupeKey(
       "NINEHIRE_SCHEDULE_RECONCILIATION",
       ninehireScheduleReconciliationDedupeKey,
@@ -315,8 +317,10 @@ async function runIntegrationRetryCycle(): Promise<void> {
       try {
         if (job.jobType === "SLACK_NOTIFICATION_RECONCILIATION") {
           await reconciler.reconcile();
+          db.setCursor("sync:slack:last_success", new Date().toISOString());
         } else if (job.jobType === "NINEHIRE_SCHEDULE_RECONCILIATION") {
           await workflow.reconcileNinehireConfirmedSchedules();
+          db.setCursor("sync:ninehire:last_success", new Date().toISOString());
         } else {
           await workflow.processIntegrationRetryJob(job);
         }
@@ -344,22 +348,35 @@ async function runIntegrationRetryCycle(): Promise<void> {
 async function runCycle(): Promise<void> {
   if (cycleRunning || retryCycleRunning) return;
   cycleRunning = true;
+  const failures: string[] = [];
+  const runStep = async (label: string, step: () => Promise<unknown>) => {
+    try {
+      await step();
+    } catch (error) {
+      failures.push(`${label}: ${errorMessage(error)}`);
+    }
+  };
   try {
     await ensureDailyDatabaseBackup();
-    await reconcileSlackNotifications();
-    await reconcileNinehireConfirmedSchedules();
+    await runStep("Slack 동기화", reconcileSlackNotifications);
+    await runStep("나인하이어 일정 동기화", reconcileNinehireConfirmedSchedules);
     const dueBeforeRefresh = db.listDueReminders();
     const caseIds = [...new Set(dueBeforeRefresh.map((item) => item.caseId))];
     for (const caseId of caseIds) {
-      await workflow.syncCaseInterviewers(caseId);
+      await runStep(`면접관 동기화 ${caseId}`, () => workflow.syncCaseInterviewers(caseId));
     }
     for (const reminder of db.listDueReminders()) {
-      const ordinal = reminder.reminderNumber === 1 ? "1차" : "2차(최종)";
-      await app.client.chat.postMessage({
-        channel: requestChannelId,
-        text: `<@${reminder.slackUserId}> 인터뷰 가능 일정 입력 ${ordinal} 리마인드입니다. 기존 요청 메시지의 [가능 일정 입력] 버튼을 눌러 주세요.`,
+      await runStep(`리마인드 발송 ${reminder.id}`, async () => {
+        const ordinal = reminder.reminderNumber === 1 ? "1차" : "2차(최종)";
+        await app.client.chat.postMessage({
+          channel: requestChannelId,
+          text: `<@${reminder.slackUserId}> 인터뷰 가능 일정 입력 ${ordinal} 리마인드입니다. 기존 요청 메시지의 [가능 일정 입력] 버튼을 눌러 주세요.`,
+        });
+        db.markReminderSent(reminder.id);
       });
-      db.markReminderSent(reminder.id);
+    }
+    if (failures.length > 0) {
+      throw new Error(failures.join(" | "));
     }
     db.recordWorkerCycleSuccess(INTERVIEW_BRIDGE_WORKER_KEY);
   } catch (error) {

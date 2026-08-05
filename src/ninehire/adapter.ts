@@ -243,11 +243,18 @@ function summarizeCompletedScoreSheets(
   };
 }
 
+function isInterviewScoreSheet(sheet: Record<string, unknown>): boolean {
+  const title = text(sheet.title);
+  const evaluationMethod = nameOf(sheet.evaluationMethod) ?? codeOf(sheet.evaluationMethod);
+  if (!title && !evaluationMethod) return true;
+  return /면접|인터뷰/iu.test(`${title ?? ""} ${evaluationMethod ?? ""}`);
+}
+
 function activeScoreSheetInterviewers(
   detail: Record<string, unknown>,
 ): InterviewerLookup {
   const activeScoreSheets = records(detail.scoreSheets).filter(
-    (sheet) => codeOf(sheet.status) !== "done",
+    (sheet) => codeOf(sheet.status) !== "done" && isInterviewScoreSheet(sheet),
   );
   if (activeScoreSheets.length === 0) {
     return {

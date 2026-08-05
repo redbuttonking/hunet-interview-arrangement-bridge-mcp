@@ -80,7 +80,7 @@ function RoomCalendarRow({
 }) {
   return (
     <section className="grid min-w-[1140px] grid-cols-[180px_minmax(960px,1fr)] border-t border-slate-200 first:border-t-0">
-      <h3 className="flex items-center border-r border-slate-200 bg-slate-50 px-5 text-base font-semibold tracking-tight text-slate-900">{roomName}</h3>
+      <h3 className="sticky left-0 z-20 flex items-center border-r border-slate-200 bg-slate-50 px-5 text-base font-semibold tracking-tight text-slate-900">{roomName}</h3>
       <div className="relative grid min-h-32 grid-cols-9 overflow-hidden">
         {calendarHours.map((hour) => <span aria-hidden="true" className="border-r border-slate-100 bg-linear-to-b from-slate-50/80 to-white" key={hour} />)}
         {blocks.map((block) => (
@@ -163,10 +163,10 @@ export function RoomsClient({ data }: { data: DashboardSnapshot }) {
         <PageHeader eyebrow="ROOM CALENDAR" title="회의실 캘린더" description="다우오피스에 확보된 회의실 시간과 실제 인터뷰 배정을 같은 시간축에서 확인합니다." />
 
         <Card className="overflow-hidden">
-          <CardHeader className="gap-5 border-b border-slate-200 p-5 sm:flex-row sm:items-center sm:justify-between sm:p-6">
+          <CardHeader className="relative gap-5 border-b border-slate-200 p-5 sm:flex-row sm:items-center sm:justify-between sm:p-6">
             <div className="flex flex-wrap items-center gap-3 text-sm text-slate-600">
-              <span className="flex items-center gap-2"><i className="size-2.5 rounded-sm bg-slate-300" />회의실 예약</span>
-              <span className="flex items-center gap-2"><i className="size-2.5 rounded-sm bg-blue-500" />인터뷰 배정</span>
+              <span className="flex items-center gap-2"><i aria-hidden="true" className="size-2.5 rounded-sm bg-slate-300" />회의실 예약</span>
+              <span className="flex items-center gap-2"><i aria-hidden="true" className="size-2.5 rounded-sm bg-blue-500" />인터뷰 배정</span>
               <Badge variant="outline">다우오피스 읽기 전용</Badge>
             </div>
             <div className="flex items-center gap-2 sm:absolute sm:left-1/2 sm:-translate-x-1/2">
@@ -182,7 +182,7 @@ export function RoomsClient({ data }: { data: DashboardSnapshot }) {
             {roomNames.length > 0 ? (
               <div className="overflow-x-auto">
                 <div className="grid min-w-[1140px] grid-cols-[180px_minmax(960px,1fr)] bg-slate-50 text-sm font-semibold text-slate-600">
-                  <span className="flex h-11 items-center border-r border-slate-200 px-5">회의실</span>
+                  <span className="sticky left-0 z-30 flex h-11 items-center border-r border-slate-200 bg-slate-50 px-5">회의실</span>
                   <div className="grid grid-cols-9">{calendarHours.map((hour) => <span className="flex h-11 items-center border-r border-slate-200 px-3" key={hour}>{String(hour).padStart(2, "0")}:00</span>)}</div>
                 </div>
                 {roomNames.map((roomName) => (

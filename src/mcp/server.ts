@@ -24,6 +24,7 @@ import { suggestSequentialInterviewSlotsWithRooms } from "../services/sequential
 import { OperationalReadinessService } from "../services/operational-readiness.js";
 import { InterviewArrangementSkills } from "../skills/interview-arrangement.js";
 import { SlackReconciler } from "../slack/reconciler.js";
+import { withDashboardFreshness } from "../dashboard/service.js";
 
 function result(value: unknown) {
   return {
@@ -595,7 +596,7 @@ export function createBridgeMcpServer(
         openWorldHint: false,
       },
     },
-    async ({ limit }) => result(db.getOperationsDashboard(limit)),
+    async ({ limit }) => result(withDashboardFreshness(db, db.getOperationsDashboard(limit))),
   );
 
   server.registerTool(
@@ -933,7 +934,9 @@ export function createBridgeMcpServer(
         slackClient,
         workflow,
       );
-      return result(await reconciler.reconcile());
+      const reconciliation = await reconciler.reconcile();
+      db.setCursor("sync:slack:last_success", new Date().toISOString());
+      return result(reconciliation);
     },
   );
 
@@ -950,7 +953,11 @@ export function createBridgeMcpServer(
         openWorldHint: true,
       },
     },
-    async () => result(await workflow.reconcileNinehireConfirmedSchedules()),
+    async () => {
+      const reconciliation = await workflow.reconcileNinehireConfirmedSchedules();
+      db.setCursor("sync:ninehire:last_success", new Date().toISOString());
+      return result(reconciliation);
+    },
   );
 
   server.registerTool(

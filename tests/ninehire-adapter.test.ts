@@ -366,6 +366,42 @@ describe("NineHire approval adapter", () => {
     });
   });
 
+  it("uses only active score sheets marked as interview evaluations", async () => {
+    const adapter = new NinehireRecruitmentWorkflowAdapter({
+      async callTool(name) {
+        if (name !== "get_applicant_progress") {
+          throw new Error(`Unexpected tool: ${name}`);
+        }
+        return {
+          structuredContent: {
+            applicantProgressId: "A2",
+            name: "Candidate",
+            scoreSheets: [
+              {
+                status: { code: "waiting" },
+                title: "서류 평가표",
+                participants: [{ userId: "N-DOC", name: "채용 담당자" }],
+              },
+              {
+                status: { code: "waiting" },
+                title: "1차 인터뷰 평가표",
+                participants: [{ userId: "N-INT", name: "실무 면접관" }],
+              },
+            ],
+          },
+        };
+      },
+    });
+
+    await expect(adapter.listInterviewers({
+      recruitmentRef: "J456",
+      candidateRef: "A2",
+      candidateName: "Candidate",
+    })).resolves.toMatchObject({
+      interviewers: [{ ninehireUserId: "N-INT", displayName: "실무 면접관" }],
+    });
+  });
+
   it("reads an ordered recruitment pipeline from NineHire", async () => {
     const adapter = new NinehireRecruitmentWorkflowAdapter({
       async callTool(name, args) {
