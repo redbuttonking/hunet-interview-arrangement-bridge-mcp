@@ -29,6 +29,7 @@ import { firstReminderAt, secondReminderAt } from "../domain/calendar.js";
 type SqlRow = Record<string, unknown>;
 
 const DRAFT_SEND_LEASE_MS = 2 * 60 * 1000;
+const MEETING_ROOM_SYNC_FRESHNESS_MS = 10 * 60 * 1000;
 
 export interface InterviewCaseRow {
   id: string;
@@ -1604,6 +1605,10 @@ export class BridgeDatabase {
     reason: string;
     summary?: Record<string, unknown>;
   }): string {
+    if (input.caseId && !input.notificationId) {
+      const existing = this.getOpenCaseReviewId(input.caseId, input.reviewType);
+      if (existing) return existing;
+    }
     const id = randomUUID();
     const insert = this.connection
       .prepare(`
@@ -1672,10 +1677,19 @@ export class BridgeDatabase {
   hasCaseReview(caseId: string, reviewType: string): boolean {
     const row = this.connection
       .prepare(
-        "SELECT id FROM workflow_reviews WHERE case_id = ? AND review_type = ? LIMIT 1",
+        "SELECT id FROM workflow_reviews WHERE case_id = ? AND review_type = ? AND status = 'OPEN' LIMIT 1",
       )
       .get(caseId, reviewType) as SqlRow | undefined;
     return Boolean(row);
+  }
+
+  getOpenCaseReviewId(caseId: string, reviewType: string): string | undefined {
+    const row = this.connection
+      .prepare(
+        "SELECT id FROM workflow_reviews WHERE case_id = ? AND review_type = ? AND status = 'OPEN' ORDER BY created_at ASC LIMIT 1",
+      )
+      .get(caseId, reviewType) as SqlRow | undefined;
+    return row ? asString(row.id) : undefined;
   }
 
   hasOpenReviewForSourceEvent(reviewType: string, eventId: string): boolean {
@@ -3028,16 +3042,22 @@ export class BridgeDatabase {
     ).map(toMeetingRoomBlock);
   }
 
-  areMeetingRoomDatesSynced(dates: string[]): boolean {
+  areMeetingRoomDatesSynced(
+    dates: string[],
+    maxAgeMs = MEETING_ROOM_SYNC_FRESHNESS_MS,
+  ): boolean {
     const normalizedDates = [...new Set(dates)].sort();
     if (normalizedDates.length === 0) return false;
     const row = this.connection
       .prepare(
-        `SELECT COUNT(*) AS count FROM meeting_room_sync_dates
+        `SELECT COUNT(*) AS count, MIN(synced_at) AS oldest_synced_at
+         FROM meeting_room_sync_dates
          WHERE date IN (${normalizedDates.map(() => "?").join(", ")})`,
       )
       .get(...normalizedDates) as SqlRow;
-    return Number(row.count) === normalizedDates.length;
+    if (Number(row.count) !== normalizedDates.length) return false;
+    const oldestSyncedAt = Date.parse(asString(row.oldest_synced_at));
+    return Number.isFinite(oldestSyncedAt) && Date.now() - oldestSyncedAt <= maxAgeMs;
   }
 
   listRoomAllocations(caseId?: string): RoomAllocationRow[] {
@@ -4204,6 +4224,18 @@ export class BridgeDatabase {
       ) as SqlRow | undefined;
     if (existing) return toDraft(existing);
 
+    if (input.messageType === "INTERVIEWER_REQUEST") {
+      const interviewCase = this.getCase(input.caseId);
+      if (
+        !interviewCase ||
+        !["READY_FOR_DRAFT", "DRAFT_CREATED"].includes(interviewCase.status)
+      ) {
+        throw new Error(
+          "Interviewer request drafts can only be created for cases ready to start scheduling.",
+        );
+      }
+    }
+
     const id = randomUUID();
     this.connection
       .prepare(`
@@ -4258,6 +4290,7 @@ export class BridgeDatabase {
 
   replacePendingDraftText(input: {
     draftId: string;
+    previewText: string;
     blocksJson: string;
     payloadHash: string;
   }): DraftRow {
@@ -4269,11 +4302,11 @@ export class BridgeDatabase {
       .prepare(
         `
           UPDATE message_drafts
-          SET blocks_json = ?, payload_hash = ?
+          SET preview_text = ?, blocks_json = ?, payload_hash = ?
           WHERE id = ? AND status = 'DRAFT'
         `,
       )
-      .run(input.blocksJson, input.payloadHash, input.draftId);
+      .run(input.previewText, input.blocksJson, input.payloadHash, input.draftId);
     if (Number(updated.changes) !== 1) {
       throw new Error(`Draft is not editable: ${input.draftId}`);
     }

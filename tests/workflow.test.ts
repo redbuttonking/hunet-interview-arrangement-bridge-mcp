@@ -1209,6 +1209,8 @@ describe("evaluation approval workflow", () => {
 
     const recovery = workflow.createWorkerDowntimeReviews(workerRestart.downtime!);
     expect(recovery.impactedCaseIds).toEqual([interviewCase.id]);
+    const repeatedRecovery = workflow.createWorkerDowntimeReviews(workerRestart.downtime!);
+    expect(repeatedRecovery.reviewIds).toEqual(recovery.reviewIds);
     const draft = workflow.createAvailabilityRecoveryDraft(recovery.reviewIds[0]!);
 
     expect(draft).toMatchObject({

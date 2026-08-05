@@ -11,6 +11,76 @@ describe("BridgeDatabase", () => {
     expect(db.getLatestSchemaVersion()).toBe(16);
   });
 
+  it("does not recreate a resolved case review as an active duplicate", () => {
+    db = new BridgeDatabase(":memory:");
+    const interviewCase = db.createInterviewCase({
+      candidateName: "Candidate",
+      proposalDates: ["2026-08-10"],
+    });
+    const reviewType = "WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED";
+    const first = db.createReview({
+      caseId: interviewCase.id,
+      reviewType,
+      reason: "First interruption.",
+    });
+    db.resolveReview(first, "RESOLVED");
+    const second = db.createReview({
+      caseId: interviewCase.id,
+      reviewType,
+      reason: "Second interruption.",
+    });
+
+    expect(second).not.toBe(first);
+    expect(db.hasCaseReview(interviewCase.id, reviewType)).toBe(true);
+    expect(db.listOpenReviews()).toHaveLength(1);
+  });
+
+  it("rejects a new interviewer request draft after scheduling has started", () => {
+    const database = (db = new BridgeDatabase(":memory:"));
+    const interviewCase = database.createInterviewCase({
+      candidateName: "Candidate",
+      proposalDates: ["2026-08-10"],
+    });
+    database.setCaseStatus(interviewCase.id, "COLLECTING_AVAILABILITY");
+
+    expect(() =>
+      database.createDraft({
+        caseId: interviewCase.id,
+        channelId: "C1",
+        previewText: "Availability request",
+        blocksJson: "[]",
+        payloadHash: "request-after-start",
+        messageType: "INTERVIEWER_REQUEST",
+      }),
+    ).toThrow("ready to start scheduling");
+  });
+
+  it("updates the canonical preview text when a draft is revised", () => {
+    db = new BridgeDatabase(":memory:");
+    const interviewCase = db.createInterviewCase({
+      candidateName: "Candidate",
+      proposalDates: ["2026-08-10"],
+    });
+    const draft = db.createDraft({
+      caseId: interviewCase.id,
+      channelId: "C1",
+      previewText: "old preview",
+      blocksJson: "[]",
+      payloadHash: "preview-before",
+      messageType: "SCHEDULE_CANCELLATION",
+    });
+
+    const revised = db.replacePendingDraftText({
+      draftId: draft.id,
+      previewText: "new preview",
+      blocksJson: "[]",
+      payloadHash: "preview-after",
+    });
+
+    expect(revised.previewText).toBe("new preview");
+    expect(revised.payloadHash).toBe("preview-after");
+  });
+
   it("leases an approved draft so concurrent send attempts cannot duplicate Slack messages", () => {
     const database = (db = new BridgeDatabase(":memory:"));
     const interviewCase = database.createInterviewCase({

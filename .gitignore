@@ -14,6 +14,14 @@ data/*.sqlite-wal
 data/backups/
 data/daou-office-profile/
 *.log
+*.err
+*.out
+tmp/
+.codex/
+.codex-worker-dev.err
+.codex-worker-dev.out
+tmp_pdf_*.png
+tmp_pdf_*.txt
 .DS_Store
 Thumbs.db
 

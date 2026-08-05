@@ -1,5 +1,7 @@
 # Interview Arrangement Bridge MCP
 
+현재 파일럿의 자동화 범위와 50개 역할 검토 결과는 [AUTOMATION_REVIEW.md](./AUTOMATION_REVIEW.md)에 정리되어 있습니다. 이 문서는 외부 발송·다우오피스 쓰기처럼 사용자 승인이 필요한 경계를 포함합니다.
+
 ## 기본 인터뷰 흐름과 운영 사전점검
 
 채용별 기본 흐름은 `approve_recruitment_interview_template`의 `routes`로 승인한다. 흐름은 시작 단계와 포함 단계를 연결하며, 후보자가 시작 단계에 도달했을 때 자동 적용한다.

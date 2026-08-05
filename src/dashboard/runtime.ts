@@ -507,16 +507,28 @@ export async function approveDashboardDraft(draftId: string) {
     const draft = runtime.db.getDraft(draftId);
     if (!draft) throw new Error(`Draft not found: ${draftId}`);
     if (draft.messageType === "INTERVIEWER_REQUEST") {
-      return runtime.workflow.approveAndSendInterviewerRequest(draftId, runtime.slackClient);
+      return await runtime.workflow.approveAndSendInterviewerRequest(
+        draftId,
+        runtime.slackClient,
+      );
     }
     if (draft.messageType === "SCHEDULE_CONFIRMATION") {
-      return runtime.workflow.approveAndSendScheduleConfirmation(draftId, runtime.slackClient);
+      return await runtime.workflow.approveAndSendScheduleConfirmation(
+        draftId,
+        runtime.slackClient,
+      );
     }
     if (draft.messageType === "AVAILABILITY_RECOVERY") {
-      return runtime.workflow.approveAndSendAvailabilityRecovery(draftId, runtime.slackClient);
+      return await runtime.workflow.approveAndSendAvailabilityRecovery(
+        draftId,
+        runtime.slackClient,
+      );
     }
     if (["SCHEDULE_CHANGE", "SCHEDULE_CANCELLATION"].includes(draft.messageType)) {
-      return runtime.workflow.approveAndSendScheduleUpdate(draftId, runtime.slackClient);
+      return await runtime.workflow.approveAndSendScheduleUpdate(
+        draftId,
+        runtime.slackClient,
+      );
     }
     throw new Error(`Dashboard sending is not available for draft type: ${draft.messageType}`);
   } finally {

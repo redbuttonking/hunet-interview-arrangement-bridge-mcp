@@ -851,24 +851,33 @@ export class WorkflowService {
     const reviewIds: string[] = [];
     this.db.transaction(() => {
       for (const interviewCase of impactedCases) {
-        const reviewId = this.db.createReview({
-          caseId: interviewCase.id,
-          reviewType: "WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED",
-          reason:
-            "Slack 워커 중단 구간에 면접관 가용시간 제출이 누락됐을 수 있습니다. 재제출 요청 초안을 만들거나 직접 확인하세요.",
-          summary: {
-            workerKey: downtime.workerKey,
-            downtimeStartedAt: downtime.startedAt,
-            downtimeDetectedAt: downtime.detectedAt,
-            downtimeDurationMs: downtime.durationMs,
-          },
-        });
-        this.db.addEvent(
+        const reviewType = "WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED";
+        const existingReviewId = this.db.getOpenCaseReviewId(
           interviewCase.id,
-          "WORKER_DOWNTIME_AVAILABILITY_REVIEW_CREATED",
-          "SYSTEM",
-          { reviewId, ...downtime },
+          reviewType,
         );
+        const reviewId =
+          existingReviewId ??
+          this.db.createReview({
+            caseId: interviewCase.id,
+            reviewType,
+            reason:
+              "Slack 워커 중단 구간에 면접관 가용시간 제출이 누락됐을 수 있습니다. 재제출 요청 초안을 만들거나 직접 확인하세요.",
+            summary: {
+              workerKey: downtime.workerKey,
+              downtimeStartedAt: downtime.startedAt,
+              downtimeDetectedAt: downtime.detectedAt,
+              downtimeDurationMs: downtime.durationMs,
+            },
+          });
+        if (!existingReviewId) {
+          this.db.addEvent(
+            interviewCase.id,
+            "WORKER_DOWNTIME_AVAILABILITY_REVIEW_CREATED",
+            "SYSTEM",
+            { reviewId, ...downtime },
+          );
+        }
         reviewIds.push(reviewId);
       }
     });
@@ -1956,6 +1965,11 @@ export class WorkflowService {
     await this.syncCaseInterviewers(caseId);
     const bundle = this.db.getCaseBundle(caseId);
     if (!bundle) throw new Error(`Case not found: ${caseId}`);
+    if (!["READY_FOR_DRAFT", "DRAFT_CREATED"].includes(bundle.interviewCase.status)) {
+      throw new Error(
+        "Interviewer request drafts can only be created before availability collection starts.",
+      );
+    }
     const plan = this.db.getCaseInterviewPlan(caseId);
     if (
       plan?.mode === "SEQUENTIAL" &&
@@ -2145,10 +2159,15 @@ export class WorkflowService {
         `Expected one matching draft text, but found ${replaced}: ${input.draftId}`,
       );
     }
+    const previewText = draft.previewText.replace(
+      input.textToReplace,
+      input.replacementText,
+    );
     return this.db.replacePendingDraftText({
       draftId: draft.id,
+      previewText,
       blocksJson: JSON.stringify(blocks),
-      payloadHash: hashPayload(draft.previewText, blocks),
+      payloadHash: hashPayload(previewText, blocks),
     });
   }
 
