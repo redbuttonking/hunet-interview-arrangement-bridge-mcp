@@ -5,7 +5,7 @@ import type { HTMLAttributes } from "react";
 import { cn } from "../../lib/utils";
 
 const badgeVariants = cva(
-  "inline-flex w-fit items-center gap-1 rounded-md border px-2 py-0.5 text-xs font-semibold whitespace-nowrap",
+  "inline-flex w-fit items-center gap-1 rounded-full border px-2.5 py-1 text-xs font-semibold leading-none whitespace-nowrap",
   {
     variants: {
       variant: {
@@ -14,15 +14,15 @@ const badgeVariants = cva(
         success: "border-emerald-200 bg-emerald-50 text-emerald-700",
         warning: "border-amber-200 bg-amber-50 text-amber-800",
         destructive: "border-rose-200 bg-rose-50 text-rose-700",
-        outline: "border-slate-200 bg-white text-slate-700",
+        outline: "border-slate-300 bg-white text-slate-700",
       },
     },
     defaultVariants: { variant: "default" },
   },
 );
 
-export type BadgeProps = HTMLAttributes<HTMLDivElement> & VariantProps<typeof badgeVariants>;
+export type BadgeProps = HTMLAttributes<HTMLSpanElement> & VariantProps<typeof badgeVariants>;
 
 export function Badge({ className, variant, ...props }: BadgeProps) {
-  return <div className={cn(badgeVariants({ variant }), className)} {...props} />;
+  return <span className={cn(badgeVariants({ variant }), className)} {...props} />;
 }

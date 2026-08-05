@@ -3,7 +3,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertCircle, ArrowRight, CalendarClock, CheckCircle2, ClipboardList, Clock3, Loader2, RefreshCw, Search, TriangleAlert, UsersRound, Wifi } from "lucide-react";
+import { AlertCircle, ArrowRight, CalendarClock, CheckCircle2, ClipboardList, Clock3, Loader2, RefreshCw, Search, SearchX, TriangleAlert, UsersRound, Wifi } from "lucide-react";
 import { AppHeader, PageHeader } from "./app-shell";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
@@ -685,6 +685,10 @@ function ActionJourney({ currentIndex, compact = false }: { currentIndex: number
   if (compact) {
     return (
       <div aria-label={`인터뷰 조율 진행 상태. ${currentIndex + 1}단계 ${actionJourneySteps[currentIndex] ?? "확인 필요"}`} className="grid gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="text-xs font-semibold tracking-wide text-slate-500">인터뷰 조율 진행</span>
+          <span className="rounded-full bg-blue-50 px-2 py-1 text-xs font-semibold text-blue-700">{currentIndex + 1} / {actionJourneySteps.length} · {actionJourneySteps[currentIndex] ?? "확인 필요"}</span>
+        </div>
         <ol className="flex items-center gap-1.5" aria-label="인터뷰 조율 5단계">
           {actionJourneySteps.map((step, index) => {
             const isComplete = index < currentIndex;
@@ -699,7 +703,7 @@ function ActionJourney({ currentIndex, compact = false }: { currentIndex: number
             );
           })}
         </ol>
-        <p className="text-sm font-medium text-slate-600"><span className="font-semibold text-slate-900">현재 단계.</span> {currentIndex + 1}. {actionJourneySteps[currentIndex] ?? "확인 필요"}</p>
+        <p className="text-sm font-medium text-slate-600"><span className="font-semibold text-slate-900">현재 처리.</span> {actionJourneySteps[currentIndex] ?? "확인 필요"}</p>
       </div>
     );
   }
@@ -854,6 +858,14 @@ function ActionRow({ item, onCreateReviewDecision, onCreateCaseDecision, onOpenD
   const review = item.review;
   const actionableReview = Boolean(review && supportedReviewDecisionTypes.has(review.reviewType));
   const priority = priorityStyle(item.priority);
+  const actionKind = directDecision ? "결정 재개" : actionableReview ? "검토 필요" : item.caseSkillKey ? "다음 단계 선택" : "상세 확인";
+  const actionHint = directDecision
+    ? "선택지를 확인한 뒤 적용합니다."
+    : actionableReview
+      ? "검토 내용을 열어 처리 방법을 선택합니다."
+      : item.caseSkillKey
+        ? "다음 단계와 실행 범위를 확인합니다."
+        : "후보자 상세에서 현재 상태를 확인합니다.";
 
   return (
     <article className="grid gap-5 px-6 py-6 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:px-7">
@@ -880,10 +892,10 @@ function ActionRow({ item, onCreateReviewDecision, onCreateCaseDecision, onOpenD
                 return (
                   <div className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-white px-3 py-2" key={related.id}>
                     <div className="min-w-0"><p className="truncate text-sm font-medium text-slate-800">{related.title}</p><p className="mt-0.5 text-xs text-slate-500">{related.category}</p></div>
-                    {relatedDecision ? <Button onClick={() => onOpenDecision(relatedDecision)} size="sm" variant="decision">결정 계속하기</Button> : null}
-                    {!relatedDecision && relatedActionableReview && relatedReview ? <Button disabled={loading} onClick={() => onCreateReviewDecision(relatedReview)} size="sm" variant="outline">검토하기</Button> : null}
-                    {!relatedDecision && !relatedActionableReview && related.caseSkillKey && related.caseId ? <Button disabled={loading} onClick={() => onCreateCaseDecision(related.caseId!, related.caseSkillKey!)} size="sm">결정하기</Button> : null}
-                    {!relatedDecision && !relatedActionableReview && !related.caseSkillKey && related.href ? <Button asChild size="sm" variant="outline"><Link href={related.href}>상세 보기<ArrowRight className="size-3.5" /></Link></Button> : null}
+                    {relatedDecision ? <Button aria-label={`${related.candidateName ?? "후보자"} 결정 재개`} onClick={() => onOpenDecision(relatedDecision)} size="sm" title="선택지를 확인한 뒤 적용합니다." variant="decision">결정 계속하기<ArrowRight className="size-3.5" /></Button> : null}
+                    {!relatedDecision && relatedActionableReview && relatedReview ? <Button aria-label={`${related.candidateName ?? "후보자"} 검토 열기`} disabled={loading} onClick={() => onCreateReviewDecision(relatedReview)} size="sm" title="검토 내용을 열어 처리 방법을 선택합니다." variant="outline">검토하기<ArrowRight className="size-3.5" /></Button> : null}
+                    {!relatedDecision && !relatedActionableReview && related.caseSkillKey && related.caseId ? <Button aria-label={`${related.candidateName ?? "후보자"} 다음 단계 선택`} disabled={loading} onClick={() => onCreateCaseDecision(related.caseId!, related.caseSkillKey!)} size="sm" title="다음 단계와 실행 범위를 확인합니다.">결정하기<ArrowRight className="size-3.5" /></Button> : null}
+                    {!relatedDecision && !relatedActionableReview && !related.caseSkillKey && related.href ? <Button asChild aria-label={`${related.candidateName ?? "후보자"} 상세 확인`} size="sm" title="후보자 상세에서 현재 상태를 확인합니다." variant="outline"><Link href={related.href}>상세 보기<ArrowRight className="size-3.5" /></Link></Button> : null}
                   </div>
                 );
               })}
@@ -891,15 +903,16 @@ function ActionRow({ item, onCreateReviewDecision, onCreateCaseDecision, onOpenD
           </details>
         ) : null}
       </div>
-      <div className="flex shrink-0 items-center sm:justify-end">
-        {directDecision ? <Button variant="decision" onClick={() => onOpenDecision(directDecision)}>결정 계속하기</Button> : null}
+      <div className="flex shrink-0 flex-col items-stretch gap-2 sm:items-end">
+        <span className={`text-xs font-semibold ${directDecision ? "text-indigo-700" : actionableReview ? "text-slate-600" : item.caseSkillKey ? "text-blue-700" : "text-slate-500"}`}>{actionKind}</span>
+        {directDecision ? <Button aria-label={`${item.candidateName ?? "후보자"} ${actionHint}`} title={actionHint} variant="decision" onClick={() => onOpenDecision(directDecision)}>결정 계속하기<ArrowRight className="size-4" /></Button> : null}
         {!directDecision && actionableReview && review ? (
-          <Button disabled={loading} onClick={() => onCreateReviewDecision(review)} variant="outline">{loading ? <Loader2 className="size-4 animate-spin" /> : null}{item.actionLabel}</Button>
+          <Button aria-label={`${item.candidateName ?? "후보자"} ${actionHint}`} disabled={loading} onClick={() => onCreateReviewDecision(review)} title={actionHint} variant="outline">{loading ? <Loader2 className="size-4 animate-spin" /> : null}{item.actionLabel ?? "검토 열기"}<ArrowRight className="size-4" /></Button>
         ) : null}
         {!directDecision && !actionableReview && item.caseSkillKey && item.caseId ? (
-          <Button disabled={loading} onClick={() => onCreateCaseDecision(item.caseId!, item.caseSkillKey!)}>{loading ? <Loader2 className="size-4 animate-spin" /> : null}{item.actionLabel}</Button>
+          <Button aria-label={`${item.candidateName ?? "후보자"} ${actionHint}`} disabled={loading} onClick={() => onCreateCaseDecision(item.caseId!, item.caseSkillKey!)} title={actionHint}>{loading ? <Loader2 className="size-4 animate-spin" /> : null}{item.actionLabel ?? "결정하기"}<ArrowRight className="size-4" /></Button>
         ) : null}
-        {!directDecision && !actionableReview && !item.caseSkillKey && item.href && item.actionLabel ? <Button asChild variant="outline"><Link href={item.href}>{item.actionLabel}<ArrowRight className="size-4" /></Link></Button> : null}
+        {!directDecision && !actionableReview && !item.caseSkillKey && item.href && item.actionLabel ? <Button asChild aria-label={`${item.candidateName ?? "후보자"} ${actionHint}`} title={actionHint} variant="outline"><Link href={item.href}>{item.actionLabel}<ArrowRight className="size-4" /></Link></Button> : null}
       </div>
     </article>
   );
@@ -938,6 +951,13 @@ const queueTabs: Array<{ id: "ACTION" | "WAITING" | "EXCEPTION" | "ALL"; label: 
   { id: "ALL", label: "전체" },
 ];
 
+function paginationPages(page: number, pageCount: number) {
+  const maxVisible = 5;
+  if (pageCount <= maxVisible) return Array.from({ length: pageCount }, (_, index) => index + 1);
+  const start = Math.min(Math.max(1, page - 2), pageCount - maxVisible + 1);
+  return Array.from({ length: maxVisible }, (_, index) => start + index);
+}
+
 export function DashboardClient({ initialData }: { initialData: DashboardSnapshot }) {
   const [data, setData] = useState(initialData);
   const [activeDecision, setActiveDecision] = useState<ActiveDecision | null>(null);
@@ -958,6 +978,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
       const response = await fetch("/api/dashboard", { cache: "no-store" });
       if (!response.ok) throw new Error("운영 현황을 새로 불러오지 못했습니다.");
       setData(await response.json() as DashboardSnapshot);
+      setError(null);
     } finally {
       setRefreshing(false);
     }
@@ -965,7 +986,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
 
   useEffect(() => {
     setHydrated(true);
-    const interval = window.setInterval(() => void refresh().catch(() => undefined), 30_000);
+    const interval = window.setInterval(() => void refresh().catch((caught) => setError(caught instanceof Error ? caught.message : "운영 현황을 새로 불러오지 못했습니다.")), 30_000);
     return () => window.clearInterval(interval);
   }, [refresh]);
 
@@ -1147,6 +1168,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
     });
   }, [actionItems, query, queueTab]);
   const pageCount = Math.max(1, Math.ceil(filteredActionItems.length / pageSize));
+  const pageNumbers = useMemo(() => paginationPages(page, pageCount), [page, pageCount]);
   const visibleActionItems = useMemo(() => filteredActionItems.slice((page - 1) * pageSize, page * pageSize), [filteredActionItems, page, pageSize]);
   useEffect(() => {
     setPage(1);
@@ -1215,7 +1237,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
         </section>
 
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
-          <Card className="overflow-hidden">
+          <Card aria-busy={refreshing} className="overflow-hidden">
             <CardHeader className="flex-row items-start justify-between gap-4 border-b border-slate-200 p-6 sm:p-7">
               <div><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">PRIORITY QUEUE</p><CardTitle className="mt-2 flex items-center gap-2 text-2xl">인터뷰 운영 큐 <Badge>{filteredActionItems.length}</Badge></CardTitle><CardDescription className="mt-2">한 화면에서는 지금 확인할 후보자만 보여주고, 나머지는 페이지로 나눠 관리합니다.</CardDescription></div>
               <div className="flex shrink-0 items-center gap-2"><label className="sr-only" htmlFor="action-page-size">페이지 표시 수</label><select aria-label="페이지 표시 수" className="h-10 rounded-lg border border-slate-200 bg-white px-2 text-sm font-medium text-slate-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" id="action-page-size" onChange={(event) => setPageSize(Number(event.target.value))} value={pageSize}><option value="10">10건</option><option value="25">25건</option><option value="50">50건</option></select></div>
@@ -1229,10 +1251,14 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
               </div>
             </div>
             {filteredActionItems.length === 0 ? (
-              <CardContent className="grid min-h-64 place-items-center p-8 text-center"><div><CheckCircle2 className="mx-auto size-8 text-emerald-600" /><p className="mt-4 text-lg font-semibold">이 조건에 맞는 업무가 없습니다.</p><p className="mt-2 text-base text-slate-600">다른 큐를 선택하거나 검색어를 지워 보세요.</p></div></CardContent>
+              <CardContent aria-live="polite" className="grid min-h-64 place-items-center p-8 text-center"><div>
+                {query.trim() ? <SearchX className="mx-auto size-9 text-slate-400" /> : <CheckCircle2 className="mx-auto size-9 text-emerald-600" />}
+                <p className="mt-4 text-lg font-semibold">{query.trim() ? "검색 결과가 없습니다." : queueTab === "ACTION" ? "지금 처리할 업무가 없습니다." : "이 큐에 해당하는 업무가 없습니다."}</p>
+                <p className="mt-2 text-base text-slate-600">{query.trim() ? "후보자 이름이나 채용명을 다르게 검색해 보세요." : queueTab === "ACTION" ? "새로운 평가 완료나 회신이 들어오면 이곳에 표시됩니다." : "다른 큐를 선택하거나 새로고침해 보세요."}</p>
+              </div></CardContent>
             ) : <>
               <div className="divide-y divide-slate-200">{visibleActionItems.map((item) => <ActionRow key={item.id} item={item} loading={loadingId === item.id} onCreateCaseDecision={createCaseDecision} onCreateReviewDecision={createReviewDecision} onOpenDecision={(decision) => setActiveDecision({ decision, dismissOnClose: false })} />)}</div>
-              <div className="flex flex-col gap-3 border-t border-slate-200 px-6 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-7"><p className="text-sm text-slate-500">전체 {filteredActionItems.length}건 중 {Math.min((page - 1) * pageSize + 1, filteredActionItems.length)}–{Math.min(page * pageSize, filteredActionItems.length)}건</p><div className="flex items-center gap-2"><Button disabled={page <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))} size="sm" variant="outline">이전</Button><span className="min-w-16 text-center text-sm font-semibold text-slate-700">{page} / {pageCount}</span><Button disabled={page >= pageCount} onClick={() => setPage((current) => Math.min(pageCount, current + 1))} size="sm" variant="outline">다음</Button></div></div>
+              <div className="flex flex-col gap-3 border-t border-slate-200 px-6 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-7"><p className="text-sm text-slate-500">전체 {filteredActionItems.length}건 중 {Math.min((page - 1) * pageSize + 1, filteredActionItems.length)}–{Math.min(page * pageSize, filteredActionItems.length)}건</p><nav aria-label="인터뷰 운영 큐 페이지" className="flex items-center justify-end gap-1"><Button aria-label="이전 페이지" disabled={page <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))} size="sm" variant="outline">이전</Button>{pageNumbers.map((pageNumber) => <Button aria-current={pageNumber === page ? "page" : undefined} aria-label={`${pageNumber}페이지`} className={pageNumber === page ? "ring-2 ring-blue-200" : undefined} key={pageNumber} onClick={() => setPage(pageNumber)} size="sm" variant={pageNumber === page ? "secondary" : "outline"}>{pageNumber}</Button>)}<Button aria-label="다음 페이지" disabled={page >= pageCount} onClick={() => setPage((current) => Math.min(pageCount, current + 1))} size="sm" variant="outline">다음</Button></nav></div>
             </>}
           </Card>
 

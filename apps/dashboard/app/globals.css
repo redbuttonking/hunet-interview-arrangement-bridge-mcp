@@ -5,41 +5,95 @@
   --font-sans: "Pretendard", "Noto Sans KR", "Segoe UI", sans-serif;
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-surface: var(--surface);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-ring: var(--ring);
 }
 
 :root {
-  --background: #f6f7fb;
-  --foreground: #0f172a;
+  --background: #f6f8fb;
+  --foreground: #172033;
+  --surface: #ffffff;
+  --muted-foreground: #607086;
+  --border: #dfe5ed;
+  --ring: #2563eb;
 }
 
 @layer base {
   * {
     @apply border-slate-200;
+    scrollbar-width: thin;
+    scrollbar-color: #cbd5e1 transparent;
   }
 
   html {
     background: var(--background);
+    color-scheme: light;
+    scroll-behavior: smooth;
   }
 
   body {
-    @apply min-h-screen bg-slate-50 font-sans text-slate-900 antialiased;
+    @apply min-h-screen bg-slate-50 font-sans text-[0.9375rem] leading-6 text-slate-900 antialiased;
+    letter-spacing: -0.01em;
+    text-rendering: optimizeLegibility;
   }
 
-  button:not(:disabled) {
+  h1,
+  h2,
+  h3,
+  h4 {
+    @apply text-slate-950;
+  }
+
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]) {
     cursor: pointer;
   }
 
-  :where(a, button, input, select, summary):focus-visible {
-    outline: 2px solid #2563eb;
-    outline-offset: 2px;
+  :where(a, button, input, select, textarea, summary):focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 3px;
+    box-shadow: 0 0 0 4px rgb(37 99 235 / 0.14);
+  }
+
+  :where(input:not([type="checkbox"]):not([type="radio"]), select, textarea) {
+    @apply rounded-lg border border-slate-300 bg-white text-slate-900 shadow-sm transition-colors placeholder:text-slate-400;
+  }
+
+  :where(input, select):not([type="checkbox"]):not([type="radio"]) {
+    @apply min-h-11 px-3.5;
+  }
+
+  :where(textarea) {
+    @apply px-3.5 py-3;
+  }
+
+  :where(input[type="checkbox"], input[type="radio"]) {
+    accent-color: #2563eb;
+  }
+
+  ::selection {
+    background: rgb(37 99 235 / 0.16);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }
 
 [data-case-detail-panels] > :nth-child(3) > :last-child,
 [data-case-detail-panels] > :nth-child(4) > :last-child {
-  max-height: 31rem;
+  max-height: min(31rem, 62vh);
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding-right: 1rem;
+  padding-right: 0.75rem;
   scrollbar-gutter: stable;
 }
