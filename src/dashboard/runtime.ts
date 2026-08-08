@@ -328,6 +328,26 @@ export async function getDashboardOperationalReadiness(input?: {
   }
 }
 
+export function retryDashboardIntegrationJob(jobId: string) {
+  const runtime = createRuntime();
+  try {
+    const result = runtime.workflow.requeueIntegrationRetryJob(jobId);
+    return {
+      queued: result.queued,
+      retryJob: {
+        id: result.job.id,
+        jobType: result.job.jobType,
+        status: result.job.status,
+        attemptCount: result.job.attemptCount,
+        maxAttempts: result.job.maxAttempts,
+        nextAttemptAt: result.job.nextAttemptAt,
+      },
+    };
+  } finally {
+    runtime.db.close();
+  }
+}
+
 export async function openDashboardDaouOfficeLogin() {
   const runtime = createRuntime();
   try {

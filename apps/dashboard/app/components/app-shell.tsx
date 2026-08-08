@@ -15,6 +15,7 @@ export function AppHeader({ active, workerStatus }: AppHeaderProps) {
 
   return (
     <header className="sticky top-0 z-40 border-b border-slate-200/90 bg-white/85 shadow-[0_1px_12px_rgb(15_23_42_/_0.04)] backdrop-blur-xl" role="banner">
+      <Link className="sr-only z-50 rounded-md bg-blue-600 px-3 py-2 text-sm font-semibold text-white focus:not-sr-only focus:fixed focus:left-4 focus:top-4" href="#main-content">본문으로 건너뛰기</Link>
       <div className="mx-auto flex h-16 max-w-[1440px] min-w-0 items-center gap-4 px-4 sm:gap-8 sm:px-8">
         <Link aria-label="HUNET OPS 운영 홈" className="flex min-w-0 shrink-0 items-center gap-2.5 rounded-lg font-semibold tracking-tight text-slate-950 focus-visible:outline-none" href="/">
           <span className="grid size-9 place-items-center rounded-xl bg-slate-900 text-sm font-bold text-white shadow-sm shadow-slate-900/15">H</span>

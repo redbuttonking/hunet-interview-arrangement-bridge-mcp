@@ -20,6 +20,7 @@
     "start:worker": "node dist/src/worker/main.js",
     "build:dashboard": "npm run build && next build apps/dashboard",
     "start:dashboard": "next start apps/dashboard --hostname 127.0.0.1 --port 3100",
+    "check:repo": "node scripts/check-repository-hygiene.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"

@@ -210,6 +210,35 @@ describe("bridge MCP server", () => {
     expect(tools.tools.map((tool) => tool.name)).toContain(
       "list_integration_retry_jobs",
     );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
+      "retry_integration_job",
+    );
+
+    const retryJob = db.enqueueIntegrationRetry({
+      jobType: "SLACK_NOTIFICATION_RECONCILIATION",
+      dedupeKey: "mcp-retry",
+      payload: { candidateName: "민감 후보" },
+      maxAttempts: 1,
+    });
+    const failedRetry = db.failIntegrationRetryJob(retryJob.id, "Slack unavailable");
+    expect(failedRetry.status).toBe("FAILED");
+    const retryList = await client.callTool({
+      name: "list_integration_retry_jobs",
+      arguments: { status: "FAILED" },
+    });
+    expect(retryList.structuredContent).toMatchObject({
+      retries: [{ id: retryJob.id, status: "FAILED" }],
+    });
+    expect(JSON.stringify(retryList.structuredContent)).not.toContain("payload");
+    const retryResult = await client.callTool({
+      name: "retry_integration_job",
+      arguments: { retryJobId: retryJob.id },
+    });
+    expect(retryResult.isError).not.toBe(true);
+    expect(retryResult.structuredContent).toMatchObject({
+      queued: true,
+      retryJob: { id: retryJob.id, status: "PENDING", attemptCount: 0 },
+    });
 
     const status = await client.callTool({ name: "bridge_status" });
     expect(status.isError).not.toBe(true);

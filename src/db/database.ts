@@ -156,6 +156,11 @@ export interface IntegrationRetryJobRow {
   completedAt: string | null;
 }
 
+export interface IntegrationRetryRequeueResult {
+  job: IntegrationRetryJobRow;
+  queued: boolean;
+}
+
 export interface StoredSlackNotificationRow {
   id: string;
   eventType: string;
@@ -321,6 +326,42 @@ function timeMinutes(value: string): number {
   const minute = Number(match[2]);
   if (hour > 23 || minute > 59) throw new Error(`Invalid time: ${value}`);
   return hour * 60 + minute;
+}
+
+function validateTimeRange(startTime: string, endTime: string, label: string): void {
+  const start = timeMinutes(startTime);
+  const end = timeMinutes(endTime);
+  if (start >= end) {
+    throw new Error(`${label} must have an end time after its start time.`);
+  }
+}
+
+function validateDateAndTimeRange(
+  date: string,
+  startTime: string,
+  endTime: string,
+  label: string,
+): void {
+  if (!isDate(date)) throw new Error(`${label} must use YYYY-MM-DD.`);
+  validateTimeRange(startTime, endTime, label);
+}
+
+function validateAvailabilitySlots(slots: TimeSlot[]): void {
+  if (slots.length === 0) {
+    throw new Error("At least one interviewer availability slot is required.");
+  }
+  const seen = new Set<string>();
+  for (const slot of slots) {
+    validateDateAndTimeRange(
+      slot.date,
+      slot.start,
+      slot.end,
+      "Interviewer availability",
+    );
+    const key = `${slot.date}:${slot.start}:${slot.end}`;
+    if (seen.has(key)) throw new Error("Duplicate interviewer availability slots are not allowed.");
+    seen.add(key);
+  }
 }
 
 function toCase(row: SqlRow): InterviewCaseRow {
@@ -1505,6 +1546,46 @@ export class BridgeDatabase {
     return this.getIntegrationRetryJob(id)!;
   }
 
+  requeueIntegrationRetryJob(
+    id: string,
+    now = new Date(),
+  ): IntegrationRetryRequeueResult {
+    return this.transaction(() => {
+      const job = this.getIntegrationRetryJob(id);
+      if (!job) throw new Error(`Integration retry job not found: ${id}`);
+      if (job.status === "COMPLETED") {
+        throw new Error(`Completed integration retry job cannot be requeued: ${id}`);
+      }
+      if (job.status === "PENDING") return { job, queued: false };
+
+      const existingPending = this.connection
+        .prepare(`
+          SELECT * FROM integration_retry_jobs
+          WHERE job_type = ? AND dedupe_key = ? AND status = 'PENDING'
+          LIMIT 1
+        `)
+        .get(job.jobType, job.dedupeKey) as SqlRow | undefined;
+      if (existingPending) {
+        return { job: toIntegrationRetryJob(existingPending), queued: false };
+      }
+
+      const updatedAt = now.toISOString();
+      this.connection
+        .prepare(`
+          UPDATE integration_retry_jobs
+          SET attempt_count = 0, next_attempt_at = ?, last_error = NULL,
+              status = 'PENDING', updated_at = ?, completed_at = NULL
+          WHERE id = ? AND status = 'FAILED'
+        `)
+        .run(updatedAt, updatedAt, id);
+      const requeued = this.getIntegrationRetryJob(id);
+      if (!requeued || requeued.status !== "PENDING") {
+        throw new Error(`Integration retry job could not be requeued: ${id}`);
+      }
+      return { job: requeued, queued: true };
+    });
+  }
+
   insertNotification(
     input: SlackNotificationInput,
     processingStatus: string,
@@ -1875,6 +1956,15 @@ export class BridgeDatabase {
     durationMinutes?: number;
     proposalDates: string[];
   }): InterviewCaseRow {
+    if (input.proposalDates.length === 0 || input.proposalDates.some((date) => !isDate(date))) {
+      throw new Error("At least one YYYY-MM-DD proposal date is required.");
+    }
+    if (
+      input.durationMinutes !== undefined &&
+      (!Number.isInteger(input.durationMinutes) || input.durationMinutes <= 0)
+    ) {
+      throw new Error("durationMinutes must be a positive integer.");
+    }
     const id = randomUUID();
     const now = new Date().toISOString();
     const insert = this.connection
@@ -1893,7 +1983,7 @@ export class BridgeDatabase {
         input.recruitmentRef ?? null,
         input.recruitmentName ?? null,
         input.durationMinutes ?? 60,
-        JSON.stringify(input.proposalDates),
+        JSON.stringify([...new Set(input.proposalDates)].sort()),
         now,
         now,
       );
@@ -2618,6 +2708,24 @@ export class BridgeDatabase {
     return rows.map(toCase);
   }
 
+  findCaseByScheduleConfirmationNotification(
+    notificationId: string,
+  ): InterviewCaseRow | undefined {
+    const row = this.connection
+      .prepare(`
+        SELECT interview_cases.*
+        FROM interview_cases
+        JOIN case_events
+          ON case_events.case_id = interview_cases.id
+        WHERE case_events.event_type = 'CANDIDATE_SCHEDULE_CONFIRMED'
+          AND case_events.detail_json LIKE ?
+        ORDER BY case_events.created_at DESC
+        LIMIT 1
+      `)
+      .get(`%\"notificationId\":\"${notificationId}\"%`) as SqlRow | undefined;
+    return row ? toCase(row) : undefined;
+  }
+
   hasCandidateScheduleProposalSent(caseId: string): boolean {
     const row = this.connection
       .prepare(`
@@ -2683,6 +2791,14 @@ export class BridgeDatabase {
   }): InterviewCaseRow {
     const interviewCase = this.getCase(input.caseId);
     if (!interviewCase) throw new Error(`Case not found: ${input.caseId}`);
+    if (
+      interviewCase.status === "CONFIRMED" &&
+      interviewCase.scheduledDate === input.date &&
+      interviewCase.scheduledStartTime === input.startTime &&
+      interviewCase.scheduledEndTime === input.endTime
+    ) {
+      return interviewCase;
+    }
     if (interviewCase.status !== "READY_TO_SCHEDULE") {
       throw new Error("Only a ready interview can be recorded from an external confirmation.");
     }
@@ -2810,16 +2926,15 @@ export class BridgeDatabase {
       throw new Error("Only a new interview case can be manually confirmed.");
     }
 
-    this.assertNoScheduledRoomConflict({
-      caseId: input.caseId,
-      date: input.date,
-      startTime: input.startTime,
-      endTime: input.endTime,
-      roomName: input.roomName,
-    });
-
     const now = new Date().toISOString();
     this.transaction(() => {
+      this.assertNoScheduledRoomConflict({
+        caseId: input.caseId,
+        date: input.date,
+        startTime: input.startTime,
+        endTime: input.endTime,
+        roomName: input.roomName,
+      });
       this.connection
         .prepare(`
           UPDATE interview_cases
@@ -2947,6 +3062,17 @@ export class BridgeDatabase {
     }
     if (blocks.some((block) => !syncedDates.includes(block.date))) {
       throw new Error("A synced meeting room block is outside the requested dates.");
+    }
+    for (const block of blocks) {
+      validateDateAndTimeRange(
+        block.date,
+        block.startTime,
+        block.endTime,
+        "Meeting room block",
+      );
+      if (!block.sourceKey.trim() || !block.roomId.trim() || !block.roomName.trim()) {
+        throw new Error("Meeting room block identifiers and room name are required.");
+      }
     }
     const now = new Date().toISOString();
     this.transaction(() => {
@@ -3130,6 +3256,7 @@ export class BridgeDatabase {
       .get(input.roomBlockId) as SqlRow | undefined;
     if (!blockRow) throw new Error("Active meeting room block not found.");
     const block = toMeetingRoomBlock(blockRow);
+    validateTimeRange(input.startTime, input.endTime, "Room allocation");
     const duration = timeMinutes(input.endTime) - timeMinutes(input.startTime);
     if (
       duration !== interviewCase.durationMinutes ||
@@ -3157,6 +3284,14 @@ export class BridgeDatabase {
         }
         throw new Error("This case already has an active room allocation.");
       }
+
+      this.assertNoScheduledRoomConflict({
+        caseId: input.caseId,
+        date: block.date,
+        startTime: input.startTime,
+        endTime: input.endTime,
+        roomName: block.roomName,
+      });
 
       const conflict = this.connection
         .prepare(`
@@ -3230,6 +3365,7 @@ export class BridgeDatabase {
       let previousEnd: string | undefined;
       let expectedDate: string | undefined;
       for (const [sequenceIndex, session] of input.sessions.entries()) {
+        validateTimeRange(session.startTime, session.endTime, "Sequential room allocation");
         if (timeMinutes(session.endTime) - timeMinutes(session.startTime) !== 60) {
           throw new Error("Each sequential interview stage must be exactly 60 minutes.");
         }
@@ -3248,6 +3384,13 @@ export class BridgeDatabase {
         ) {
           throw new Error("Each room slot must fit its meeting room block on the same date.");
         }
+        this.assertNoScheduledRoomConflict({
+          caseId: input.caseId,
+          date: block.date,
+          startTime: session.startTime,
+          endTime: session.endTime,
+          roomName: block.roomName,
+        });
         const conflict = this.connection
           .prepare("SELECT id FROM room_allocations WHERE room_block_id = ? AND status = 'ACTIVE' AND start_time < ? AND end_time > ? LIMIT 1")
           .get(session.roomBlockId, session.endTime, session.startTime) as SqlRow | undefined;
@@ -4074,6 +4217,7 @@ export class BridgeDatabase {
       slackUserId,
     );
     if (!interviewer) throw new Error("This Slack user is not an interviewer.");
+    validateAvailabilitySlots(slots);
     this.transaction(() => {
       this.connection
         .prepare(
@@ -4126,17 +4270,7 @@ export class BridgeDatabase {
     ) {
       throw new Error("Active interviewer not found in this case.");
     }
-    for (const slot of slots) {
-      if (
-        !/^\d{2}:\d{2}$/.test(slot.start) ||
-        !/^\d{2}:\d{2}$/.test(slot.end) ||
-        slot.start >= slot.end
-      ) {
-        throw new Error(
-          `Invalid availability range: ${slot.date} ${slot.start}-${slot.end}`,
-        );
-      }
-    }
+    validateAvailabilitySlots(slots);
     this.transaction(() => {
       this.connection
         .prepare(

@@ -66,6 +66,158 @@ function createAwaitingCandidateConfirmationCase(
 }
 
 describe("evaluation approval workflow", () => {
+  it("creates an operator review when a non-evaluation integration retry is exhausted", () => {
+    db = new BridgeDatabase(":memory:");
+    const workflow = new WorkflowService(db, config, {
+      async lookupCompletedEvaluation() {
+        return { reason: "Not used in this test." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    });
+
+    const retry = db.enqueueIntegrationRetry({
+      jobType: "SLACK_NOTIFICATION_RECONCILIATION",
+      dedupeKey: "C1",
+      payload: {},
+      maxAttempts: 1,
+    });
+    const failed = db.failIntegrationRetryJob(retry.id, "Slack unavailable");
+    workflow.handleIntegrationRetryExhausted(failed);
+    workflow.handleIntegrationRetryExhausted(failed);
+
+    expect(db.listOpenReviews()).toMatchObject([
+      {
+        reviewType: "INTEGRATION_RETRY_EXHAUSTED",
+        reason: "Slack unavailable",
+        summary: {
+          jobId: retry.id,
+          jobType: "SLACK_NOTIFICATION_RECONCILIATION",
+        },
+      },
+    ]);
+  });
+
+  it("requeues an exhausted integration job only after an explicit operator request", () => {
+    db = new BridgeDatabase(":memory:");
+    const workflow = new WorkflowService(db, config, {
+      async lookupCompletedEvaluation() {
+        return { reason: "Not used in this test." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    });
+
+    const retry = db.enqueueIntegrationRetry({
+      jobType: "SLACK_NOTIFICATION_RECONCILIATION",
+      dedupeKey: "C2",
+      payload: {},
+      maxAttempts: 1,
+    });
+    const failed = db.failIntegrationRetryJob(retry.id, "Slack unavailable");
+    workflow.handleIntegrationRetryExhausted(failed);
+
+    const first = workflow.requeueIntegrationRetryJob(retry.id);
+    const second = workflow.requeueIntegrationRetryJob(retry.id);
+
+    expect(first.queued).toBe(true);
+    expect(first.job.status).toBe("PENDING");
+    expect(second.queued).toBe(false);
+    expect(db.listOpenReviews().some((review) => review.reviewType === "INTEGRATION_RETRY_EXHAUSTED")).toBe(false);
+  });
+
+  it("reprocesses a pending schedule notification after a partial failure", async () => {
+    db = new BridgeDatabase(":memory:");
+    const workflow = new WorkflowService(db, config, {
+      async lookupCompletedEvaluation() {
+        return { reason: "Not used in this test." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    });
+    const notification = db.insertNotification(
+      {
+        channelId: "C1",
+        messageTs: "30.0",
+        eventType: "SCHEDULE_CONFIRMED",
+        title: "Schedule confirmed",
+        payloadHash: "pending-schedule",
+        payloadJson: "{}",
+        candidateName: "Pending candidate",
+        recruitmentName: "Pending recruitment",
+      },
+      "SCHEDULE_CONFIRMATION_PENDING",
+    );
+    const interviewCase = db.createInterviewCase({
+      candidateName: "Pending candidate",
+      recruitmentName: "Pending recruitment",
+      proposalDates: ["2026-08-03"],
+    });
+    db.setCaseStatus(interviewCase.id, "READY_TO_SCHEDULE");
+    db.recordExternallyConfirmedSchedule({
+      caseId: interviewCase.id,
+      notificationId: notification.id,
+      source: "NINEHIRE_SLACK",
+      date: "2026-08-03",
+      startTime: "14:00",
+      endTime: "15:00",
+    });
+    db.syncMeetingRoomBlocks(["2026-08-03"], [
+      {
+        sourceKey: "DAOU:pending-schedule",
+        roomId: "R1",
+        roomName: "Room A",
+        reservedBy: "Recruiter",
+        purpose: "Interview",
+        date: "2026-08-03",
+        startTime: "13:00",
+        endTime: "16:00",
+        sourcePayloadHash: "pending-schedule-room",
+      },
+    ]);
+
+    const result = await workflow.ingestSlackNotification({
+      channelId: "C1",
+      messageTs: "30.0",
+      parsed: {
+        eventType: "SCHEDULE_CONFIRMED",
+        title: "Schedule confirmed",
+        text: "Schedule confirmed",
+        links: [],
+        payloadHash: "pending-schedule",
+        payloadJson: "{}",
+        candidateName: "Pending candidate",
+        recruitmentName: "Pending recruitment",
+        scheduledDate: "2026-08-03",
+        scheduledStartTime: "14:00",
+        scheduledEndTime: "15:00",
+      },
+    });
+
+    expect(result).toMatchObject({
+      result: "INTERVIEW_CONFIRMED_ROOM_AUTO_ASSIGNED",
+      caseId: interviewCase.id,
+    });
+    expect(db.getNotification(notification.id)?.processing_status).toBe("PROCESSED");
+    expect(
+      db.listCaseEvents(interviewCase.id).filter(
+        (event) => event.eventType === "CANDIDATE_SCHEDULE_CONFIRMED",
+      ),
+    ).toHaveLength(1);
+  });
+
   it("suggests CEO conversation and combined interview stages from the pipeline", async () => {
     db = new BridgeDatabase(":memory:");
     const ninehire: NinehireWorkflowAdapter = {

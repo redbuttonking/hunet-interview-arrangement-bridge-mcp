@@ -2,7 +2,7 @@
 // 다우오피스 회의실 예약과 인터뷰 배정을 같은 시간축에서 확인한다.
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { CalendarDays, ChevronLeft, ChevronRight, Clock3, RefreshCw, UsersRound } from "lucide-react";
 import { AppHeader, PageHeader } from "./app-shell";
 import { Badge } from "./ui/badge";
@@ -175,6 +175,9 @@ export function RoomsClient({ data }: { data: DashboardSnapshot }) {
     return dates.includes(today) ? today : dates.find((date) => date >= today) ?? dates[0] ?? today;
   }, [data.dashboard.generatedAt, dates]);
   const [selectedDate, setSelectedDate] = useState(preferredDate);
+  useEffect(() => {
+    setSelectedDate((current) => dates.includes(current) ? current : preferredDate);
+  }, [dates, preferredDate]);
 
   const discoveredRoomNames = useMemo(() => [...new Set([
     ...data.meetingRoomBlocks.map((block) => block.roomName),
@@ -229,7 +232,7 @@ export function RoomsClient({ data }: { data: DashboardSnapshot }) {
   return (
     <div className="min-h-screen bg-slate-50">
       <AppHeader active="rooms" />
-      <main className="mx-auto max-w-[1440px] px-4 pb-12 sm:px-8">
+      <main className="mx-auto max-w-[1440px] px-4 pb-12 sm:px-8" id="main-content">
         <PageHeader eyebrow="ROOM CALENDAR" title="회의실 캘린더" description="다우오피스에 확보된 회의실 시간과 실제 인터뷰 배정을 같은 시간축에서 확인합니다." />
 
         <Card className="overflow-hidden">

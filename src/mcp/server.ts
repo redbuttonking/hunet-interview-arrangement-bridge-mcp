@@ -7,6 +7,7 @@ import { DaouOfficeBrowserController } from "../daou-office/browser.js";
 import {
   BridgeDatabase,
   type InterviewCaseRow,
+  type IntegrationRetryJobRow,
 } from "../db/database.js";
 import type { DaouOfficeReservationAdapter } from "../domain/daou-office.js";
 import { suggestCommonSlots } from "../domain/availability.js";
@@ -33,6 +34,21 @@ function result(value: unknown) {
       typeof value === "object" && value !== null
         ? (value as Record<string, unknown>)
         : { value },
+  };
+}
+
+function integrationRetrySummary(job: IntegrationRetryJobRow) {
+  return {
+    id: job.id,
+    jobType: job.jobType,
+    status: job.status,
+    attemptCount: job.attemptCount,
+    maxAttempts: job.maxAttempts,
+    nextAttemptAt: job.nextAttemptAt,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+    completedAt: job.completedAt,
+    lastError: job.lastError ? "외부 연동 작업이 실패했습니다. 운영 상태와 권한을 확인하세요." : null,
   };
 }
 
@@ -743,7 +759,44 @@ export function createBridgeMcpServer(
         openWorldHint: false,
       },
     },
-    async ({ status, limit }) => result({ retries: db.listIntegrationRetryJobs({ status, limit }) }),
+    async ({ status, limit }) => result({
+      retries: db.listIntegrationRetryJobs({ status, limit }).map(integrationRetrySummary),
+    }),
+  );
+
+  server.registerTool(
+    "retry_integration_job",
+    {
+      title: "외부 연동 작업 재시도 승인",
+      description:
+        "재시도 한도를 초과한 내부 연동 작업을 사용자가 확인한 뒤 다시 대기열에 넣습니다. 외부 시스템을 즉시 호출하거나 메시지를 발송하지 않으며, 다음 워커 주기에 처리됩니다.",
+      inputSchema: {
+        retryJobId: z.string().uuid(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    async ({ retryJobId }) => {
+      const requeued = workflow.requeueIntegrationRetryJob(retryJobId);
+      return result({
+        queued: requeued.queued,
+        retryJob: {
+          id: requeued.job.id,
+          jobType: requeued.job.jobType,
+          status: requeued.job.status,
+          attemptCount: requeued.job.attemptCount,
+          maxAttempts: requeued.job.maxAttempts,
+          nextAttemptAt: requeued.job.nextAttemptAt,
+        },
+        message: requeued.queued
+          ? "재시도 작업을 대기열에 넣었습니다. 다음 워커 주기에 처리됩니다."
+          : "이미 대기 중인 재시도 작업이 있어 중복 등록하지 않았습니다.",
+      });
+    },
   );
 
   server.registerTool(

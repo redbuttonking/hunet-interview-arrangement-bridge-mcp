@@ -8,6 +8,7 @@ import {
   type DraftRow,
   type InterviewCaseRow,
   type IntegrationRetryJobRow,
+  type IntegrationRetryRequeueResult,
   type InterviewPlanMode,
   type RecruitmentInterviewRoute,
   type RecruitmentInterviewTemplateStep,
@@ -627,17 +628,54 @@ export class WorkflowService {
           : "IGNORED",
     );
     if (!stored.inserted) {
-      return { notificationId: stored.id, result: "DUPLICATE" };
+      const existing = this.db.getNotification(stored.id);
+      const processingStatus = String(existing?.processing_status ?? "");
+      const terminalStatuses = new Set([
+        "PROCESSED",
+        "IGNORED",
+        "NOT_ELIGIBLE",
+        "REVIEW_REQUIRED",
+        "AWAITING_START_APPROVAL",
+        "ERROR",
+      ]);
+      if (terminalStatuses.has(processingStatus)) {
+        return { notificationId: stored.id, result: "DUPLICATE" };
+      }
+      try {
+        if (input.parsed.eventType === "SCHEDULE_CONFIRMED") {
+          return this.processScheduleConfirmation(stored.id, input.parsed);
+        }
+        if (input.parsed.eventType === "CANDIDATE_INTERVIEW_ABSENCE") {
+          return this.processCandidateInterviewAbsence(stored.id, input.parsed);
+        }
+        if (input.parsed.eventType === "EVALUATION_COMPLETED") {
+          return await this.processEvaluationLookup(stored.id, input.parsed);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.db.updateNotificationStatus(stored.id, "RETRY_PENDING", message);
+        throw error;
+      }
+      return { notificationId: stored.id, result: "DUPLICATE_PENDING" };
     }
     if (input.parsed.eventType !== "EVALUATION_COMPLETED") {
       if (input.parsed.eventType === "SCHEDULE_CONFIRMED") {
-        return this.processScheduleConfirmation(stored.id, input.parsed);
+        try {
+          return this.processScheduleConfirmation(stored.id, input.parsed);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.db.updateNotificationStatus(stored.id, "RETRY_PENDING", message);
+          throw error;
+        }
       }
       if (input.parsed.eventType === "CANDIDATE_INTERVIEW_ABSENCE") {
-        return this.processCandidateInterviewAbsence(
-          stored.id,
-          input.parsed,
-        );
+        try {
+          return this.processCandidateInterviewAbsence(stored.id, input.parsed);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.db.updateNotificationStatus(stored.id, "RETRY_PENDING", message);
+          throw error;
+        }
       }
       return { notificationId: stored.id, result: "IGNORED" };
     }
@@ -675,7 +713,25 @@ export class WorkflowService {
   handleIntegrationRetryExhausted(
     job: IntegrationRetryJobRow,
   ): void {
-    if (job.jobType !== "NINEHIRE_EVALUATION_LOOKUP") return;
+    if (job.jobType !== "NINEHIRE_EVALUATION_LOOKUP") {
+      const existing = this.db.listOpenReviews(1_000).find(
+        (review) =>
+          review.reviewType === "INTEGRATION_RETRY_EXHAUSTED" &&
+          review.summary?.jobId === job.id,
+      );
+      if (existing) return;
+      this.db.createReview({
+        reviewType: "INTEGRATION_RETRY_EXHAUSTED",
+        reason: job.lastError ?? "Integration retry attempts were exhausted.",
+        summary: {
+          jobId: job.id,
+          jobType: job.jobType,
+          dedupeKey: job.dedupeKey,
+          attemptCount: job.attemptCount,
+        },
+      });
+      return;
+    }
     const payload = evaluationRetryPayload(job.payload);
     if (!payload) return;
     const reason =
@@ -686,6 +742,19 @@ export class WorkflowService {
       reviewType: "EVALUATION_LOOKUP_FAILED",
       reason,
     });
+  }
+
+  requeueIntegrationRetryJob(jobId: string): IntegrationRetryRequeueResult {
+    const result = this.db.requeueIntegrationRetryJob(jobId);
+    if (result.queued) {
+      const review = this.db.listOpenReviews(1_000).find(
+        (item) =>
+          item.reviewType === "INTEGRATION_RETRY_EXHAUSTED" &&
+          item.summary?.jobId === jobId,
+      );
+      if (review) this.db.resolveReview(review.id, "MANUAL_RETRY_REQUESTED");
+    }
+    return result;
   }
 
   private async processEvaluationLookup(
@@ -1332,6 +1401,21 @@ export class WorkflowService {
       return { notificationId, result: "REVIEW_REQUIRED" };
     }
 
+    const previouslyRecorded =
+      this.db.findCaseByScheduleConfirmationNotification(notificationId);
+    if (previouslyRecorded) {
+      const result =
+        previouslyRecorded.status === "CONFIRMED"
+          ? this.resolveConfirmedScheduleRoom(previouslyRecorded.id)
+          : "INTERVIEW_CONFIRMED";
+      this.db.updateNotificationStatus(notificationId, "PROCESSED");
+      return {
+        notificationId,
+        result,
+        caseId: previouslyRecorded.id,
+      };
+    }
+
     const awaitingMatches = this.db.findAwaitingCandidateConfirmationCases(
       parsed.candidateName,
       parsed.recruitmentName,
@@ -1578,6 +1662,20 @@ export class WorkflowService {
           "The candidate interview-absence message is missing candidate or recruitment information.",
       });
       return { notificationId, result: "REVIEW_REQUIRED" };
+    }
+
+    const previouslyReviewed = this.db.listOpenReviews(1_000).find(
+      (review) =>
+        review.notificationId === notificationId &&
+        review.reviewType === "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED",
+    );
+    if (previouslyReviewed) {
+      this.db.updateNotificationStatus(notificationId, "REVIEW_REQUIRED");
+      return {
+        notificationId,
+        result: "CANDIDATE_ATTENDANCE_REVIEW_REQUIRED",
+        ...(previouslyReviewed.caseId ? { caseId: previouslyReviewed.caseId } : {}),
+      };
     }
 
     const matches = this.db.findScheduledCandidateCases(

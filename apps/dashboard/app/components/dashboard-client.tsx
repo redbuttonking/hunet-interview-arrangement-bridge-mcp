@@ -72,6 +72,14 @@ const supportedReviewDecisionTypes = new Set([
   "WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED",
 ]);
 
+function integrationRetryReason(reason: string) {
+  const normalized = reason.toLocaleLowerCase();
+  if (normalized.includes("timeout") || normalized.includes("timed out")) return "외부 서비스 응답이 시간 안에 오지 않았습니다.";
+  if (normalized.includes("auth") || normalized.includes("token") || normalized.includes("unauthorized")) return "외부 서비스 인증을 확인해야 합니다.";
+  if (normalized.includes("rate") || normalized.includes("limit")) return "외부 서비스의 요청 한도에 도달했습니다.";
+  return "외부 연동 작업이 자동 재시도 한도를 초과했습니다.";
+}
+
 function formatDate(value: string | null | undefined) {
   if (!value) return "일정 미정";
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
@@ -138,6 +146,7 @@ function reviewCategory(review: Review) {
     RECRUITMENT_TEMPLATE_CHECK_REQUIRED: "인터뷰 규칙 확인",
     CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED: "후보자 응답 확인",
     WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED: "가용시간 복구 확인",
+    INTEGRATION_RETRY_EXHAUSTED: "연동 재시도 소진",
   };
   return labels[review.reviewType] ?? "운영 확인";
 }
@@ -268,35 +277,46 @@ function buildActionItems(data: DashboardSnapshot): ActionItem[] {
   }));
   const reviewItems: ActionItem[] = data.reviews
     .filter((review) => !reviewIdsWithDecision.has(review.id))
-    .map((review) => ({
-      id: `review:${review.id}`,
-      queue: review.reviewType === "WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED" || !supportedReviewDecisionTypes.has(review.reviewType) ? "EXCEPTION" : "ACTION",
-      priority: supportedReviewDecisionTypes.has(review.reviewType) ? "urgent" : "normal",
-      journeyIndex: review.caseId && casesById.get(review.caseId)
-        ? journeyIndexForStatus(casesById.get(review.caseId)!.status)
-        : journeyIndexForReview(review),
-      category: reviewCategory(review),
-      title: review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED"
-        ? "인터뷰 조율을 시작할지 확인해 주세요."
-        : review.reviewType === "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED"
-          ? "후보자 응답에 대한 처리 방법을 선택해 주세요."
-          : review.reason,
-      description: review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED"
-        ? `${review.currentStepName ?? "평가 완료"} · ${review.reason}`
-        : review.currentStepName ?? "상세 내용을 확인해 주세요.",
-      candidateName: review.candidateName,
-      recruitmentName: review.recruitmentName,
-      meta: review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED" ? "승인 전에는 나인하이어·Slack에 변경이 없습니다." : null,
-      actionLabel: review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED"
-        ? "조율 시작 검토"
-        : review.reviewType === "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED"
-          ? "응답 조치 선택"
-          : supportedReviewDecisionTypes.has(review.reviewType)
-            ? "규칙 확인"
-            : review.caseId ? "상세 보기" : null,
-      href: review.caseId ? `/cases/${review.caseId}` : null,
-      review,
-    }));
+    .map((review) => {
+      const integrationRetryExhausted = review.reviewType === "INTEGRATION_RETRY_EXHAUSTED";
+      return {
+        id: `review:${review.id}`,
+        queue: review.reviewType === "WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED" || integrationRetryExhausted || !supportedReviewDecisionTypes.has(review.reviewType) ? "EXCEPTION" : "ACTION",
+        priority: supportedReviewDecisionTypes.has(review.reviewType) || integrationRetryExhausted ? "urgent" : "normal",
+        journeyIndex: review.caseId && casesById.get(review.caseId)
+          ? journeyIndexForStatus(casesById.get(review.caseId)!.status)
+          : journeyIndexForReview(review),
+        category: reviewCategory(review),
+        title: integrationRetryExhausted
+          ? "자동 재시도가 끝난 연동 오류를 확인해 주세요."
+          : review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED"
+            ? "인터뷰 조율을 시작할지 확인해 주세요."
+            : review.reviewType === "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED"
+              ? "후보자 응답에 대한 처리 방법을 선택해 주세요."
+              : review.reason,
+        description: integrationRetryExhausted
+          ? integrationRetryReason(review.reason)
+          : review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED"
+            ? `${review.currentStepName ?? "평가 완료"} · ${review.reason}`
+            : review.currentStepName ?? "상세 내용을 확인해 주세요.",
+        candidateName: review.candidateName,
+        recruitmentName: review.recruitmentName,
+        meta: integrationRetryExhausted
+          ? "재동기화 전 워커와 연동 상태를 확인하세요. 이 화면에서는 외부 발송이나 자동 재시도를 실행하지 않습니다."
+          : review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED" ? "승인 전에는 나인하이어·Slack에 변경이 없습니다." : null,
+        actionLabel: integrationRetryExhausted
+          ? "연동 상태 확인"
+          : review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED"
+            ? "조율 시작 검토"
+            : review.reviewType === "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED"
+              ? "응답 조치 선택"
+              : supportedReviewDecisionTypes.has(review.reviewType)
+                ? "규칙 확인"
+                : review.caseId ? "상세 보기" : null,
+        href: review.caseId ? `/cases/${review.caseId}` : integrationRetryExhausted ? "#integration-health" : null,
+        review,
+      };
+    });
   const cancellationItems: ActionItem[] = data.dashboard.cases.flatMap((interviewCase) => {
     const pending = interviewCase.cancellationExternalFollowUps.filter(
       (followUp) => followUp.status === "PENDING" && followUp.followUpType === "NINEHIRE_CANDIDATE_SCHEDULE",
@@ -398,14 +418,14 @@ function DecisionModal({ activeDecision, evaluationSummary, onClose, onResolve, 
   loading: boolean;
 }) {
   const { decision, dismissOnClose } = activeDecision;
-  const [selectedOptionId, setSelectedOptionId] = useState(decision.options[0]?.id ?? "");
+  const [selectedOptionId, setSelectedOptionId] = useState("");
 
   useEffect(() => {
-    setSelectedOptionId(decision.options[0]?.id ?? "");
+    setSelectedOptionId("");
   }, [decision.id, decision.options]);
 
   return (
-    <Dialog open onOpenChange={(open) => !open && onClose()}>
+    <Dialog open onOpenChange={(open) => !open && !loading && onClose()}>
       <DialogContent className="max-w-4xl max-h-[calc(100vh-2rem)] overflow-y-auto">
         <DialogHeader>
           <p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">선택 내용 확인</p>
@@ -415,14 +435,15 @@ function DecisionModal({ activeDecision, evaluationSummary, onClose, onResolve, 
         <p className="text-base leading-7 text-slate-700">{decision.prompt}</p>
         {decision.decisionType === "START_INTERVIEW_ARRANGEMENT" || decision.decisionType === "SELECT_INTERVIEW_ROUTE" || decision.decisionType === "REVIEW_RECRUITMENT_TEMPLATE" ? <EvaluationSummaryPanel evaluation={evaluationSummary} /> : null}
         <p className="rounded-lg bg-slate-50 px-3 py-2 text-sm leading-6 text-slate-600">`선택 적용`을 누르기 전에는 인터뷰 상태나 외부 시스템이 변경되지 않습니다.</p>
-        <div className="grid gap-3">
+        <fieldset className="grid gap-3" aria-label="결정 선택지">
+          <legend className="text-sm font-semibold text-slate-900">처리 방법을 하나 선택해 주세요.</legend>
           {decision.options.map((option) => (
             <label key={option.id} className={`flex cursor-pointer gap-3 rounded-xl border p-4 transition-colors ${selectedOptionId === option.id ? "border-blue-500 bg-blue-50/70" : "border-slate-200 hover:border-slate-300"}`}>
               <input className="mt-1 size-4 accent-blue-600" type="radio" name="decision" value={option.id} checked={selectedOptionId === option.id} onChange={() => setSelectedOptionId(option.id)} />
               <span><strong className="block text-base text-slate-950">{option.label}</strong><small className="mt-1 block text-sm leading-6 text-slate-600">{option.description}</small></span>
             </label>
           ))}
-        </div>
+        </fieldset>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>{dismissOnClose ? "닫기" : "나중에 결정"}</Button>
           <Button disabled={!selectedOptionId || loading} onClick={() => onResolve(selectedOptionId)}>
@@ -491,7 +512,7 @@ function TemplatePreviewDialog({ preview, onClose, onSave, loading, error }: {
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="max-w-4xl">
         <DialogHeader>
           <p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">RECRUITMENT TEMPLATE</p>
           <DialogTitle>{preview.recruitmentName} 인터뷰 규칙 확인</DialogTitle>
@@ -778,6 +799,7 @@ function OperationsReadinessCard() {
   const [data, setData] = useState<OperationalReadinessPayload | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [retryingId, setRetryingId] = useState<string | null>(null);
 
   const load = async (external: boolean) => {
     setLoading(true);
@@ -808,6 +830,22 @@ function OperationsReadinessCard() {
     }
   };
 
+  const retryIntegrationJob = async (jobId: string) => {
+    if (!window.confirm("자동 재시도에 실패한 작업을 다시 대기열에 넣을까요? 외부 메시지는 즉시 발송되지 않습니다.")) return;
+    setRetryingId(jobId);
+    setError(null);
+    try {
+      const response = await fetch(`/api/operations/retries/${jobId}`, { method: "POST" });
+      const result = await response.json() as { queued?: boolean; error?: string };
+      if (!response.ok) throw new Error(result.error ?? "연동 재시도 작업을 다시 넣지 못했습니다.");
+      await load(false);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "연동 재시도 작업을 다시 넣지 못했습니다.");
+    } finally {
+      setRetryingId(null);
+    }
+  };
+
   useEffect(() => { void load(false); }, []);
   const daou = data?.readiness.checks.daouOfficeBrowser;
   const daouConnected = daou?.connected === true;
@@ -818,9 +856,9 @@ function OperationsReadinessCard() {
   const failedRetries = activeRetries.filter((job) => job.status === "FAILED");
 
   return (
-    <Card className="mt-6">
+    <Card className="mt-6" id="integration-health">
       <CardHeader className="flex-row items-start justify-between gap-4 border-b border-slate-200">
-        <div><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">INTEGRATION HEALTH</p><CardTitle className="mt-2">연동 상태와 복구</CardTitle><CardDescription className="mt-2">자동 재시도는 워커가 처리합니다. 여기서는 현재 상태를 확인하고 다우오피스 로그인을 다시 열 수 있습니다.</CardDescription></div>
+        <div><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">INTEGRATION HEALTH</p><CardTitle className="mt-2">연동 상태와 복구</CardTitle><CardDescription className="mt-2">자동 재시도는 워커가 처리합니다. 한도 초과 작업은 확인 후 다시 대기열에 넣을 수 있으며, 외부 메시지는 즉시 발송되지 않습니다.</CardDescription></div>
         <Badge variant={readinessStatus.variant}>{readinessStatus.label}</Badge>
       </CardHeader>
       <CardContent className="grid gap-5 p-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] lg:items-start">
@@ -835,7 +873,7 @@ function OperationsReadinessCard() {
             return <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3" key={job.id}>
               <div className="flex flex-wrap items-start justify-between gap-2"><p className="text-sm font-semibold text-slate-900">{retryJobTypeLabel(job.jobType)}</p><Badge variant={info.variant}>{info.label}</Badge></div>
               <p className="mt-1 text-xs leading-5 text-slate-600">{info.detail}</p>
-              <p className="mt-2 text-xs text-slate-500">시도 {job.attemptCount}/{maxAttempts}{job.status === "PENDING" && job.nextAttemptAt ? ` · 다음 확인 ${formatDateTime(job.nextAttemptAt)}` : ""}</p>
+              <div className="mt-2 flex flex-wrap items-center justify-between gap-2"><p className="text-xs text-slate-500">시도 {job.attemptCount}/{maxAttempts}{job.status === "PENDING" && job.nextAttemptAt ? ` · 다음 확인 ${formatDateTime(job.nextAttemptAt)}` : ""}</p>{job.status === "FAILED" ? <Button disabled={retryingId === job.id || loading} onClick={() => void retryIntegrationJob(job.id)} size="sm" variant="outline">{retryingId === job.id ? <Loader2 className="size-3.5 animate-spin" /> : null}재시도 승인</Button> : null}</div>
             </div>;
           })}</div> : <p className="mt-3 rounded-lg bg-emerald-50 px-3 py-2 text-sm leading-6 text-emerald-800">현재 자동으로 복구할 작업이 없습니다.</p>}
           {activeRetries.length > 5 ? <p className="mt-2 text-xs text-slate-500">최근 5건만 표시합니다. 전체 상태는 연결 진단 결과에서 확인하세요.</p> : null}
@@ -1185,6 +1223,11 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
     })
     .slice(0, 5), [data.dashboard.cases]);
   const summary = data.dashboard.summary;
+  const freshnessWarnings = [
+    summary.worker.status !== "RUNNING" || summary.freshness.worker.state !== "FRESH" ? "워커 처리" : null,
+    summary.freshness.slack.state !== "FRESH" ? "Slack 알림" : null,
+    summary.freshness.ninehire.state !== "FRESH" ? "나인하이어 데이터" : null,
+  ].filter((source): source is string => Boolean(source));
   const progress = [
     { label: "조율 시작", statuses: ["READY_FOR_DRAFT", "DRAFT_CREATED"] },
     { label: "면접관 일정", statuses: ["REQUEST_SENT", "COLLECTING_AVAILABILITY"] },
@@ -1198,7 +1241,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
   return (
     <div className="min-h-screen bg-slate-50">
       <AppHeader active="operations" workerStatus={summary.worker.status} />
-      <main className="mx-auto max-w-[1440px] px-5 pb-12 sm:px-8">
+      <main className="mx-auto max-w-[1440px] px-5 pb-12 sm:px-8" id="main-content">
         <PageHeader
           actions={<Button disabled={refreshing} variant="outline" onClick={() => void refresh().catch((caught) => setError(caught instanceof Error ? caught.message : "운영 현황을 새로 불러오지 못했습니다."))}>{refreshing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} {refreshing ? "갱신 중" : "새로고침"}</Button>}
           description="판단하거나 처리해야 하는 인터뷰 업무부터 확인하고, 확정된 일정과 운영 상태를 함께 살펴보세요."
@@ -1207,6 +1250,12 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
         />
 
         {error ? <div className="mb-6 flex items-center gap-2 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-800"><AlertCircle className="size-4" />{error}</div> : null}
+        {freshnessWarnings.length > 0 ? (
+          <div aria-live="polite" className="mb-6 flex flex-col gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-4 text-amber-950 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-start gap-3"><TriangleAlert className="mt-0.5 size-5 shrink-0 text-amber-700" /><div><p className="text-sm font-bold">최신 운영 데이터 확인이 필요합니다.</p><p className="mt-1 text-sm leading-6 text-amber-900">{freshnessWarnings.join(", ")} 상태가 최신이 아닙니다. 아래 큐는 마지막으로 성공한 동기화 기준으로 표시됩니다.</p></div></div>
+            <Button className="shrink-0" disabled={refreshing} onClick={() => void refresh().catch((caught) => setError(caught instanceof Error ? caught.message : "운영 현황을 새로 불러오지 못했습니다."))} size="sm" variant="outline">{refreshing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}다시 확인</Button>
+          </div>
+        ) : null}
 
         <section className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-5" aria-label="운영 요약">
           <button className={`rounded-xl border bg-white p-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-blue-300 hover:shadow-md ${queueTab === "ACTION" ? "border-blue-500 ring-2 ring-blue-100" : "border-slate-200"}`} onClick={() => setQueueTab("ACTION")} type="button">

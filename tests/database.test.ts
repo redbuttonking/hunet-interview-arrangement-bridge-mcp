@@ -368,6 +368,50 @@ describe("BridgeDatabase", () => {
     expect(exhausted).toMatchObject({ status: "FAILED", attemptCount: 3 });
   });
 
+  it("redacts credentials and keeps only the first error line in retry history", () => {
+    db = new BridgeDatabase(":memory:");
+    const queued = db.enqueueIntegrationRetry({
+      jobType: "SLACK_NOTIFICATION_RECONCILIATION",
+      dedupeKey: "source-channel",
+      payload: {},
+      now: new Date("2026-07-30T00:00:00.000Z"),
+    });
+
+    const failed = db.failIntegrationRetryJob(
+      queued.id,
+      "Authorization: Bearer xoxb-test\nsecret details should not persist",
+      new Date("2026-07-30T00:01:00.000Z"),
+    );
+
+    expect(failed.lastError).toContain("[REDACTED_SECRET]");
+    expect(failed.lastError).toContain("[REDACTED_SLACK_TOKEN]");
+    expect(failed.lastError).not.toContain("xoxb-");
+    expect(failed.lastError).not.toContain("secret details");
+  });
+
+  it("rejects empty or malformed interviewer availability", () => {
+    db = new BridgeDatabase(":memory:");
+    const interviewCase = db.createInterviewCase({
+      candidateName: "Candidate",
+      proposalDates: ["2026-08-10"],
+    });
+    const interviewer = db.addOrUpdateInterviewer({
+      caseId: interviewCase.id,
+      displayName: "Interviewer",
+      slackUserId: "U1",
+      source: "MANUAL",
+    });
+
+    expect(() =>
+      db!.replaceAvailabilityForInterviewer(interviewCase.id, interviewer.id, []),
+    ).toThrow("At least one interviewer availability slot");
+    expect(() =>
+      db!.replaceAvailabilityForInterviewer(interviewCase.id, interviewer.id, [
+        { date: "2026-08-10", start: "18:00", end: "17:00" },
+      ]),
+    ).toThrow("end time after");
+  });
+
   it("stores internal room allocations without overlapping a pre-booked block", () => {
     db = new BridgeDatabase(":memory:");
     const firstCase = db.createInterviewCase({
@@ -418,6 +462,75 @@ describe("BridgeDatabase", () => {
         endTime: "17:00",
       }),
     ).toMatchObject({ status: "ACTIVE", startTime: "16:00" });
+  });
+
+  it("does not allocate a room over an already confirmed manual interview", () => {
+    db = new BridgeDatabase(":memory:");
+    const confirmedCase = db.createInterviewCase({
+      candidateName: "Confirmed candidate",
+      proposalDates: ["2026-07-30"],
+    });
+    db.recordManualConfirmedSchedule({
+      caseId: confirmedCase.id,
+      date: "2026-07-30",
+      startTime: "15:00",
+      endTime: "16:00",
+      roomName: "Room A",
+    });
+    const competingCase = db.createInterviewCase({
+      candidateName: "Competing candidate",
+      proposalDates: ["2026-07-30"],
+    });
+    const [block] = db.syncMeetingRoomBlocks(["2026-07-30"], [
+      {
+        sourceKey: "DAOU:confirmed-conflict",
+        roomId: "A",
+        roomName: "Room A",
+        reservedBy: "Recruiter",
+        purpose: "Interview",
+        date: "2026-07-30",
+        startTime: "15:00",
+        endTime: "18:00",
+        sourcePayloadHash: "confirmed-conflict",
+      },
+    ]);
+
+    expect(() =>
+      db!.allocateRoomBlock({
+        caseId: competingCase.id,
+        roomBlockId: block!.id,
+        startTime: "15:00",
+        endTime: "16:00",
+      }),
+    ).toThrow("already uses this room and time");
+  });
+
+  it("treats the same external confirmation as idempotent", () => {
+    db = new BridgeDatabase(":memory:");
+    const interviewCase = db.createInterviewCase({
+      candidateName: "External candidate",
+      proposalDates: ["2026-07-30"],
+    });
+    db.setCaseStatus(interviewCase.id, "READY_TO_SCHEDULE");
+    const first = db.recordExternallyConfirmedSchedule({
+      caseId: interviewCase.id,
+      notificationId: "notification-1",
+      source: "NINEHIRE_SLACK",
+      date: "2026-07-30",
+      startTime: "15:00",
+      endTime: "16:00",
+    });
+    const second = db.recordExternallyConfirmedSchedule({
+      caseId: interviewCase.id,
+      notificationId: "notification-1",
+      source: "NINEHIRE_SLACK",
+      date: "2026-07-30",
+      startTime: "15:00",
+      endTime: "16:00",
+    });
+
+    expect(second).toMatchObject({ status: "CONFIRMED", id: first.id });
+    expect(db.listCaseEvents(interviewCase.id)).toHaveLength(2);
   });
 
   it("confirms an allocated room slot while preserving the candidate confirmation boundary", () => {

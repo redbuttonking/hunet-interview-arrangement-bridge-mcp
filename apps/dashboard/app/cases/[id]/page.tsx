@@ -123,7 +123,7 @@ export default async function CaseDetailPage({ params }: { params: Promise<{ id:
   return (
     <div className="min-h-screen bg-slate-50">
       <AppHeader active="operations" />
-      <main className="mx-auto max-w-[1440px] px-4 pb-12 sm:px-8">
+      <main className="mx-auto max-w-[1440px] px-4 pb-12 sm:px-8" id="main-content">
         <div className="pt-7"><Link className="inline-flex items-center gap-2 text-sm font-semibold text-slate-600 transition-colors hover:text-blue-700" href="/"><ArrowLeft className="size-4" />운영 보드</Link></div>
         <PageHeader
           actions={<Badge className="px-3 py-1 text-sm" variant={statusVariant(interviewCase.status)}>{statusLabel(interviewCase.status)}</Badge>}
@@ -174,6 +174,7 @@ export default async function CaseDetailPage({ params }: { params: Promise<{ id:
                 {scheduledSegments.length > 0 ? scheduledSegments.map((segment) => <span className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5" key={`${segment.date}-${segment.startTime}-${segment.roomName}-${segment.stepId ?? "single"}`}><span className="text-blue-700">{segment.date} {segment.startTime}–{segment.endTime}</span><span className="text-slate-400">·</span><span>{stepName(segment.stepId, plan)}</span><span className="text-slate-400">·</span><span>{segment.roomName}</span></span>) : interviewCase.scheduledDate ? `${interviewCase.scheduledDate} ${interviewCase.scheduledStartTime}–${interviewCase.scheduledEndTime}` : "아직 확정된 일정이 없습니다."}
               </dd></div>
               <div className="grid gap-1 sm:grid-cols-[120px_minmax(0,1fr)] sm:gap-5"><dt className="text-sm font-medium text-slate-500">회의실</dt><dd className="m-0 flex items-center gap-2 text-base font-bold leading-6 text-slate-900"><MapPin className="size-4 text-slate-400" />{scheduledSegments.length > 0 ? "세그먼트별 배정" : interviewCase.scheduledRoomName ?? "회의실 선택 또는 확인 필요"}</dd></div>
+              <div className="grid gap-1 sm:grid-cols-[120px_minmax(0,1fr)] sm:gap-5"><dt className="text-sm font-medium text-slate-500">후보자 응답</dt><dd className="m-0 text-base font-bold leading-6 text-slate-900">{interviewCase.candidateScheduleProposalSent ? <span className="text-emerald-700">나인하이어 일정 제안 발송 완료 · 응답 대기 또는 확정</span> : <span className="text-amber-700">나인하이어 일정 제안 미발송</span>}</dd></div>
             </dl></CardContent>
           </Card>
 

@@ -2,6 +2,8 @@
 
 현재 파일럿의 자동화 범위와 50개 역할 검토 결과는 [AUTOMATION_REVIEW.md](./AUTOMATION_REVIEW.md)에 정리되어 있습니다. 이 문서는 외부 발송·다우오피스 쓰기처럼 사용자 승인이 필요한 경계를 포함합니다.
 
+실제 시작·중지·복구·백업·민감정보 점검 절차는 [운영 런북](./docs/OPERATIONS_RUNBOOK.md)을 기준으로 합니다.
+
 ## 기본 인터뷰 흐름과 운영 사전점검
 
 채용별 기본 흐름은 `approve_recruitment_interview_template`의 `routes`로 승인한다. 흐름은 시작 단계와 포함 단계를 연결하며, 후보자가 시작 단계에 도달했을 때 자동 적용한다.
@@ -82,6 +84,7 @@ Slack 알림 채널 조회와 나인하이어 평가표 조회가 일시적으�
 - 최초 실패 후 1분, 이후 실패마다 2분과 4분 뒤에 다시 시도한다.
 - 재시도는 최대 3회이며, 모두 실패한 나인하이어 평가표 조회는 `EVALUATION_LOOKUP_FAILED` 검토 건으로 전환한다.
 - Slack 알림 채널 조회가 모두 실패한 경우에는 대시보드의 실패 재시도 항목에서 사유를 확인한 뒤, 워커·Slack 권한·네트워크를 점검한다.
+- 원인을 확인한 뒤에는 `retry_integration_job`에 실패 작업 ID를 전달해 사용자가 명시적으로 다음 워커 주기의 재시도를 승인할 수 있다. 이미 대기 중인 작업은 중복 등록하지 않으며, 외부 메시지는 즉시 발송하지 않는다.
 - 재시도 대기열은 조회 작업만 처리한다. Slack 메시지 발송은 기존과 같이 사용자 승인 없이는 재시도하거나 자동 발송하지 않는다.
 - 승인된 Slack 초안은 발송 직전에 짧은 DB lease를 확보한다. 같은 초안을 동시에 발송하거나 발송 직후 프로세스가 중단되어 재시도하는 경우에도 기존 Slack 메시지를 먼저 찾아 중복 발송을 막는다.
 
@@ -169,6 +172,8 @@ npm run dev:dashboard
 - 후보자 판정, 면접관 일정 수집, 일정·회의실 확정, 후보자 불참·변경 처리는 각각 선택 가능한 결정으로 생성됩니다.
 - 결정에는 `decisionId`, 단일·복수 선택 방식, 옵션, 최소 문맥이 저장됩니다. 미래 대시보드는 이를 버튼·체크박스로 표시하고 선택 결과만 다시 전달하면 됩니다.
 - `resolve_interview_skill_decision`은 사용자가 고른 옵션만 처리합니다. Slack 메시지 발송은 기존 초안 검토·승인 도구를 계속 사용합니다.
+
+스킬을 사용할 때도 `상태 확인 → 읽기·동기화 → 사용자 결정 → 초안 검토 → 명시적 발송 승인` 순서를 지킵니다. 스킬은 MCP 도구를 조합하지만 외부 메시지 발송, 후보자 일정 변경, 다우오피스 예약 변경을 자동 승인하지 않습니다.
 
 ## 현재 구현 범위
 
@@ -287,6 +292,7 @@ npm install
 Copy-Item .env.example .env
 npm run build
 npm test
+npm run check:repo
 ```
 
 실제 키는 반드시 `.env`에만 넣습니다. `.env`, SQLite DB, WAL 파일은 Git에서 제외되어 있습니다.
@@ -382,6 +388,8 @@ npm run start:worker
 
 PC가 절전·종료되거나 워커가 꺼져 있으면 실시간 버튼 처리와 5분 재확인은 멈춥니다. 다시 시작하면 마지막 Slack 타임스탬프 이후 메시지를 재확인합니다.
 
+Windows 로그인 시 자동 시작과 수동 복구는 [운영 런북](./docs/OPERATIONS_RUNBOOK.md)의 `manage-worker-task.ps1` 절차를 사용합니다. 작업 스케줄러 상태만 보지 말고 대시보드 또는 `bridge_status`에서 heartbeat와 마지막 성공 주기도 함께 확인합니다.
+
 ### 5. 로컬 운영 대시보드 실행
 
 워커 자동 시작과는 별개로, 화면을 볼 때만 로컬 웹 서버를 실행합니다.
@@ -448,6 +456,7 @@ tool_timeout_sec = 60.0
 | `inspect_ninehire_tools` | 나인하이어 도구 스키마 조회 | 읽기 |
 | `sync_slack_notifications` | Slack 원본 채널 즉시 재확인 | 외부 읽기, 로컬 상태 갱신 |
 | `list_integration_retry_jobs` | Slack·나인하이어 재시도 대기·실패 현황 조회 | 없음 |
+| `retry_integration_job` | 원인 확인 후 실패한 연동 작업을 다음 워커 주기에 재시도하도록 승인 | 로컬 재시도 대기열 갱신 |
 | `reprocess_interview_arrangement_eligibility_reviews` | 기존 평가 검토 건을 합격 기준으로 재판정 | 로컬 상태 갱신 |
 | `reprocess_schedule_confirmation_notifications` | 기존 일정 확정 Slack 알림 재처리 | 로컬 상태·이벤트 갱신 |
 | `approve_interview_arrangement` | 평가표 검토 후 승인된 인터뷰 유형으로 조율 시작 | 로컬 상태 갱신 |
@@ -573,6 +582,7 @@ npm run start:dashboard
 npm run backup:db
 npm run inspect:ninehire
 npm run inspect:slack-source
+npm run check:repo
 npm run typecheck
 npm test
 npm run build
@@ -602,6 +612,8 @@ npm run build
 7. 초안 내용 확인 후 승인·발송
 8. 테스트 면접관 계정으로 모달 제출
 9. `get_interview_case`로 저장 결과 확인
+
+운영 스크립트·백업·민감정보 점검은 [운영 런북](./docs/OPERATIONS_RUNBOOK.md)을 따릅니다. 실제 키를 사용하는 통합 테스트는 자동화하지 않으며, 테스트 채널에서 대상과 메시지를 확인한 뒤 수동으로 진행합니다.
 
 ## 알려진 제한과 다음 단계
 

@@ -37,7 +37,13 @@ export function loadCaseDetail(caseId: string) {
       .filter((segment): segment is NonNullable<typeof segment> => Boolean(segment))
       .sort((left, right) => left.sequenceIndex - right.sequenceIndex || `${left.date}T${left.startTime}`.localeCompare(`${right.date}T${right.startTime}`));
     return {
-      bundle,
+      bundle: {
+        ...bundle,
+        interviewCase: {
+          ...bundle.interviewCase,
+          candidateScheduleProposalSent: db.hasCandidateScheduleProposalSent(caseId),
+        },
+      },
       plan: db.getCaseInterviewPlan(caseId) ?? null,
       template: bundle.interviewCase.recruitmentRef
         ? db.getRecruitmentInterviewTemplate(bundle.interviewCase.recruitmentRef) ?? null
