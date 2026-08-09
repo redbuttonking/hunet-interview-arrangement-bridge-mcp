@@ -1,5 +1,6 @@
 // 다우오피스 예약 응답에서 인터뷰 회의실 블록만 추출하는 도메인 규칙을 제공한다.
 import { createHash } from "node:crypto";
+import type { DaouInterviewCalendarEvent } from "./daou-calendar.js";
 export const DAOU_INTERVIEW_ROOM_NAMES = [
   "열정룸",
   "행복룸",
@@ -41,6 +42,11 @@ export interface MeetingRoomBlockInput {
 
 export interface DaouOfficeReservationAdapter {
   listMeetingRoomBlocks(dates: string[]): Promise<MeetingRoomBlockInput[]>;
+  listInterviewCalendarEvents?(): Promise<DaouInterviewCalendarEvent[]>;
+}
+
+export interface DaouOfficeCalendarAdapter {
+  listInterviewCalendarEvents(): Promise<DaouInterviewCalendarEvent[]>;
 }
 
 function localDateAndTime(value: string): { date: string; time: string } {

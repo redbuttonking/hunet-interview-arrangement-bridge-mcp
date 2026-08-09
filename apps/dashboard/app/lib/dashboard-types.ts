@@ -122,6 +122,7 @@ export type DashboardSnapshot = {
         slack: DataFreshness;
         ninehire: DataFreshness;
         daouOffice: DataFreshness;
+        daouOfficeCalendar: DataFreshness;
         worker: DataFreshness;
       };
     };

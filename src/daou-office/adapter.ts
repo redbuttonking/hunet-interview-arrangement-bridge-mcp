@@ -1,6 +1,7 @@
 // 인증된 전용 Edge 브라우저를 통해 다우오피스 인터뷰 회의실 예약 블록을 읽는다.
 import { chromium, type Page } from "playwright-core";
 import type { AppConfig } from "../config.js";
+import { parseDaouInterviewCalendarText, type DaouInterviewCalendarEvent } from "../domain/daou-calendar.js";
 import {
   DAOU_INTERVIEW_ROOM_NAMES,
   DAOU_MEETING_ROOM_ASSET_NAME,
@@ -136,6 +137,24 @@ export class BrowserDaouOfficeReservationAdapter
     }
   }
 
+  async listInterviewCalendarEvents(): Promise<DaouInterviewCalendarEvent[]> {
+    const browser = await chromium
+      .connectOverCDP(daouOfficeDebugUrl(this.config.remoteDebugPort))
+      .catch(() => {
+        throw new Error(
+          "DaouOffice dedicated browser is not running. Run open_daou_office_login and sign in first.",
+        );
+      });
+    try {
+      const page = await this.calendarPage(browser.contexts().flatMap((context) => context.pages()));
+      await this.ensureInterviewCalendars(page);
+      await page.waitForTimeout(300);
+      return parseDaouInterviewCalendarText(await page.locator("body").innerText());
+    } finally {
+      await browser.close();
+    }
+  }
+
   private async assetPage(pages: Page[]): Promise<Page> {
     const existing = pages.find((page) => page.url().includes("/app/asset"));
     if (existing) return existing;
@@ -148,6 +167,42 @@ export class BrowserDaouOfficeReservationAdapter
       throw new Error("DaouOffice login is required before reading reservations.");
     }
     return page;
+  }
+
+  private async calendarPage(pages: Page[]): Promise<Page> {
+    const calendarUrl = this.config.calendarUrl ?? "https://hug.hunet.co.kr/app/calendar";
+    const existing = pages.find((page) => page.url().includes("/app/calendar"));
+    if (existing) return existing;
+    const page = pages[0];
+    if (!page) {
+      throw new Error("DaouOffice dedicated browser has no open page.");
+    }
+    await page.goto(calendarUrl, { waitUntil: "domcontentloaded", timeout: 10_000 });
+    if (!page.url().includes("/app/calendar")) {
+      throw new Error("DaouOffice login is required before reading the calendar.");
+    }
+    return page;
+  }
+
+  private async ensureInterviewCalendars(page: Page): Promise<void> {
+    await page.evaluate((calendarNames) => {
+      const document = (globalThis as unknown as {
+        document: {
+          querySelectorAll(selector: string): ArrayLike<{
+            textContent?: string | null;
+            closest(selector: string): { querySelector(selector: string): { checked: boolean; click(): void } | null } | null;
+            parentElement: { querySelector(selector: string): { checked: boolean; click(): void } | null } | null;
+          }>;
+        };
+      }).document;
+      for (const calendarName of calendarNames) {
+        const nodes = Array.from(document.querySelectorAll("label,span,div"));
+        const node = nodes.find((candidate) => candidate.textContent?.replace(/\s+/g, " ").trim() === calendarName);
+        const root = node?.closest("label") ?? node?.parentElement;
+        const checkbox = root?.querySelector('input[type="checkbox"]');
+        if (checkbox && !checkbox.checked) checkbox.click();
+      }
+    }, ["내 일정(기본)", "내 일정(강해빈)", "내 일정(김성은)"]);
   }
 
   private async fetchJson(page: Page, path: string): Promise<unknown> {

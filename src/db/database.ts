@@ -2968,6 +2968,7 @@ export class BridgeDatabase {
   recordExternallyConfirmedCandidateSchedule(input: {
     caseId: string;
     sourceEventId: string;
+    source?: "NINEHIRE_MCP" | "DAOU_OFFICE_CALENDAR";
     date: string;
     startTime: string;
     endTime: string;
@@ -2986,7 +2987,10 @@ export class BridgeDatabase {
     if (interviewCase.status !== "AWAITING_CANDIDATE_CONFIRMATION") {
       throw new Error("Only an interview awaiting candidate confirmation can be recorded from an external confirmation.");
     }
-    if (!this.hasCandidateScheduleProposalSent(input.caseId)) {
+    if (
+      !this.hasCandidateScheduleProposalSent(input.caseId)
+      && input.source !== "DAOU_OFFICE_CALENDAR"
+    ) {
       throw new Error("The candidate schedule proposal has not been recorded as sent.");
     }
     if (!input.sourceEventId.trim()) {
@@ -3002,7 +3006,7 @@ export class BridgeDatabase {
 
     this.transaction(() => {
       this.setCaseStatus(input.caseId, "CONFIRMED");
-      this.addEvent(input.caseId, "CANDIDATE_SCHEDULE_CONFIRMED", "NINEHIRE_MCP", {
+      this.addEvent(input.caseId, "CANDIDATE_SCHEDULE_CONFIRMED", input.source ?? "NINEHIRE_MCP", {
         sourceEventId: input.sourceEventId,
         date: input.date,
         startTime: input.startTime,

@@ -24,6 +24,8 @@ import type {
   ScoreSheetSummary,
   SlackNotificationInput,
 } from "../domain/types.js";
+import type { DaouOfficeCalendarAdapter } from "../domain/daou-office.js";
+import type { DaouInterviewCalendarEvent } from "../domain/daou-calendar.js";
 import type { NinehireWorkflowAdapter } from "../ninehire/adapter.js";
 import {
   buildRequestMessage,
@@ -1319,6 +1321,80 @@ export class WorkflowService {
       manuallyRecorded,
       roomSelectionRequired,
       roomReviewRequired,
+    };
+  }
+
+  async reconcileDaouCalendarConfirmedSchedules(
+    calendar: DaouOfficeCalendarAdapter,
+  ): Promise<{
+    scannedEvents: number;
+    matchedCases: number;
+    confirmedCases: number;
+    alreadyConfirmed: number;
+    skippedMismatches: number;
+    ambiguousEvents: number;
+  }> {
+    const events = await calendar.listInterviewCalendarEvents();
+    const trackedCases = this.db
+      .listCases(undefined, 500)
+      .filter((interviewCase) => ["AWAITING_CANDIDATE_CONFIRMATION", "CONFIRMED"].includes(interviewCase.status));
+    const candidateKey = (value: string | null | undefined) => (value ?? "").replace(/\s+/g, "").toLocaleLowerCase("ko-KR");
+    const recruitmentMatches = (event: DaouInterviewCalendarEvent, interviewCase: InterviewCaseRow) => {
+      const eventName = event.recruitmentName.replace(/[\[\]()]/g, "").toLocaleLowerCase("ko-KR");
+      const caseName = (interviewCase.recruitmentName ?? "").replace(/[\[\]()]/g, "").toLocaleLowerCase("ko-KR");
+      return Boolean(eventName && caseName && (eventName.includes(caseName) || caseName.includes(eventName)));
+    };
+
+    let matchedCases = 0;
+    let confirmedCases = 0;
+    let alreadyConfirmed = 0;
+    let skippedMismatches = 0;
+    let ambiguousEvents = 0;
+    for (const event of events) {
+      const candidateMatches = trackedCases.filter((interviewCase) => candidateKey(interviewCase.candidateName) === candidateKey(event.candidateName));
+      const matches = candidateMatches.length > 1
+        ? candidateMatches.filter((interviewCase) => recruitmentMatches(event, interviewCase))
+        : candidateMatches;
+      if (matches.length !== 1) {
+        if (matches.length > 1) ambiguousEvents += 1;
+        continue;
+      }
+      const interviewCase = matches[0]!;
+      matchedCases += 1;
+      if (interviewCase.status === "CONFIRMED") {
+        if (
+          interviewCase.scheduledDate === event.date
+          && interviewCase.scheduledStartTime === event.startTime
+          && interviewCase.scheduledEndTime === event.endTime
+        ) alreadyConfirmed += 1;
+        else skippedMismatches += 1;
+        continue;
+      }
+      if (
+        interviewCase.scheduledDate !== event.date
+        || interviewCase.scheduledStartTime !== event.startTime
+        || interviewCase.scheduledEndTime !== event.endTime
+      ) {
+        skippedMismatches += 1;
+        continue;
+      }
+      this.db.recordExternallyConfirmedCandidateSchedule({
+        caseId: interviewCase.id,
+        sourceEventId: event.sourceEventId,
+        source: "DAOU_OFFICE_CALENDAR",
+        date: event.date,
+        startTime: event.startTime,
+        endTime: event.endTime,
+      });
+      confirmedCases += 1;
+    }
+    return {
+      scannedEvents: events.length,
+      matchedCases,
+      confirmedCases,
+      alreadyConfirmed,
+      skippedMismatches,
+      ambiguousEvents,
     };
   }
 

@@ -16,6 +16,8 @@ import {
   NinehireRecruitmentWorkflowAdapter,
 } from "../ninehire/adapter.js";
 import { NinehireMcpGateway } from "../ninehire/gateway.js";
+import { BrowserDaouOfficeReservationAdapter } from "../daou-office/adapter.js";
+import { DaouOfficeBrowserController } from "../daou-office/browser.js";
 import { WorkflowService, type SlackIdentityResolver } from "../services/workflow.js";
 import { LocalDatabaseBackupService } from "../services/database-backup.js";
 import {
@@ -40,6 +42,8 @@ const app = new App({
 });
 const gateway = new NinehireMcpGateway(config.ninehire);
 const ninehire = new NinehireRecruitmentWorkflowAdapter(gateway);
+const daouOffice = new BrowserDaouOfficeReservationAdapter(config.daouOffice);
+const daouOfficeBrowser = new DaouOfficeBrowserController(config.daouOffice);
 
 class SlackEmailIdentityResolver implements SlackIdentityResolver {
   constructor(private readonly client: WebClient) {}
@@ -251,6 +255,7 @@ let cycleRunning = false;
 let retryCycleRunning = false;
 const slackReconciliationDedupeKey = config.slack.sourceChannelId;
 const ninehireScheduleReconciliationDedupeKey = "NINEHIRE_CONFIRMED_SCHEDULE_RECONCILIATION";
+const daouCalendarReconciliationDedupeKey = "DAOU_CALENDAR_RECONCILIATION";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.stack ?? error.message : String(error);
@@ -305,6 +310,27 @@ async function reconcileNinehireConfirmedSchedules(): Promise<void> {
   }
 }
 
+async function reconcileDaouCalendarConfirmedSchedules(): Promise<void> {
+  const browserStatus = await daouOfficeBrowser.status();
+  if (!browserStatus.connected) return;
+  try {
+    await workflow.reconcileDaouCalendarConfirmedSchedules(daouOffice);
+    db.setCursor("sync:daou_calendar:last_success", new Date().toISOString());
+    db.completePendingIntegrationRetryByDedupeKey(
+      "DAOU_CALENDAR_RECONCILIATION",
+      daouCalendarReconciliationDedupeKey,
+    );
+  } catch (error) {
+    const message = errorMessage(error);
+    db.enqueueIntegrationRetry({
+      jobType: "DAOU_CALENDAR_RECONCILIATION",
+      dedupeKey: daouCalendarReconciliationDedupeKey,
+      payload: {},
+    });
+    throw new Error(`DaouOffice calendar reconciliation failed: ${message}`);
+  }
+}
+
 async function runIntegrationRetryCycle(): Promise<void> {
   if (retryCycleRunning || cycleRunning) return;
   if (!db.renewWorkerLease({
@@ -330,6 +356,8 @@ async function runIntegrationRetryCycle(): Promise<void> {
         } else if (job.jobType === "NINEHIRE_SCHEDULE_RECONCILIATION") {
           await workflow.reconcileNinehireConfirmedSchedules();
           db.setCursor("sync:ninehire:last_success", new Date().toISOString());
+        } else if (job.jobType === "DAOU_CALENDAR_RECONCILIATION") {
+          await reconcileDaouCalendarConfirmedSchedules();
         } else {
           await workflow.processIntegrationRetryJob(job);
         }
@@ -376,6 +404,7 @@ async function runCycle(): Promise<void> {
     await ensureDailyDatabaseBackup();
     await runStep("Slack 동기화", reconcileSlackNotifications);
     await runStep("나인하이어 일정 동기화", reconcileNinehireConfirmedSchedules);
+    await runStep("다우오피스 캘린더 동기화", reconcileDaouCalendarConfirmedSchedules);
     const dueBeforeRefresh = db.listDueReminders();
     const caseIds = [...new Set(dueBeforeRefresh.map((item) => item.caseId))];
     for (const caseId of caseIds) {

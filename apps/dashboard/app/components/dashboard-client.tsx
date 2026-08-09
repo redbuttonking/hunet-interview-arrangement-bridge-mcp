@@ -3,7 +3,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertCircle, ArrowRight, CalendarClock, CheckCircle2, ClipboardList, Clock3, Loader2, RefreshCw, Search, SearchX, TriangleAlert, UsersRound, Wifi } from "lucide-react";
+import { AlertCircle, ArrowRight, CalendarClock, CheckCircle2, ChevronLeft, ChevronRight, ClipboardList, Clock3, Loader2, RefreshCw, Search, SearchX, TriangleAlert, UsersRound, Wifi } from "lucide-react";
 import { AppHeader, PageHeader } from "./app-shell";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
@@ -110,6 +110,31 @@ function formatDateTime(value: string | undefined) {
   const period = hour24 >= 12 ? "오후" : "오전";
   const hour = hour24 % 12 || 12;
   return `${shifted.getUTCMonth() + 1}. ${shifted.getUTCDate()}. ${period} ${hour}:${String(shifted.getUTCMinutes()).padStart(2, "0")}`;
+}
+
+async function readApiJson<T>(response: Response, fallbackMessage: string): Promise<T> {
+  const contentType = response.headers.get("content-type") ?? "";
+  const body = await response.text();
+  if (!contentType.toLocaleLowerCase().includes("application/json")) {
+    throw new Error(response.ok
+      ? fallbackMessage
+      : `서버가 오류 페이지를 반환했습니다. 대시보드를 새로고침한 뒤 다시 시도해 주세요. (${response.status})`);
+  }
+  try {
+    return JSON.parse(body) as T;
+  } catch {
+    throw new Error(fallbackMessage);
+  }
+}
+
+function isDecision(value: unknown): value is Decision {
+  return Boolean(
+    value
+    && typeof value === "object"
+    && "id" in value
+    && "options" in value
+    && Array.isArray((value as { options?: unknown }).options),
+  );
 }
 
 function formatSchedule(interviewCase: CandidateCase) {
@@ -772,6 +797,7 @@ function retryJobTypeLabel(jobType: string) {
     NINEHIRE_EVALUATION_LOOKUP: "나인하이어 평가표 조회",
     NINEHIRE_SCHEDULE_RECONCILIATION: "나인하이어 확정 일정 확인",
     SLACK_NOTIFICATION_RECONCILIATION: "Slack 알림 동기화",
+    DAOU_CALENDAR_RECONCILIATION: "다우오피스 확정 일정 확인",
   };
   return labels[jobType] ?? "외부 연동 확인";
 }
@@ -1024,10 +1050,10 @@ const queueTabs: Array<{ id: "ACTION" | "WAITING" | "EXCEPTION" | "ALL"; label: 
 ];
 
 function paginationPages(page: number, pageCount: number) {
-  const maxVisible = 5;
-  if (pageCount <= maxVisible) return Array.from({ length: pageCount }, (_, index) => index + 1);
-  const start = Math.min(Math.max(1, page - 2), pageCount - maxVisible + 1);
-  return Array.from({ length: maxVisible }, (_, index) => start + index);
+  const windowSize = 5;
+  const start = Math.floor((Math.max(1, page) - 1) / windowSize) * windowSize + 1;
+  const end = Math.min(pageCount, start + windowSize - 1);
+  return Array.from({ length: Math.max(0, end - start + 1) }, (_, index) => start + index);
 }
 
 export function DashboardClient({ initialData }: { initialData: DashboardSnapshot }) {
@@ -1039,7 +1065,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
   const [error, setError] = useState<string | null>(null);
   const [queueTab, setQueueTab] = useState<"ACTION" | "WAITING" | "EXCEPTION" | "ALL">("ACTION");
   const [query, setQuery] = useState("");
-  const [pageSize, setPageSize] = useState(10);
+  const [pageSize, setPageSize] = useState(5);
   const [page, setPage] = useState(1);
   const [hydrated, setHydrated] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -1073,7 +1099,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
     setError(null);
     try {
       const response = await fetch(`/api/reviews/${review.id}/decision`, { method: "POST" });
-      const result = await response.json() as { decision?: Decision; dismissOnClose?: boolean; error?: string };
+      const result = await readApiJson<{ decision?: Decision; dismissOnClose?: boolean; error?: string }>(response, "결정문을 만들지 못했습니다.");
       if (!response.ok || !result.decision) throw new Error(result.error ?? "결정문을 만들지 못했습니다.");
       setActiveDecision({ decision: result.decision, dismissOnClose: result.dismissOnClose === true });
     } catch (caught) {
@@ -1095,7 +1121,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ skillKey }),
       });
-      const result = await response.json() as { decision?: Decision; dismissOnClose?: boolean; error?: string };
+      const result = await readApiJson<{ decision?: Decision; dismissOnClose?: boolean; error?: string }>(response, "선택지를 만들지 못했습니다.");
       if (!response.ok || !result.decision) throw new Error(result.error ?? "선택지를 만들지 못했습니다.");
       setActiveDecision({ decision: result.decision, dismissOnClose: result.dismissOnClose === true });
     } catch (caught) {
@@ -1117,9 +1143,17 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ optionId }),
       });
-      const result = await response.json() as { error?: string; followUp?: unknown };
+      const result = await readApiJson<{ error?: string; followUp?: unknown }>(response, "결정문을 처리하지 못했습니다.");
       if (!response.ok) throw new Error(result.error ?? "결정문을 처리하지 못했습니다.");
-      if (
+      const followUpDecision = result.followUp
+        && typeof result.followUp === "object"
+        && "decision" in result.followUp
+        && isDecision((result.followUp as { decision?: unknown }).decision)
+        ? (result.followUp as { decision: Decision }).decision
+        : null;
+      if (followUpDecision) {
+        setActiveDecision({ decision: followUpDecision, dismissOnClose: false });
+      } else if (
         result.followUp
         && typeof result.followUp === "object"
         && "id" in result.followUp
@@ -1175,7 +1209,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
           steps,
         }),
       });
-      const result = await response.json() as { decision?: Decision; error?: string };
+      const result = await readApiJson<{ decision?: Decision; error?: string }>(response, "인터뷰 규칙을 저장하지 못했습니다.");
       if (!response.ok) throw new Error(result.error ?? "인터뷰 규칙을 저장하지 못했습니다.");
       setTemplatePreview(null);
       if (result.decision) {
@@ -1197,7 +1231,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
     if (!dismissOnClose) return;
     try {
       const response = await fetch(`/api/decisions/${decision.id}/dismiss`, { method: "DELETE" });
-      const result = await response.json() as { dismissed?: boolean; error?: string };
+      const result = await readApiJson<{ dismissed?: boolean; error?: string }>(response, "선택지를 닫지 못했습니다.");
       if (!response.ok || !result.dismissed) throw new Error(result.error ?? "선택지를 닫지 못했습니다.");
       await refresh();
     } catch (caught) {
@@ -1212,7 +1246,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
     try {
       const resource = work.kind === "REVIEW" ? "reviews" : "cases";
       const response = await fetch(`/api/holds/${resource}/${work.id}/resume`, { method: "POST" });
-      const result = await response.json() as { decision?: Decision; error?: string };
+      const result = await readApiJson<{ decision?: Decision; error?: string }>(response, "보류한 조율을 다시 시작하지 못했습니다.");
       if (!response.ok) throw new Error(result.error ?? "보류한 조율을 다시 시작하지 못했습니다.");
       if (result.decision) {
         setActiveDecision({ decision: result.decision, dismissOnClose: false });
@@ -1249,6 +1283,9 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
   const pageNumbers = useMemo(() => paginationPages(page, pageCount), [page, pageCount]);
   const visibleActionItems = useMemo(() => filteredActionItems.slice((page - 1) * pageSize, page * pageSize), [filteredActionItems, page, pageSize]);
   useEffect(() => {
+    if (page > pageCount) setPage(pageCount);
+  }, [page, pageCount]);
+  useEffect(() => {
     setPage(1);
   }, [pageSize, query, queueTab]);
   useEffect(() => {
@@ -1268,6 +1305,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
     summary.freshness.slack.state !== "FRESH" ? "Slack 알림" : null,
     summary.freshness.ninehire.state !== "FRESH" ? "나인하이어 데이터" : null,
     summary.freshness.daouOffice.state !== "FRESH" ? "회의실 예약" : null,
+    summary.freshness.daouOfficeCalendar.state !== "FRESH" ? "다우오피스 인터뷰 일정" : null,
   ].filter((source): source is string => Boolean(source));
   const progress = [
     { label: "조율 시작", statuses: ["READY_FOR_DRAFT", "DRAFT_CREATED"] },
@@ -1330,7 +1368,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
           <Card aria-busy={refreshing} className="overflow-hidden">
             <CardHeader className="flex-row items-start justify-between gap-4 border-b border-slate-200 p-6 sm:p-7">
               <div><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">PRIORITY QUEUE</p><CardTitle className="mt-2 flex items-center gap-2 text-2xl">인터뷰 운영 큐 <Badge>{filteredActionItems.length}</Badge></CardTitle><CardDescription className="mt-2">한 화면에서는 지금 확인할 후보자만 보여주고, 나머지는 페이지로 나눠 관리합니다.</CardDescription></div>
-              <div className="flex shrink-0 items-center gap-2"><label className="sr-only" htmlFor="action-page-size">페이지 표시 수</label><select aria-label="페이지 표시 수" className="h-10 rounded-lg border border-slate-200 bg-white px-2 text-sm font-medium text-slate-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" id="action-page-size" onChange={(event) => setPageSize(Number(event.target.value))} value={pageSize}><option value="10">10건</option><option value="25">25건</option><option value="50">50건</option></select></div>
+              <div className="flex shrink-0 items-center gap-2"><label className="sr-only" htmlFor="action-page-size">페이지 표시 수</label><select aria-label="페이지 표시 수" className="h-10 rounded-lg border border-slate-200 bg-white px-2 text-sm font-medium text-slate-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" id="action-page-size" onChange={(event) => { setPageSize(Number(event.target.value)); setPage(1); }} value={pageSize}><option value="5">5건</option><option value="10">10건</option><option value="25">25건</option><option value="50">50건</option></select></div>
             </CardHeader>
             <div className="border-b border-slate-200 px-6 py-4 sm:px-7">
               <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -1348,7 +1386,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
               </div></CardContent>
             ) : <>
               <div className="divide-y divide-slate-200">{visibleActionItems.map((item) => <ActionRow key={item.id} item={item} loading={loadingId === item.id} onCreateCaseDecision={createCaseDecision} onCreateReviewDecision={createReviewDecision} onOpenDecision={(decision) => setActiveDecision({ decision, dismissOnClose: false })} />)}</div>
-              <div className="flex flex-col gap-3 border-t border-slate-200 px-6 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-7"><p className="text-sm text-slate-500">전체 {filteredActionItems.length}건 중 {Math.min((page - 1) * pageSize + 1, filteredActionItems.length)}–{Math.min(page * pageSize, filteredActionItems.length)}건</p><nav aria-label="인터뷰 운영 큐 페이지" className="flex items-center justify-end gap-1"><Button aria-label="이전 페이지" disabled={page <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))} size="sm" variant="outline">이전</Button>{pageNumbers.map((pageNumber) => <Button aria-current={pageNumber === page ? "page" : undefined} aria-label={`${pageNumber}페이지`} className={pageNumber === page ? "ring-2 ring-blue-200" : undefined} key={pageNumber} onClick={() => setPage(pageNumber)} size="sm" variant={pageNumber === page ? "secondary" : "outline"}>{pageNumber}</Button>)}<Button aria-label="다음 페이지" disabled={page >= pageCount} onClick={() => setPage((current) => Math.min(pageCount, current + 1))} size="sm" variant="outline">다음</Button></nav></div>
+              <div className="flex flex-col gap-3 border-t border-slate-200 px-6 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-7"><p className="text-sm text-slate-500">전체 {filteredActionItems.length}건 중 {Math.min((page - 1) * pageSize + 1, filteredActionItems.length)}–{Math.min(page * pageSize, filteredActionItems.length)}건</p><nav aria-label="인터뷰 운영 큐 페이지" className="flex items-center justify-end gap-1"><Button aria-label="이전 페이지 묶음" disabled={pageNumbers[0] === undefined || pageNumbers[0] <= 1} onClick={() => setPage((pageNumbers[0] ?? 1) - 5)} size="icon-sm" title="이전 5페이지" variant="outline"><ChevronLeft className="size-4" /></Button>{pageNumbers.map((pageNumber) => <Button aria-current={pageNumber === page ? "page" : undefined} aria-label={`${pageNumber}페이지`} className={pageNumber === page ? "ring-2 ring-blue-200" : undefined} key={pageNumber} onClick={() => setPage(pageNumber)} size="sm" variant={pageNumber === page ? "secondary" : "outline"}>{pageNumber}</Button>)}<Button aria-label="다음 페이지 묶음" disabled={(pageNumbers[pageNumbers.length - 1] ?? pageCount) >= pageCount} onClick={() => setPage(Math.min(pageCount, (pageNumbers[0] ?? 1) + 5))} size="icon-sm" title="다음 5페이지" variant="outline"><ChevronRight className="size-4" /></Button></nav></div>
             </>}
           </Card>
 
@@ -1379,25 +1417,26 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
           </aside>
         </div>
 
-        <section className="mt-6 grid gap-4 md:grid-cols-3" aria-label="운영 상태">
-          <Card><CardContent className="flex items-start gap-4 p-5"><span className="grid size-10 place-items-center rounded-lg bg-amber-50 text-amber-700"><UsersRound className="size-5" /></span><div><p className="text-sm font-medium text-slate-600">면접관 미응답</p><p className="mt-1 text-2xl font-semibold tracking-tight">{summary.pendingRequiredInterviewerResponses}</p><p className="mt-1 text-sm leading-5 text-slate-500">제출 확인이 필요한 필수 면접관입니다.</p></div></CardContent></Card>
-          <Card><CardContent className="flex items-start gap-4 p-5"><span className="grid size-10 place-items-center rounded-lg bg-rose-50 text-rose-700"><Wifi className="size-5" /></span><div><p className="text-sm font-medium text-slate-600">연동 재시도</p><p className="mt-1 text-2xl font-semibold tracking-tight">{summary.pendingIntegrationRetries + summary.failedIntegrationRetries}</p><p className="mt-1 text-sm leading-5 text-slate-500">Slack·나인하이어 동기화 오류를 확인합니다.</p></div></CardContent></Card>
-          <Card><CardContent className="flex items-start gap-4 p-5"><span className="grid size-10 place-items-center rounded-lg bg-blue-50 text-blue-700"><ClipboardList className="size-5" /></span><div><p className="text-sm font-medium text-slate-600">화면 조회 시각</p><p className="mt-1 text-2xl font-semibold tracking-tight">{hydrated ? formatGeneratedAt(data.dashboard.generatedAt) : "초기 로드"}</p><p className="mt-1 text-sm leading-5 text-slate-500">외부 연동 성공 시각은 아래 신선도 카드에서 확인합니다.</p></div></CardContent></Card>
+        <section className="mt-8 grid gap-4 md:grid-cols-3" aria-label="운영 상태">
+          <Card className="min-h-32"><CardContent className="flex min-h-32 items-start gap-4 p-5"><span className="grid size-10 shrink-0 place-items-center rounded-lg bg-amber-50 text-amber-700"><UsersRound className="size-5" /></span><div><p className="text-sm font-medium text-slate-600">면접관 일정 회신 대기</p><p className="mt-1 text-2xl font-semibold tracking-tight">{summary.pendingRequiredInterviewerResponses}</p><p className="mt-1 text-sm leading-5 text-slate-500">필수 면접관 중 아직 가능 일정을 제출하지 않은 인원입니다.</p></div></CardContent></Card>
+          <Card className="min-h-32"><CardContent className="flex min-h-32 items-start gap-4 p-5"><span className="grid size-10 shrink-0 place-items-center rounded-lg bg-rose-50 text-rose-700"><Wifi className="size-5" /></span><div><p className="text-sm font-medium text-slate-600">연동 오류 확인</p><p className="mt-1 text-2xl font-semibold tracking-tight">{summary.pendingIntegrationRetries + summary.failedIntegrationRetries}</p><p className="mt-1 text-sm leading-5 text-slate-500">Slack·나인하이어 동기화에 실패해 다시 확인이 필요한 작업입니다.</p></div></CardContent></Card>
+          <Card className="min-h-32"><CardContent className="flex min-h-32 items-start gap-4 p-5"><span className="grid size-10 shrink-0 place-items-center rounded-lg bg-blue-50 text-blue-700"><ClipboardList className="size-5" /></span><div><p className="text-sm font-medium text-slate-600">대시보드 확인 시각</p><p className="mt-1 text-2xl font-semibold tracking-tight">{hydrated ? formatGeneratedAt(data.dashboard.generatedAt) : "초기 로드"}</p><p className="mt-1 text-sm leading-5 text-slate-500">이 화면의 데이터를 마지막으로 불러온 시각입니다. 외부 시스템의 정상 처리 시각은 위 확인 상태에서 봅니다.</p></div></CardContent></Card>
         </section>
         <section className="mt-6" aria-label="데이터 신선도">
           <Card>
-            <CardHeader className="border-b border-slate-200 py-5">
+            <CardHeader className="border-b-0 pb-5">
               <div>
                 <p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">DATA FRESHNESS</p>
-                <CardTitle className="mt-2 text-xl">외부 데이터가 언제 확인됐는지</CardTitle>
-                <CardDescription className="mt-2">화면을 연 시각과 실제 연동 성공 시각을 구분해 보여줍니다. 최신 확인이 필요한 항목은 새로고침이나 워커 상태를 점검하세요.</CardDescription>
+                <CardTitle className="mt-2 text-xl">외부 연동 확인 상태</CardTitle>
+                <CardDescription className="mt-2">화면을 연 시각과 Slack·나인하이어·다우오피스·워커가 마지막으로 정상 처리한 시각을 구분해 보여줍니다. 최신 확인 필요가 표시되면 해당 연동을 점검하세요.</CardDescription>
               </div>
             </CardHeader>
-            <CardContent className="grid gap-3 p-5 sm:grid-cols-2 xl:grid-cols-4">
+            <CardContent className="grid gap-3 p-5 pt-0 sm:grid-cols-2 xl:grid-cols-5">
               {([
                 ["Slack 알림", summary.freshness?.slack],
                 ["나인하이어 일정", summary.freshness?.ninehire],
                 ["다우오피스 회의실", summary.freshness?.daouOffice],
+                ["다우오피스 인터뷰 일정", summary.freshness?.daouOfficeCalendar],
                 ["워커 처리", summary.freshness?.worker],
               ] as const).map(([label, source]) => {
                 const info = freshnessStatusInfo(source?.state);

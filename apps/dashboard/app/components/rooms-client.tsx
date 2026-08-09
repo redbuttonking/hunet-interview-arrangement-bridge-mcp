@@ -174,9 +174,9 @@ export function RoomsClient({ data }: { data: DashboardSnapshot }) {
     ]),
   ])].sort(), [data]);
   const preferredDate = useMemo(() => {
-    const today = todayInSeoul(data.dashboard.generatedAt);
-    return dates.includes(today) ? today : dates.find((date) => date >= today) ?? dates[0] ?? today;
-  }, [data.dashboard.generatedAt, dates]);
+    // 데이터가 만들어진 시각이 아니라 사용자가 화면을 여는 실제 날짜를 기준으로 한다.
+    return todayInSeoul();
+  }, []);
   const [selectedDate, setSelectedDate] = useState(preferredDate);
   useEffect(() => {
     setSelectedDate((current) => dates.includes(current) ? current : preferredDate);

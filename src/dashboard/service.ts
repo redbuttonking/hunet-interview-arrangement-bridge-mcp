@@ -180,6 +180,7 @@ export function withDashboardFreshness(
         slack: freshness(db.getCursorInfo("sync:slack:last_success")?.updatedAt),
         ninehire: freshness(db.getCursorInfo("sync:ninehire:last_success")?.updatedAt),
         daouOffice: freshness(roomSyncAt),
+        daouOfficeCalendar: freshness(db.getCursorInfo("sync:daou_calendar:last_success")?.updatedAt),
         worker: freshness(typeof worker.lastSuccessfulCycleAt === "string" ? worker.lastSuccessfulCycleAt : null),
       },
     },

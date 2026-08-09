@@ -8,6 +8,7 @@ export interface AppConfig {
   timeZone: string;
   daouOffice: {
     url: string;
+    calendarUrl?: string;
     browserProfileDir: string;
     remoteDebugPort: number;
     edgeExecutablePath: string;
@@ -72,6 +73,7 @@ export function getConfig(): AppConfig {
     timeZone: optional("BRIDGE_TIME_ZONE") ?? "Asia/Seoul",
     daouOffice: {
       url: optional("DAOU_OFFICE_URL") ?? "https://hug.hunet.co.kr/app/asset",
+      calendarUrl: optional("DAOU_OFFICE_CALENDAR_URL") ?? "https://hug.hunet.co.kr/app/calendar",
       browserProfileDir: resolve(
         optional("DAOU_BROWSER_PROFILE_DIR") ?? "./data/daou-office-profile",
       ),
