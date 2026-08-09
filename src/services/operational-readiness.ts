@@ -27,6 +27,25 @@ interface NinehireGateway {
 
 type CheckStatus = "READY" | "ATTENTION" | "BLOCKED" | "NOT_RUN";
 
+const EXTERNAL_CHECK_TIMEOUT = "EXTERNAL_CHECK_TIMEOUT";
+
+async function withExternalCheckTimeout<T>(
+  operation: Promise<T>,
+  timeoutMs: number,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(EXTERNAL_CHECK_TIMEOUT)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function workerStatus(
   health: ReturnType<BridgeDatabase["getWorkerHealth"]>,
 ): "RUNNING" | "STALE" | "DEGRADED" | "UNKNOWN" {
@@ -52,6 +71,7 @@ export class OperationalReadinessService {
     private readonly ninehire: NinehireGateway,
     private readonly daouOfficeBrowser: DaouOfficeBrowserStatusProvider,
     private readonly slackClient?: SlackAuthClient,
+    private readonly externalCheckTimeoutMs = 8_000,
   ) {}
 
   async inspect(input: { checkExternal?: boolean } = {}) {
@@ -108,29 +128,53 @@ export class OperationalReadinessService {
       ninehire: { status: "NOT_RUN" satisfies CheckStatus },
     };
     if (checkExternal) {
-      if (this.slackClient && missingSlackConfiguration.length === 0) {
-        try {
-          await this.slackClient.auth.test();
-          external.slack = { status: "READY" satisfies CheckStatus };
-        } catch {
-          external.slack = { status: "ATTENTION" satisfies CheckStatus, reason: "AUTH_TEST_FAILED" };
-        }
-      } else {
-        external.slack = { status: "BLOCKED" satisfies CheckStatus, reason: "MISSING_CONFIGURATION" };
-      }
-      if (this.ninehire.isConfigured()) {
-        try {
-          const tools = await this.ninehire.listTools();
-          external.ninehire = {
-            status: "READY" satisfies CheckStatus,
-            availableToolCount: tools.length,
-          };
-        } catch {
-          external.ninehire = { status: "ATTENTION" satisfies CheckStatus, reason: "TOOL_LIST_FAILED" };
-        }
-      } else {
-        external.ninehire = { status: "BLOCKED" satisfies CheckStatus, reason: "MISSING_CONFIGURATION" };
-      }
+      const [slackCheck, ninehireCheck] = await Promise.all([
+        (async () => {
+          if (!this.slackClient || missingSlackConfiguration.length > 0) {
+            return { status: "BLOCKED" satisfies CheckStatus, reason: "MISSING_CONFIGURATION" };
+          }
+          try {
+            await withExternalCheckTimeout(
+              this.slackClient.auth.test(),
+              this.externalCheckTimeoutMs,
+            );
+            return { status: "READY" satisfies CheckStatus };
+          } catch (error) {
+            return {
+              status: "ATTENTION" satisfies CheckStatus,
+              reason:
+                error instanceof Error && error.message === EXTERNAL_CHECK_TIMEOUT
+                  ? "AUTH_TEST_TIMEOUT"
+                  : "AUTH_TEST_FAILED",
+            };
+          }
+        })(),
+        (async () => {
+          if (!this.ninehire.isConfigured()) {
+            return { status: "BLOCKED" satisfies CheckStatus, reason: "MISSING_CONFIGURATION" };
+          }
+          try {
+            const tools = await withExternalCheckTimeout(
+              this.ninehire.listTools(),
+              this.externalCheckTimeoutMs,
+            );
+            return {
+              status: "READY" satisfies CheckStatus,
+              availableToolCount: tools.length,
+            };
+          } catch (error) {
+            return {
+              status: "ATTENTION" satisfies CheckStatus,
+              reason:
+                error instanceof Error && error.message === EXTERNAL_CHECK_TIMEOUT
+                  ? "TOOL_LIST_TIMEOUT"
+                  : "TOOL_LIST_FAILED",
+            };
+          }
+        })(),
+      ]);
+      external.slack = slackCheck;
+      external.ninehire = ninehireCheck;
     }
 
     const nextActions: string[] = [];

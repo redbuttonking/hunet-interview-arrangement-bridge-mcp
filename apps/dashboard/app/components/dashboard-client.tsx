@@ -783,10 +783,21 @@ function retryStatusInfo(status: string) {
 }
 
 function readinessStatusInfo(status: string | undefined) {
-  if (status === "READY") return { label: "연결 정상", variant: "success" as const };
-  if (status === "ATTENTION" || status === "DEGRADED") return { label: "일부 확인 필요", variant: "warning" as const };
+  if (status === "READY" || status === "RUNNING") return { label: "연결 정상", variant: "success" as const };
+  if (status === "ATTENTION" || status === "DEGRADED" || status === "STALE") {
+    return { label: status === "STALE" ? "최신 확인 필요" : "일부 확인 필요", variant: "warning" as const };
+  }
   if (status === "BLOCKED" || status === "NOT_READY") return { label: "설정 확인 필요", variant: "destructive" as const };
+  if (status === "NOT_RUN") return { label: "진단 전", variant: "secondary" as const };
   return { label: "확인 중", variant: "secondary" as const };
+}
+
+function readinessReasonLabel(reason: unknown) {
+  if (reason === "AUTH_TEST_TIMEOUT" || reason === "TOOL_LIST_TIMEOUT") return "응답 시간 초과";
+  if (reason === "AUTH_TEST_FAILED") return "인증 확인 실패";
+  if (reason === "TOOL_LIST_FAILED") return "도구 목록 확인 실패";
+  if (reason === "MISSING_CONFIGURATION") return "필수 설정 없음";
+  return "추가 확인 필요";
 }
 
 function freshnessStatusInfo(state: "FRESH" | "STALE" | "UNKNOWN" | undefined) {
@@ -796,6 +807,7 @@ function freshnessStatusInfo(state: "FRESH" | "STALE" | "UNKNOWN" | undefined) {
 }
 
 function OperationsReadinessCard() {
+  const READINESS_REQUEST_TIMEOUT_MS = 12_000;
   const [data, setData] = useState<OperationalReadinessPayload | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -807,7 +819,9 @@ function OperationsReadinessCard() {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch(`/api/operations/readiness?external=${external}`);
+      const response = await fetch(`/api/operations/readiness?external=${external}`, {
+        signal: AbortSignal.timeout(READINESS_REQUEST_TIMEOUT_MS),
+      });
       const result = await response.json() as OperationalReadinessPayload & { error?: string };
       if (!response.ok) throw new Error(result.error ?? "운영 상태를 확인하지 못했습니다.");
       if (currentRequestId === requestId.current) setData(result);
@@ -824,7 +838,10 @@ function OperationsReadinessCard() {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch("/api/operations/daou-login", { method: "POST" });
+      const response = await fetch("/api/operations/daou-login", {
+        method: "POST",
+        signal: AbortSignal.timeout(READINESS_REQUEST_TIMEOUT_MS),
+      });
       const result = await response.json() as { error?: string };
       if (!response.ok) throw new Error(result.error ?? "다우오피스 로그인 창을 열지 못했습니다.");
       await load(false);
@@ -854,6 +871,8 @@ function OperationsReadinessCard() {
   const daou = data?.readiness.checks.daouOfficeBrowser;
   const daouConnected = daou?.connected === true;
   const readinessStatus = readinessStatusInfo(data?.readiness.overallStatus);
+  const externalChecks = data?.readiness.externalChecks.checks ?? {};
+  const workerCheck = data?.readiness.checks.worker;
   const retries = data?.retryJobs ?? [];
   const activeRetries = retries.filter((job) => job.status !== "COMPLETED");
   const pendingRetries = activeRetries.filter((job) => job.status === "PENDING");
@@ -865,8 +884,19 @@ function OperationsReadinessCard() {
         <div><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">INTEGRATION HEALTH</p><CardTitle className="mt-2">연동 상태와 복구</CardTitle><CardDescription className="mt-2">자동 재시도는 워커가 처리합니다. 한도 초과 작업은 확인 후 다시 대기열에 넣을 수 있으며, 외부 메시지는 즉시 발송되지 않습니다.</CardDescription></div>
         <Badge variant={readinessStatus.variant}>{readinessStatus.label}</Badge>
       </CardHeader>
-      <CardContent className="grid gap-5 p-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] lg:items-start">
+      <CardContent className="grid gap-5 p-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto] lg:items-start">
         <div className="rounded-xl border border-slate-200 p-4"><p className="text-sm font-medium text-slate-500">다우오피스 전용 브라우저</p><p className="mt-2 text-lg font-semibold text-slate-950">{daouConnected ? "연결됨" : "로그인 또는 연결 확인 필요"}</p><p className="mt-2 text-sm leading-6 text-slate-600">{daou?.latestMeetingRoomSyncAt ? `마지막 회의실 동기화. ${formatDateTime(String(daou.latestMeetingRoomSyncAt))}` : "회의실을 추천하기 전 해당 후보자 기준으로 동기화합니다."}</p></div>
+        <div className="rounded-xl border border-slate-200 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2"><p className="text-sm font-medium text-slate-500">외부 연결 확인</p><Badge variant={data?.readiness.externalChecks.performed ? "success" : "secondary"}>{data?.readiness.externalChecks.performed ? "진단 완료" : "진단 전"}</Badge></div>
+          <div className="mt-3 space-y-2">
+            {[{ label: "Slack", check: externalChecks.slack }, { label: "나인하이어", check: externalChecks.ninehire }, { label: "워커", check: workerCheck }].map(({ label, check }) => {
+              const status = typeof check?.status === "string" ? check.status : "NOT_RUN";
+              const info = readinessStatusInfo(status);
+              return <div className="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2" key={label}><span className="text-sm font-medium text-slate-700">{label}</span><span className="flex items-center gap-2"><span className="text-xs text-slate-500">{check?.reason ? readinessReasonLabel(check.reason) : null}</span><Badge variant={info.variant}>{info.label}</Badge></span></div>;
+            })}
+          </div>
+          <p className="mt-3 text-xs leading-5 text-slate-500">연결 다시 진단을 누르면 Slack과 나인하이어를 다시 확인합니다. 워커가 최신이 아니면 자동화 처리가 멈출 수 있습니다.</p>
+        </div>
         <div className="rounded-xl border border-slate-200 p-4">
           <div className="flex flex-wrap items-center justify-between gap-2"><p className="text-sm font-medium text-slate-500">자동 복구 대기열</p><div className="flex gap-1.5"><Badge variant="warning">대기 {pendingRetries.length}</Badge><Badge variant="destructive">실패 {failedRetries.length}</Badge></div></div>
           <p className="mt-2 text-lg font-semibold text-slate-950">확인 필요한 작업 {activeRetries.length}건</p>
@@ -883,7 +913,7 @@ function OperationsReadinessCard() {
           {activeRetries.length > 5 ? <p className="mt-2 text-xs text-slate-500">최근 5건만 표시합니다. 전체 상태는 연결 진단 결과에서 확인하세요.</p> : null}
         </div>
         <div className="flex flex-wrap gap-2 lg:justify-end"><Button disabled={loading} onClick={() => void load(true)} variant="outline">{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}연결 다시 진단</Button>{!daouConnected ? <Button disabled={loading} onClick={() => void openDaouLogin()} variant="outline">다우오피스 로그인</Button> : null}</div>
-        {error ? <p aria-live="assertive" className="lg:col-span-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">{error}</p> : null}
+        {error ? <p aria-live="assertive" className="lg:col-span-4 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">{error}</p> : null}
       </CardContent>
     </Card>
   );

@@ -95,4 +95,45 @@ describe("operational readiness", () => {
     expect(slackAuthCalls).toBe(1);
     expect(ninehireCalls).toBe(1);
   });
+
+  it("finishes an external check when a provider does not respond", async () => {
+    db = new BridgeDatabase(":memory:");
+    const service = new OperationalReadinessService(
+      config,
+      db,
+      {
+        isConfigured: () => true,
+        async listTools() {
+          return [];
+        },
+      },
+      {
+        async status() {
+          return {
+            connected: true,
+            profileDir: "C:/temp/daou-profile",
+            debugUrl: "http://127.0.0.1:9222",
+          };
+        },
+      },
+      {
+        auth: {
+          async test() {
+            return await new Promise<unknown>(() => undefined);
+          },
+        },
+      },
+      10,
+    );
+
+    const result = await service.inspect({ checkExternal: true });
+
+    expect(result.externalChecks.checks.slack).toMatchObject({
+      status: "ATTENTION",
+      reason: "AUTH_TEST_TIMEOUT",
+    });
+    expect(result.externalChecks.checks.ninehire).toMatchObject({
+      status: "READY",
+    });
+  });
 });
