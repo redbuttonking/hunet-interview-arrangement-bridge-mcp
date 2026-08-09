@@ -853,15 +853,13 @@ function SummaryMetricCard({
 
   return (
     <Card className="h-full">
-      <CardContent className="flex min-h-36 items-start gap-4 p-5">
-        <span className={`grid size-11 shrink-0 place-items-center rounded-xl ${toneClass}`}>{icon}</span>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-start justify-between gap-4">
-            <p className="pt-0.5 text-base font-semibold leading-6 text-slate-700">{label}</p>
-            <strong className="shrink-0 text-3xl font-semibold leading-none tracking-tight text-slate-950">{value}</strong>
-          </div>
-          <p className="mt-3 text-sm leading-6 text-slate-500">{description}</p>
+      <CardContent className="min-h-44 p-6">
+        <div className="flex items-center gap-4">
+          <span className={`grid size-11 shrink-0 place-items-center rounded-xl ${toneClass}`}>{icon}</span>
+          <p className="text-base font-semibold leading-6 text-slate-700">{label}</p>
         </div>
+        <strong className="mt-5 block text-3xl font-semibold leading-none tracking-tight text-slate-950">{value}</strong>
+        <p className="mt-3 text-sm leading-6 text-slate-500">{description}</p>
       </CardContent>
     </Card>
   );
@@ -1454,7 +1452,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
         <section className="mt-8 grid gap-4 md:grid-cols-3" aria-label="운영 상태">
           <SummaryMetricCard description="필수 면접관 중 아직 가능 일정을 제출하지 않은 인원 수입니다." icon={<UsersRound className="size-5" />} label="면접관 일정 회신 대기" tone="amber" value={summary.pendingRequiredInterviewerResponses} />
           <SummaryMetricCard description="Slack 또는 나인하이어 연동에서 다시 확인이 필요한 작업 수입니다." icon={<Wifi className="size-5" />} label="연동 오류 확인" tone="rose" value={summary.pendingIntegrationRetries + summary.failedIntegrationRetries} />
-          <SummaryMetricCard description="이 대시보드의 정보를 마지막으로 불러온 시각입니다." icon={<ClipboardList className="size-5" />} label="화면 정보 갱신 시각" tone="blue" value={hydrated ? formatGeneratedAt(data.dashboard.generatedAt) : "초기 로드"} />
+          <SummaryMetricCard description="이 대시보드의 정보를 마지막으로 불러온 시각입니다." icon={<ClipboardList className="size-5" />} label="대시보드 확인 시각" tone="blue" value={hydrated ? formatGeneratedAt(data.dashboard.generatedAt) : "초기 로드"} />
         </section>
         <section className="mt-6" aria-label="데이터 신선도">
           <Card>
