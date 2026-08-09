@@ -3,6 +3,18 @@ import { BridgeDatabase, type InterviewSkillDecisionRow, type ReviewRow } from "
 
 const FRESHNESS_THRESHOLD_MS = 10 * 60 * 1000;
 
+function todayInKorea(now = new Date()): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Seoul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+  const value = (type: Intl.DateTimeFormatPartTypes): string =>
+    parts.find((part) => part.type === type)?.value ?? "";
+  return `${value("year")}-${value("month")}-${value("day")}`;
+}
+
 type DashboardEvaluationSummary = {
   scoreSheets: Array<{
     title: string;
@@ -247,5 +259,17 @@ export function getDashboardSnapshot(db: BridgeDatabase, limit = 100) {
       startTime: block.startTime,
       endTime: block.endTime,
     })),
+    externalConfirmedInterviews: db.listExternalConfirmedInterviews()
+      .filter((interview) => interview.date >= todayInKorea())
+      .map((interview) => ({
+      id: interview.id,
+      candidateName: interview.candidateName,
+      recruitmentName: interview.recruitmentName,
+      date: interview.date,
+      startTime: interview.startTime,
+      endTime: interview.endTime,
+      linkedCaseId: interview.linkedCaseId,
+      lastSeenAt: interview.lastSeenAt,
+      })),
   };
 }

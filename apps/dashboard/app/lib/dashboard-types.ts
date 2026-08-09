@@ -138,6 +138,16 @@ export type DashboardSnapshot = {
     startTime: string;
     endTime: string;
   }>;
+  externalConfirmedInterviews?: Array<{
+    id: string;
+    candidateName: string;
+    recruitmentName: string;
+    date: string;
+    startTime: string;
+    endTime: string;
+    linkedCaseId: string | null;
+    lastSeenAt: string;
+  }>;
 };
 
 export type DataFreshness = {

@@ -36,6 +36,9 @@ function createRuntime() {
   const slackClient = config.slack.botToken
     ? new WebClient(config.slack.botToken, { timeout: 30_000 })
     : undefined;
+  const readinessSlackClient = config.slack.botToken
+    ? new WebClient(config.slack.botToken, { timeout: 6_000 })
+    : undefined;
   const workflow = new WorkflowService(
     db,
     config,
@@ -47,7 +50,8 @@ function createRuntime() {
     db,
     gateway,
     new DaouOfficeBrowserController(config.daouOffice),
-    slackClient,
+    readinessSlackClient,
+    6_000,
   );
   const skills = new InterviewArrangementSkills(db, workflow, readiness);
   const daouOfficeBrowser = new DaouOfficeBrowserController(config.daouOffice);

@@ -39,6 +39,17 @@ type ActiveDecision = {
   dismissOnClose: boolean;
 };
 
+type UpcomingInterview = {
+  id: string;
+  candidateName: string | null;
+  recruitmentName: string | null;
+  date: string;
+  startTime: string;
+  endTime: string;
+  href: string | null;
+  source: "LOCAL" | "DAOU_OFFICE_CALENDAR";
+};
+
 type RecruitmentTemplatePreview = {
   kind: "RECRUITMENT_TEMPLATE_PREVIEW";
   preview: {
@@ -112,6 +123,11 @@ function formatDateTime(value: string | undefined) {
   return `${shifted.getUTCMonth() + 1}. ${shifted.getUTCDate()}. ${period} ${hour}:${String(shifted.getUTCMinutes()).padStart(2, "0")}`;
 }
 
+function todayInSeoulDate() {
+  const shifted = new Date(Date.now() + 9 * 60 * 60 * 1000);
+  return `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, "0")}-${String(shifted.getUTCDate()).padStart(2, "0")}`;
+}
+
 async function readApiJson<T>(response: Response, fallbackMessage: string): Promise<T> {
   const contentType = response.headers.get("content-type") ?? "";
   const body = await response.text();
@@ -141,6 +157,22 @@ function formatSchedule(interviewCase: CandidateCase) {
   if (!interviewCase.scheduledDate || !interviewCase.scheduledStartTime) return "일정 미정";
   const room = interviewCase.scheduledRoomName ? ` · ${interviewCase.scheduledRoomName}` : "";
   return `${formatDate(interviewCase.scheduledDate)} ${interviewCase.scheduledStartTime}–${interviewCase.scheduledEndTime ?? ""}${room}`;
+}
+
+function UpcomingInterviewItem({ interview }: { interview: UpcomingInterview }) {
+  const content = <>
+    <p className="text-sm font-semibold text-blue-700">{formatDate(interview.date)}</p>
+    <p className="mt-1 text-lg font-semibold text-slate-950">{interview.candidateName ?? "후보자 확인 필요"}</p>
+    <p className="mt-1 truncate text-sm text-slate-600">{interview.recruitmentName ?? "채용 정보 확인 필요"}</p>
+    <p className="mt-1 text-sm leading-6 text-slate-600">{interview.startTime}–{interview.endTime} · {interview.source === "DAOU_OFFICE_CALENDAR" ? "다우오피스 캘린더 확정" : "조율 기록"}</p>
+  </>;
+  return interview.href ? (
+    <Link className="block py-4 first:pt-0 transition-colors hover:text-blue-700" href={interview.href}>
+      {content}
+    </Link>
+  ) : (
+    <div className="py-4 first:pt-0">{content}</div>
+  );
 }
 
 function stageLabel(interviewCase: CandidateCase) {
@@ -883,7 +915,13 @@ function OperationsReadinessCard() {
       const response = await fetch(`/api/operations/readiness?external=${external}`, {
         signal: AbortSignal.timeout(READINESS_REQUEST_TIMEOUT_MS),
       });
-      const result = await response.json() as OperationalReadinessPayload & { error?: string };
+      const responseText = await response.text();
+      let result: OperationalReadinessPayload & { error?: string };
+      try {
+        result = JSON.parse(responseText) as OperationalReadinessPayload & { error?: string };
+      } catch {
+        throw new Error(`연결 진단 서버가 올바른 응답을 반환하지 않았습니다. 상태 코드 ${response.status}`);
+      }
       if (!response.ok) throw new Error(result.error ?? "운영 상태를 확인하지 못했습니다.");
       if (currentRequestId === requestId.current) setData(result);
     } catch (caught) {
@@ -1326,14 +1364,41 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
   useEffect(() => {
     setPage((current) => Math.min(current, pageCount));
   }, [pageCount]);
-  const upcoming = useMemo(() => data.dashboard.cases
-    .filter((interviewCase) => interviewCase.scheduledDate && interviewCase.scheduledStartTime && ["CONFIRMED", "AWAITING_CANDIDATE_CONFIRMATION"].includes(interviewCase.status))
-    .sort((left, right) => {
-      const leftKey = `${left.scheduledDate}T${left.scheduledStartTime}`;
-      const rightKey = `${right.scheduledDate}T${right.scheduledStartTime}`;
-      return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
-    })
-    .slice(0, 5), [data.dashboard.cases]);
+  const upcoming = useMemo(() => {
+    const localSchedules: UpcomingInterview[] = data.dashboard.cases
+      .filter((interviewCase) => interviewCase.scheduledDate && interviewCase.scheduledStartTime && interviewCase.scheduledEndTime && ["CONFIRMED", "AWAITING_CANDIDATE_CONFIRMATION"].includes(interviewCase.status))
+      .map((interviewCase) => ({
+        id: interviewCase.id,
+        candidateName: interviewCase.candidateName,
+        recruitmentName: interviewCase.recruitmentName,
+        date: interviewCase.scheduledDate!,
+        startTime: interviewCase.scheduledStartTime!,
+        endTime: interviewCase.scheduledEndTime!,
+        href: `/cases/${interviewCase.id}`,
+        source: "LOCAL" as const,
+      }));
+    const calendarSchedules: UpcomingInterview[] = (data.externalConfirmedInterviews ?? [])
+      .filter((interview) => !interview.linkedCaseId)
+      .map((interview) => ({
+        id: `daou:${interview.id}`,
+        candidateName: interview.candidateName,
+        recruitmentName: interview.recruitmentName,
+        date: interview.date,
+        startTime: interview.startTime,
+        endTime: interview.endTime,
+        href: null,
+        source: "DAOU_OFFICE_CALENDAR" as const,
+      }));
+    const today = todayInSeoulDate();
+    return [...localSchedules, ...calendarSchedules]
+      .filter((interview) => interview.date >= today)
+      .sort((left, right) => {
+        const leftKey = `${left.date}T${left.startTime}`;
+        const rightKey = `${right.date}T${right.startTime}`;
+        return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+      });
+  }, [data.dashboard.cases, data.externalConfirmedInterviews]);
+  const visibleUpcoming = upcoming.slice(0, 5);
   const summary = data.dashboard.summary;
   const freshnessWarnings = [
     summary.worker.status !== "RUNNING" || summary.freshness.worker.state !== "FRESH" ? "워커 처리" : null,
@@ -1389,7 +1454,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
           </button>
           <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
             <div className="flex items-center justify-between gap-2"><span className="text-sm font-medium text-slate-600">다가오는 인터뷰</span><CalendarClock className="size-5 text-emerald-600" /></div>
-            <p className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">{data.dashboard.cases.filter((interviewCase) => interviewCase.scheduledDate && ["CONFIRMED", "AWAITING_CANDIDATE_CONFIRMATION"].includes(interviewCase.status)).length}</p>
+            <p className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">{upcoming.length}</p>
             <p className="mt-1 text-xs text-slate-500">확정 또는 후보자 응답 대기</p>
           </div>
           <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
@@ -1433,12 +1498,8 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
             <Card>
               <CardHeader><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">UP NEXT</p><CardTitle className="mt-2">다가오는 인터뷰</CardTitle></CardHeader>
               <CardContent>
-                {upcoming.length === 0 ? <p className="text-base leading-7 text-slate-600">기록된 일정 인터뷰가 없습니다.</p> : <div className="divide-y divide-slate-200">{upcoming.map((interviewCase) => (
-                  <Link className="block py-4 first:pt-0 transition-colors hover:text-blue-700" href={`/cases/${interviewCase.id}`} key={interviewCase.id}>
-                    <p className="text-sm font-semibold text-blue-700">{formatDate(interviewCase.scheduledDate)}</p>
-                    <p className="mt-1 text-lg font-semibold text-slate-950">{interviewCase.candidateName ?? "후보자 확인 필요"}</p>
-                    <p className="mt-1 text-sm leading-6 text-slate-600">{formatSchedule(interviewCase)}</p>
-                  </Link>
+                {upcoming.length === 0 ? <p className="text-base leading-7 text-slate-600">기록된 일정 인터뷰가 없습니다.</p> : <div className="divide-y divide-slate-200">{visibleUpcoming.map((interview) => (
+                  <UpcomingInterviewItem interview={interview} key={interview.id} />
                 ))}</div>}
                 <Button asChild className="mt-5 w-full" variant="outline"><Link href="/rooms"><CalendarClock className="size-4" />회의실 시간표 보기</Link></Button>
               </CardContent>

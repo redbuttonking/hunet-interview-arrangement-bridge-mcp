@@ -9,7 +9,7 @@ describe("BridgeDatabase", () => {
   it("applies every schema migration when the database opens", () => {
     db = new BridgeDatabase(":memory:");
 
-    expect(db.getLatestSchemaVersion()).toBe(18);
+    expect(db.getLatestSchemaVersion()).toBe(19);
   });
 
   it("clears candidate and room operation data while retaining Slack read positions and setup", () => {

@@ -22,7 +22,7 @@ export class NinehireMcpGateway {
     return Boolean(this.config.apiKey);
   }
 
-  private async connect(): Promise<ConnectedClient> {
+  private async connect(timeoutMs = this.config.timeoutMs): Promise<ConnectedClient> {
     if (!this.config.apiKey) {
       throw new Error(
         "NINEHIRE_MCP_API_KEY is not configured. Put it in the local .env file.",
@@ -34,7 +34,7 @@ export class NinehireMcpGateway {
       : this.config.apiKey;
     headers.set(this.config.authHeader, authValue);
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.config.timeoutMs);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     const clearTimeout = () => globalThis.clearTimeout(timeout);
 
     const transport = new StreamableHTTPClientTransport(
@@ -55,8 +55,8 @@ export class NinehireMcpGateway {
     }
   }
 
-  async listTools(): Promise<UpstreamTool[]> {
-    const connection = await this.connect();
+  async listTools(input?: { timeoutMs?: number }): Promise<UpstreamTool[]> {
+    const connection = await this.connect(input?.timeoutMs);
     try {
       const result = await connection.client.listTools();
       return result.tools.map((tool) => ({

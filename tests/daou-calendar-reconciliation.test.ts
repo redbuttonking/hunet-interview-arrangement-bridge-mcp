@@ -28,15 +28,15 @@ describe("DaouOffice calendar reconciliation", () => {
     const interviewCase = db.createInterviewCase({
       candidateName: "테스트 6",
       recruitmentName: "인터뷰 어레인지 자동화 테스트 채용",
-      proposalDates: ["2026-08-04"],
+      proposalDates: ["2099-08-04"],
     });
-    const [block] = db.syncMeetingRoomBlocks(["2026-08-04"], [{
+    const [block] = db.syncMeetingRoomBlocks(["2099-08-04"], [{
       sourceKey: "DAOU:calendar-test",
       roomId: "R1",
       roomName: "[818호] 행복룸",
       reservedBy: "강해빈",
       purpose: "면접",
-      date: "2026-08-04",
+      date: "2099-08-04",
       startTime: "16:00",
       endTime: "18:00",
       sourcePayloadHash: "calendar-test",
@@ -52,7 +52,7 @@ describe("DaouOffice calendar reconciliation", () => {
           title: "[면접] 인터뷰 어레인지 자동화 테스트 채용 (테스트 6)",
           recruitmentName: "인터뷰 어레인지 자동화 테스트 채용",
           candidateName: "테스트 6",
-          date: "2026-08-04",
+          date: "2099-08-04",
           startTime: "16:00",
           endTime: "17:00",
           rawText: "calendar",
@@ -71,7 +71,86 @@ describe("DaouOffice calendar reconciliation", () => {
       confirmedCases: 1,
     });
     expect(db.getCase(interviewCase.id)?.status).toBe("CONFIRMED");
+    expect(db.listExternalConfirmedInterviews()).toMatchObject([{
+      candidateName: "테스트 6",
+      linkedCaseId: interviewCase.id,
+    }]);
     await expect(workflow.reconcileDaouCalendarConfirmedSchedules(calendar)).resolves.toMatchObject({ alreadyConfirmed: 1, confirmedCases: 0 });
     expect(db.listCaseEvents(interviewCase.id).filter((event) => event.eventType === "CANDIDATE_SCHEDULE_CONFIRMED")).toHaveLength(1);
+  });
+
+  it("records an unmatched calendar interview without creating a candidate case", async () => {
+    db = new BridgeDatabase(":memory:");
+    const workflow = new WorkflowService(db, config, {
+      async lookupCompletedEvaluation() { return { reason: "Not used in this test." }; },
+      async listInterviewers() { return { interviewers: [], unresolvedUserGroups: [] }; },
+      async listInProgressRecruitments() { return { count: 0, limit: 100, offset: 0, recruitments: [] }; },
+    });
+    const calendar: DaouOfficeCalendarAdapter = {
+      async listInterviewCalendarEvents() {
+        return [{
+          sourceEventId: "DAOU_CALENDAR:unmatched-event",
+          title: "[면접] 데이터 엔지니어 인터뷰 (테스트 후보자)",
+          recruitmentName: "데이터 엔지니어 인터뷰",
+          candidateName: "테스트 후보자",
+          date: "2099-08-12",
+          startTime: "14:00",
+          endTime: "15:00",
+          rawText: "calendar",
+        }];
+      },
+    };
+
+    await expect(workflow.reconcileDaouCalendarConfirmedSchedules(calendar)).resolves.toMatchObject({
+      scannedEvents: 1,
+      recordedEvents: 1,
+      matchedCases: 0,
+    });
+    expect(db.listCases()).toHaveLength(0);
+    expect(db.listExternalConfirmedInterviews()).toMatchObject([{
+      candidateName: "테스트 후보자",
+      linkedCaseId: null,
+    }]);
+  });
+
+  it("과거 다우오피스 일정은 저장하지 않고 기존 과거 기록도 정리한다", async () => {
+    db = new BridgeDatabase(":memory:");
+    db.syncExternalConfirmedInterviews([{
+      sourceEventId: "DAOU_CALENDAR:past-event",
+      title: "[면접] 과거 채용 (과거 후보자)",
+      recruitmentName: "과거 채용",
+      candidateName: "과거 후보자",
+      date: "2000-01-01",
+      startTime: "10:00",
+      endTime: "11:00",
+      rawText: "calendar",
+    }]);
+    const workflow = new WorkflowService(db, config, {
+      async lookupCompletedEvaluation() { return { reason: "Not used in this test." }; },
+      async listInterviewers() { return { interviewers: [], unresolvedUserGroups: [] }; },
+      async listInProgressRecruitments() { return { count: 0, limit: 100, offset: 0, recruitments: [] }; },
+    });
+    const calendar: DaouOfficeCalendarAdapter = {
+      async listInterviewCalendarEvents() {
+        return [{
+          sourceEventId: "DAOU_CALENDAR:past-only",
+          title: "[면접] 과거 채용 (과거 후보자)",
+          recruitmentName: "과거 채용",
+          candidateName: "과거 후보자",
+          date: "2000-01-02",
+          startTime: "10:00",
+          endTime: "11:00",
+          rawText: "calendar",
+        }];
+      },
+    };
+
+    await expect(workflow.reconcileDaouCalendarConfirmedSchedules(calendar)).resolves.toMatchObject({
+      scannedEvents: 0,
+      recordedEvents: 0,
+      skippedPastEvents: 1,
+      removedPastRecords: 1,
+    });
+    expect(db.listExternalConfirmedInterviews()).toHaveLength(0);
   });
 });

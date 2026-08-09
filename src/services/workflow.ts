@@ -1328,13 +1328,22 @@ export class WorkflowService {
     calendar: DaouOfficeCalendarAdapter,
   ): Promise<{
     scannedEvents: number;
+    recordedEvents: number;
+    skippedPastEvents: number;
+    removedPastRecords: number;
     matchedCases: number;
     confirmedCases: number;
     alreadyConfirmed: number;
     skippedMismatches: number;
     ambiguousEvents: number;
   }> {
-    const events = await calendar.listInterviewCalendarEvents();
+    const calendarEvents = await calendar.listInterviewCalendarEvents();
+    const today = todayInKorea();
+    const events = calendarEvents.filter((event) => event.date >= today);
+    const skippedPastEvents = calendarEvents.length - events.length;
+    const removedPastRecords = this.db.deleteExternalConfirmedInterviewsBefore(today);
+    this.db.syncExternalConfirmedInterviews(events);
+    const recordedEvents = events.length;
     const trackedCases = this.db
       .listCases(undefined, 500)
       .filter((interviewCase) => ["AWAITING_CANDIDATE_CONFIRMATION", "CONFIRMED"].includes(interviewCase.status));
@@ -1366,7 +1375,10 @@ export class WorkflowService {
           interviewCase.scheduledDate === event.date
           && interviewCase.scheduledStartTime === event.startTime
           && interviewCase.scheduledEndTime === event.endTime
-        ) alreadyConfirmed += 1;
+        ) {
+          this.db.linkExternalConfirmedInterviewToCase(event.sourceEventId, interviewCase.id);
+          alreadyConfirmed += 1;
+        }
         else skippedMismatches += 1;
         continue;
       }
@@ -1386,10 +1398,14 @@ export class WorkflowService {
         startTime: event.startTime,
         endTime: event.endTime,
       });
+      this.db.linkExternalConfirmedInterviewToCase(event.sourceEventId, interviewCase.id);
       confirmedCases += 1;
     }
     return {
       scannedEvents: events.length,
+      recordedEvents,
+      skippedPastEvents,
+      removedPastRecords,
       matchedCases,
       confirmedCases,
       alreadyConfirmed,

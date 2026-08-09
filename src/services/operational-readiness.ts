@@ -22,7 +22,7 @@ interface SlackAuthClient {
 
 interface NinehireGateway {
   isConfigured(): boolean;
-  listTools(): Promise<unknown[]>;
+  listTools(input?: { timeoutMs?: number }): Promise<unknown[]>;
 }
 
 type CheckStatus = "READY" | "ATTENTION" | "BLOCKED" | "NOT_RUN";
@@ -155,7 +155,7 @@ export class OperationalReadinessService {
           }
           try {
             const tools = await withExternalCheckTimeout(
-              this.ninehire.listTools(),
+              this.ninehire.listTools({ timeoutMs: this.externalCheckTimeoutMs }),
               this.externalCheckTimeoutMs,
             );
             return {

@@ -136,4 +136,43 @@ describe("operational readiness", () => {
       status: "READY",
     });
   });
+
+  it("나인하이어 도구 조회가 지연돼도 Slack 진단 결과를 함께 반환한다", async () => {
+    db = new BridgeDatabase(":memory:");
+    const service = new OperationalReadinessService(
+      config,
+      db,
+      {
+        isConfigured: () => true,
+        async listTools() {
+          return await new Promise<unknown[]>(() => undefined);
+        },
+      },
+      {
+        async status() {
+          return {
+            connected: true,
+            profileDir: "C:/temp/daou-profile",
+            debugUrl: "http://127.0.0.1:9222",
+          };
+        },
+      },
+      {
+        auth: {
+          async test() {
+            return {};
+          },
+        },
+      },
+      10,
+    );
+
+    const result = await service.inspect({ checkExternal: true });
+
+    expect(result.externalChecks.checks.slack).toMatchObject({ status: "READY" });
+    expect(result.externalChecks.checks.ninehire).toMatchObject({
+      status: "ATTENTION",
+      reason: "TOOL_LIST_TIMEOUT",
+    });
+  });
 });

@@ -23,6 +23,7 @@ import type {
   InterviewSkillKey,
   InterviewSkillSelectionMode,
 } from "../domain/skills.js";
+import type { DaouInterviewCalendarEvent } from "../domain/daou-calendar.js";
 import type { MeetingRoomBlockInput } from "../domain/daou-office.js";
 import { firstReminderAt, secondReminderAt } from "../domain/calendar.js";
 
@@ -188,6 +189,21 @@ export interface MeetingRoomBlockRow extends MeetingRoomBlockInput {
   id: string;
   active: boolean;
   seenAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ExternalConfirmedInterviewRow {
+  id: string;
+  sourceEventId: string;
+  candidateName: string;
+  recruitmentName: string;
+  date: string;
+  startTime: string;
+  endTime: string;
+  linkedCaseId: string | null;
+  firstSeenAt: string;
+  lastSeenAt: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -597,6 +613,23 @@ function toMeetingRoomBlock(row: SqlRow): MeetingRoomBlockRow {
   };
 }
 
+function toExternalConfirmedInterview(row: SqlRow): ExternalConfirmedInterviewRow {
+  return {
+    id: asString(row.id),
+    sourceEventId: asString(row.source_event_id),
+    candidateName: asString(row.candidate_name),
+    recruitmentName: asString(row.recruitment_name),
+    date: asString(row.date),
+    startTime: asString(row.start_time),
+    endTime: asString(row.end_time),
+    linkedCaseId: nullableString(row.linked_case_id),
+    firstSeenAt: asString(row.first_seen_at),
+    lastSeenAt: asString(row.last_seen_at),
+    createdAt: asString(row.created_at),
+    updatedAt: asString(row.updated_at),
+  };
+}
+
 function toRoomAllocation(row: SqlRow): RoomAllocationRow {
   return {
     id: asString(row.id),
@@ -866,6 +899,24 @@ export class BridgeDatabase {
         date TEXT PRIMARY KEY,
         synced_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS external_confirmed_interviews (
+        id TEXT PRIMARY KEY,
+        source_event_id TEXT NOT NULL UNIQUE,
+        candidate_name TEXT NOT NULL,
+        recruitment_name TEXT NOT NULL,
+        date TEXT NOT NULL,
+        start_time TEXT NOT NULL,
+        end_time TEXT NOT NULL,
+        linked_case_id TEXT REFERENCES interview_cases(id),
+        first_seen_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS external_confirmed_interviews_schedule
+        ON external_confirmed_interviews(date, start_time, end_time);
 
       CREATE TABLE IF NOT EXISTS room_allocations (
         id TEXT PRIMARY KEY,
@@ -1327,6 +1378,35 @@ export class BridgeDatabase {
         )
         .run();
     }
+
+    const versionNineteen = this.connection
+      .prepare("SELECT version FROM schema_migrations WHERE version = 19")
+      .get() as SqlRow | undefined;
+    if (!versionNineteen) {
+      this.connection.exec(`
+        CREATE TABLE IF NOT EXISTS external_confirmed_interviews (
+          id TEXT PRIMARY KEY,
+          source_event_id TEXT NOT NULL UNIQUE,
+          candidate_name TEXT NOT NULL,
+          recruitment_name TEXT NOT NULL,
+          date TEXT NOT NULL,
+          start_time TEXT NOT NULL,
+          end_time TEXT NOT NULL,
+          linked_case_id TEXT REFERENCES interview_cases(id),
+          first_seen_at TEXT NOT NULL,
+          last_seen_at TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS external_confirmed_interviews_schedule
+          ON external_confirmed_interviews(date, start_time, end_time);
+      `);
+      this.connection
+        .prepare(
+          "INSERT INTO schema_migrations(version, applied_at) VALUES (19, datetime('now'))",
+        )
+        .run();
+    }
   }
 
   transaction<T>(operation: () => T): T {
@@ -1376,12 +1456,16 @@ export class BridgeDatabase {
       failedIntegrationRetries: scalar(
         "SELECT COUNT(*) AS count FROM integration_retry_jobs WHERE status = 'FAILED'",
       ),
+      externalConfirmedInterviews: scalar(
+        "SELECT COUNT(*) AS count FROM external_confirmed_interviews",
+      ),
     };
   }
 
   clearOperationalData(): OperationalDataResetResult {
     return this.transaction(() => {
       const tables = [
+        ["외부 확정 인터뷰", "external_confirmed_interviews"],
         ["인터뷰 결정", "interview_skill_decisions"],
         ["회의실 배정", "room_allocations"],
         ["면접관 가능 일정", "availability_slots"],
@@ -3448,6 +3532,102 @@ export class BridgeDatabase {
       for (const date of syncedDates) markDate.run(date, now);
     });
     return this.listMeetingRoomBlocks(syncedDates, false);
+  }
+
+  syncExternalConfirmedInterviews(
+    events: DaouInterviewCalendarEvent[],
+  ): ExternalConfirmedInterviewRow[] {
+    const seenAt = new Date().toISOString();
+    for (const event of events) {
+      validateDateAndTimeRange(
+        event.date,
+        event.startTime,
+        event.endTime,
+        "External confirmed interview",
+      );
+      if (!event.sourceEventId.trim() || !event.candidateName.trim() || !event.recruitmentName.trim()) {
+        throw new Error("External confirmed interview identifiers, candidate, and recruitment are required.");
+      }
+    }
+    this.transaction(() => {
+      const existing = this.connection.prepare(
+        "SELECT id FROM external_confirmed_interviews WHERE source_event_id = ?",
+      );
+      const insert = this.connection.prepare(`
+        INSERT INTO external_confirmed_interviews(
+          id, source_event_id, candidate_name, recruitment_name,
+          date, start_time, end_time, linked_case_id,
+          first_seen_at, last_seen_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
+      `);
+      const update = this.connection.prepare(`
+        UPDATE external_confirmed_interviews
+        SET candidate_name = ?, recruitment_name = ?, date = ?, start_time = ?, end_time = ?,
+            last_seen_at = ?, updated_at = ?
+        WHERE source_event_id = ?
+      `);
+      for (const event of events) {
+        const current = existing.get(event.sourceEventId) as SqlRow | undefined;
+        if (current) {
+          update.run(
+            event.candidateName,
+            event.recruitmentName,
+            event.date,
+            event.startTime,
+            event.endTime,
+            seenAt,
+            seenAt,
+            event.sourceEventId,
+          );
+        } else {
+          insert.run(
+            randomUUID(),
+            event.sourceEventId,
+            event.candidateName,
+            event.recruitmentName,
+            event.date,
+            event.startTime,
+            event.endTime,
+            seenAt,
+            seenAt,
+            seenAt,
+            seenAt,
+          );
+        }
+      }
+    });
+    return this.listExternalConfirmedInterviews();
+  }
+
+  linkExternalConfirmedInterviewToCase(sourceEventId: string, caseId: string): void {
+    this.connection
+      .prepare(`
+        UPDATE external_confirmed_interviews
+        SET linked_case_id = ?, updated_at = ?
+        WHERE source_event_id = ?
+      `)
+      .run(caseId, new Date().toISOString(), sourceEventId);
+  }
+
+  deleteExternalConfirmedInterviewsBefore(date: string): number {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      throw new Error("A valid cutoff date is required.");
+    }
+    return Number(
+      this.connection
+        .prepare("DELETE FROM external_confirmed_interviews WHERE date < ?")
+        .run(date).changes,
+    );
+  }
+
+  listExternalConfirmedInterviews(limit = 200): ExternalConfirmedInterviewRow[] {
+    return (this.connection
+      .prepare(`
+        SELECT * FROM external_confirmed_interviews
+        ORDER BY date ASC, start_time ASC, candidate_name ASC
+        LIMIT ?
+      `)
+      .all(limit) as SqlRow[]).map(toExternalConfirmedInterview);
   }
 
   listMeetingRoomBlocks(
