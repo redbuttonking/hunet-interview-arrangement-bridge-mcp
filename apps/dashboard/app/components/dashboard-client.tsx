@@ -2,7 +2,7 @@
 // 인터뷰 운영자가 우선순위 업무와 다음 일정을 같은 기준으로 처리하게 한다.
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AlertCircle, ArrowRight, CalendarClock, CheckCircle2, ChevronLeft, ChevronRight, ClipboardList, Clock3, Loader2, RefreshCw, Search, SearchX, TriangleAlert, UsersRound, Wifi } from "lucide-react";
 import { AppHeader, PageHeader } from "./app-shell";
 import { Badge } from "./ui/badge";
@@ -832,6 +832,41 @@ function freshnessStatusInfo(state: "FRESH" | "STALE" | "UNKNOWN" | undefined) {
   return { label: "동기화 기록 없음", className: "text-slate-500", dot: "bg-slate-300" };
 }
 
+function SummaryMetricCard({
+  icon,
+  label,
+  value,
+  description,
+  tone,
+}: {
+  icon: ReactNode;
+  label: string;
+  value: ReactNode;
+  description: string;
+  tone: "amber" | "rose" | "blue";
+}) {
+  const toneClass = {
+    amber: "bg-amber-50 text-amber-700",
+    rose: "bg-rose-50 text-rose-700",
+    blue: "bg-blue-50 text-blue-700",
+  }[tone];
+
+  return (
+    <Card className="h-full">
+      <CardContent className="flex min-h-36 items-start gap-4 p-5">
+        <span className={`grid size-11 shrink-0 place-items-center rounded-xl ${toneClass}`}>{icon}</span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-start justify-between gap-4">
+            <p className="pt-0.5 text-base font-semibold leading-6 text-slate-700">{label}</p>
+            <strong className="shrink-0 text-3xl font-semibold leading-none tracking-tight text-slate-950">{value}</strong>
+          </div>
+          <p className="mt-3 text-sm leading-6 text-slate-500">{description}</p>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 function OperationsReadinessCard() {
   const READINESS_REQUEST_TIMEOUT_MS = 12_000;
   const [data, setData] = useState<OperationalReadinessPayload | null>(null);
@@ -906,11 +941,11 @@ function OperationsReadinessCard() {
 
   return (
     <Card className="mt-6" id="integration-health">
-      <CardHeader className="flex-row items-start justify-between gap-4 border-b border-slate-200">
+      <CardHeader className="flex-row items-start justify-between gap-4 border-b-0 pb-5">
         <div><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">INTEGRATION HEALTH</p><CardTitle className="mt-2">연동 상태와 복구</CardTitle><CardDescription className="mt-2">자동 재시도는 워커가 처리합니다. 한도 초과 작업은 확인 후 다시 대기열에 넣을 수 있으며, 외부 메시지는 즉시 발송되지 않습니다.</CardDescription></div>
         <Badge variant={readinessStatus.variant}>{readinessStatus.label}</Badge>
       </CardHeader>
-      <CardContent className="grid gap-5 p-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto] lg:items-start">
+      <CardContent className="grid gap-5 p-6 pt-0 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto] lg:items-start">
         <div className="rounded-xl border border-slate-200 p-4"><p className="text-sm font-medium text-slate-500">다우오피스 전용 브라우저</p><p className="mt-2 text-lg font-semibold text-slate-950">{daouConnected ? "연결됨" : "로그인 또는 연결 확인 필요"}</p><p className="mt-2 text-sm leading-6 text-slate-600">{daou?.latestMeetingRoomSyncAt ? `마지막 회의실 동기화. ${formatDateTime(String(daou.latestMeetingRoomSyncAt))}` : "회의실을 추천하기 전 해당 후보자 기준으로 동기화합니다."}</p></div>
         <div className="rounded-xl border border-slate-200 p-4">
           <div className="flex flex-wrap items-center justify-between gap-2"><p className="text-sm font-medium text-slate-500">외부 연결 확인</p><Badge variant={data?.readiness.externalChecks.performed ? "success" : "secondary"}>{data?.readiness.externalChecks.performed ? "진단 완료" : "진단 전"}</Badge></div>
@@ -966,40 +1001,40 @@ function ActionRow({ item, onCreateReviewDecision, onCreateCaseDecision, onOpenD
         : "후보자 상세에서 현재 상태를 확인합니다.";
 
   return (
-    <article className="grid gap-5 px-6 py-6 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:px-7">
+    <article className="grid gap-5 px-6 py-6 sm:min-h-[292px] sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:px-7">
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
           <span className={`size-2 rounded-full ${priority.dot}`} />
           <Badge variant={priority.badge}>{priority.label}</Badge>
           <span className="text-sm text-slate-500">{item.category}</span>
           {item.meta ? <span className="text-sm text-slate-500">· {item.meta}</span> : null}
+          {item.relatedItems?.length ? (
+            <details className="relative">
+              <summary className="cursor-pointer list-none rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs font-semibold text-slate-600 transition-colors hover:border-slate-300 hover:bg-slate-100">추가 검토 {item.relatedItems.length}건</summary>
+              <div className="absolute left-0 z-20 mt-2 grid w-[min(30rem,calc(100vw-5rem))] gap-2 rounded-xl border border-slate-200 bg-white p-3 shadow-xl">
+                {item.relatedItems.map((related) => {
+                  const relatedReview = related.review;
+                  const relatedDecision = related.decision;
+                  const relatedActionableReview = Boolean(relatedReview && supportedReviewDecisionTypes.has(relatedReview.reviewType));
+                  return (
+                    <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-slate-50 px-3 py-2" key={related.id}>
+                      <div className="min-w-0"><p className="truncate text-sm font-medium text-slate-800">{related.title}</p><p className="mt-0.5 text-xs text-slate-500">{related.category}</p></div>
+                      {relatedDecision ? <Button aria-label={`${related.candidateName ?? "후보자"} 결정 재개`} onClick={() => onOpenDecision(relatedDecision)} size="sm" title="선택지를 확인한 뒤 적용합니다." variant="decision">결정 계속하기<ArrowRight className="size-3.5" /></Button> : null}
+                      {!relatedDecision && relatedActionableReview && relatedReview ? <Button aria-label={`${related.candidateName ?? "후보자"} 검토 열기`} disabled={loading} onClick={() => onCreateReviewDecision(relatedReview)} size="sm" title="검토 내용을 열어 처리 방법을 선택합니다." variant="outline">검토하기<ArrowRight className="size-3.5" /></Button> : null}
+                      {!relatedDecision && !relatedActionableReview && related.caseSkillKey && related.caseId ? <Button aria-label={`${related.candidateName ?? "후보자"} 다음 단계 선택`} disabled={loading} onClick={() => onCreateCaseDecision(related.caseId!, related.caseSkillKey!)} size="sm" title="다음 단계와 실행 범위를 확인합니다.">결정하기<ArrowRight className="size-3.5" /></Button> : null}
+                      {!relatedDecision && !relatedActionableReview && !related.caseSkillKey && related.href ? <Button asChild aria-label={`${related.candidateName ?? "후보자"} 상세 확인`} size="sm" title="후보자 상세에서 현재 상태를 확인합니다." variant="outline"><Link href={related.href}>상세 보기<ArrowRight className="size-3.5" /></Link></Button> : null}
+                    </div>
+                  );
+                })}
+              </div>
+            </details>
+          ) : null}
         </div>
         <h3 className="mt-3 text-xl font-semibold tracking-[-0.025em] text-slate-950">{item.candidateName ?? "후보자 확인 필요"}</h3>
         <p className="mt-1 text-base text-slate-600">{item.recruitmentName ?? "채용 정보 확인 필요"}</p>
         <div className="mt-4 border-y border-slate-100 py-4"><ActionJourney compact currentIndex={item.journeyIndex} /></div>
         <p className="mt-4 text-base font-medium leading-6 text-slate-800">{item.title}</p>
         <p className="mt-1 text-sm leading-6 text-slate-600">{item.description}</p>
-        {item.relatedItems?.length ? (
-          <details className="mt-4 rounded-lg border border-slate-200 bg-slate-50/70 px-3 py-2">
-            <summary className="cursor-pointer list-none text-sm font-semibold text-slate-700">추가 검토 {item.relatedItems.length}건</summary>
-            <div className="mt-2 grid gap-2 border-t border-slate-200 pt-2">
-              {item.relatedItems.map((related) => {
-                const relatedReview = related.review;
-                const relatedDecision = related.decision;
-                const relatedActionableReview = Boolean(relatedReview && supportedReviewDecisionTypes.has(relatedReview.reviewType));
-                return (
-                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-white px-3 py-2" key={related.id}>
-                    <div className="min-w-0"><p className="truncate text-sm font-medium text-slate-800">{related.title}</p><p className="mt-0.5 text-xs text-slate-500">{related.category}</p></div>
-                    {relatedDecision ? <Button aria-label={`${related.candidateName ?? "후보자"} 결정 재개`} onClick={() => onOpenDecision(relatedDecision)} size="sm" title="선택지를 확인한 뒤 적용합니다." variant="decision">결정 계속하기<ArrowRight className="size-3.5" /></Button> : null}
-                    {!relatedDecision && relatedActionableReview && relatedReview ? <Button aria-label={`${related.candidateName ?? "후보자"} 검토 열기`} disabled={loading} onClick={() => onCreateReviewDecision(relatedReview)} size="sm" title="검토 내용을 열어 처리 방법을 선택합니다." variant="outline">검토하기<ArrowRight className="size-3.5" /></Button> : null}
-                    {!relatedDecision && !relatedActionableReview && related.caseSkillKey && related.caseId ? <Button aria-label={`${related.candidateName ?? "후보자"} 다음 단계 선택`} disabled={loading} onClick={() => onCreateCaseDecision(related.caseId!, related.caseSkillKey!)} size="sm" title="다음 단계와 실행 범위를 확인합니다.">결정하기<ArrowRight className="size-3.5" /></Button> : null}
-                    {!relatedDecision && !relatedActionableReview && !related.caseSkillKey && related.href ? <Button asChild aria-label={`${related.candidateName ?? "후보자"} 상세 확인`} size="sm" title="후보자 상세에서 현재 상태를 확인합니다." variant="outline"><Link href={related.href}>상세 보기<ArrowRight className="size-3.5" /></Link></Button> : null}
-                  </div>
-                );
-              })}
-            </div>
-          </details>
-        ) : null}
       </div>
       <div className="flex shrink-0 flex-col items-stretch gap-2 sm:items-end">
         <span className={`text-xs font-semibold ${directDecision ? "text-indigo-700" : actionableReview ? "text-slate-600" : item.caseSkillKey ? "text-blue-700" : "text-slate-500"}`}>{actionKind}</span>
@@ -1065,7 +1100,6 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
   const [error, setError] = useState<string | null>(null);
   const [queueTab, setQueueTab] = useState<"ACTION" | "WAITING" | "EXCEPTION" | "ALL">("ACTION");
   const [query, setQuery] = useState("");
-  const [pageSize, setPageSize] = useState(5);
   const [page, setPage] = useState(1);
   const [hydrated, setHydrated] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -1279,6 +1313,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
       return haystack.includes(normalizedQuery);
     });
   }, [actionItems, query, queueTab]);
+  const pageSize = 5;
   const pageCount = Math.max(1, Math.ceil(filteredActionItems.length / pageSize));
   const pageNumbers = useMemo(() => paginationPages(page, pageCount), [page, pageCount]);
   const visibleActionItems = useMemo(() => filteredActionItems.slice((page - 1) * pageSize, page * pageSize), [filteredActionItems, page, pageSize]);
@@ -1287,7 +1322,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
   }, [page, pageCount]);
   useEffect(() => {
     setPage(1);
-  }, [pageSize, query, queueTab]);
+  }, [query, queueTab]);
   useEffect(() => {
     setPage((current) => Math.min(current, pageCount));
   }, [pageCount]);
@@ -1366,9 +1401,8 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
 
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
           <Card aria-busy={refreshing} className="overflow-hidden">
-            <CardHeader className="flex-row items-start justify-between gap-4 border-b border-slate-200 p-6 sm:p-7">
+            <CardHeader className="border-b border-slate-200 p-6 sm:p-7">
               <div><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">PRIORITY QUEUE</p><CardTitle className="mt-2 flex items-center gap-2 text-2xl">인터뷰 운영 큐 <Badge>{filteredActionItems.length}</Badge></CardTitle><CardDescription className="mt-2">한 화면에서는 지금 확인할 후보자만 보여주고, 나머지는 페이지로 나눠 관리합니다.</CardDescription></div>
-              <div className="flex shrink-0 items-center gap-2"><label className="sr-only" htmlFor="action-page-size">페이지 표시 수</label><select aria-label="페이지 표시 수" className="h-10 rounded-lg border border-slate-200 bg-white px-2 text-sm font-medium text-slate-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" id="action-page-size" onChange={(event) => { setPageSize(Number(event.target.value)); setPage(1); }} value={pageSize}><option value="5">5건</option><option value="10">10건</option><option value="25">25건</option><option value="50">50건</option></select></div>
             </CardHeader>
             <div className="border-b border-slate-200 px-6 py-4 sm:px-7">
               <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -1385,7 +1419,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
                 <p className="mt-2 text-base text-slate-600">{query.trim() ? "후보자 이름이나 채용명을 다르게 검색해 보세요." : queueTab === "ACTION" ? "새로운 평가 완료나 회신이 들어오면 이곳에 표시됩니다." : "다른 큐를 선택하거나 새로고침해 보세요."}</p>
               </div></CardContent>
             ) : <>
-              <div className="divide-y divide-slate-200">{visibleActionItems.map((item) => <ActionRow key={item.id} item={item} loading={loadingId === item.id} onCreateCaseDecision={createCaseDecision} onCreateReviewDecision={createReviewDecision} onOpenDecision={(decision) => setActiveDecision({ decision, dismissOnClose: false })} />)}</div>
+              <div className="divide-y divide-slate-200 sm:min-h-[1460px]">{visibleActionItems.map((item) => <ActionRow key={item.id} item={item} loading={loadingId === item.id} onCreateCaseDecision={createCaseDecision} onCreateReviewDecision={createReviewDecision} onOpenDecision={(decision) => setActiveDecision({ decision, dismissOnClose: false })} />)}</div>
               <div className="flex flex-col gap-3 border-t border-slate-200 px-6 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-7"><p className="text-sm text-slate-500">전체 {filteredActionItems.length}건 중 {Math.min((page - 1) * pageSize + 1, filteredActionItems.length)}–{Math.min(page * pageSize, filteredActionItems.length)}건</p><nav aria-label="인터뷰 운영 큐 페이지" className="flex items-center justify-end gap-1"><Button aria-label="이전 페이지 묶음" disabled={pageNumbers[0] === undefined || pageNumbers[0] <= 1} onClick={() => setPage((pageNumbers[0] ?? 1) - 5)} size="icon-sm" title="이전 5페이지" variant="outline"><ChevronLeft className="size-4" /></Button>{pageNumbers.map((pageNumber) => <Button aria-current={pageNumber === page ? "page" : undefined} aria-label={`${pageNumber}페이지`} className={pageNumber === page ? "ring-2 ring-blue-200" : undefined} key={pageNumber} onClick={() => setPage(pageNumber)} size="sm" variant={pageNumber === page ? "secondary" : "outline"}>{pageNumber}</Button>)}<Button aria-label="다음 페이지 묶음" disabled={(pageNumbers[pageNumbers.length - 1] ?? pageCount) >= pageCount} onClick={() => setPage(Math.min(pageCount, (pageNumbers[0] ?? 1) + 5))} size="icon-sm" title="다음 5페이지" variant="outline"><ChevronRight className="size-4" /></Button></nav></div>
             </>}
           </Card>
@@ -1418,9 +1452,9 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
         </div>
 
         <section className="mt-8 grid gap-4 md:grid-cols-3" aria-label="운영 상태">
-          <Card className="min-h-32"><CardContent className="flex min-h-32 items-start gap-4 p-5"><span className="grid size-10 shrink-0 place-items-center rounded-lg bg-amber-50 text-amber-700"><UsersRound className="size-5" /></span><div><p className="text-sm font-medium text-slate-600">면접관 일정 회신 대기</p><p className="mt-1 text-2xl font-semibold tracking-tight">{summary.pendingRequiredInterviewerResponses}</p><p className="mt-1 text-sm leading-5 text-slate-500">필수 면접관 중 아직 가능 일정을 제출하지 않은 인원입니다.</p></div></CardContent></Card>
-          <Card className="min-h-32"><CardContent className="flex min-h-32 items-start gap-4 p-5"><span className="grid size-10 shrink-0 place-items-center rounded-lg bg-rose-50 text-rose-700"><Wifi className="size-5" /></span><div><p className="text-sm font-medium text-slate-600">연동 오류 확인</p><p className="mt-1 text-2xl font-semibold tracking-tight">{summary.pendingIntegrationRetries + summary.failedIntegrationRetries}</p><p className="mt-1 text-sm leading-5 text-slate-500">Slack·나인하이어 동기화에 실패해 다시 확인이 필요한 작업입니다.</p></div></CardContent></Card>
-          <Card className="min-h-32"><CardContent className="flex min-h-32 items-start gap-4 p-5"><span className="grid size-10 shrink-0 place-items-center rounded-lg bg-blue-50 text-blue-700"><ClipboardList className="size-5" /></span><div><p className="text-sm font-medium text-slate-600">대시보드 확인 시각</p><p className="mt-1 text-2xl font-semibold tracking-tight">{hydrated ? formatGeneratedAt(data.dashboard.generatedAt) : "초기 로드"}</p><p className="mt-1 text-sm leading-5 text-slate-500">이 화면의 데이터를 마지막으로 불러온 시각입니다. 외부 시스템의 정상 처리 시각은 위 확인 상태에서 봅니다.</p></div></CardContent></Card>
+          <SummaryMetricCard description="필수 면접관 중 아직 가능 일정을 제출하지 않은 인원 수입니다." icon={<UsersRound className="size-5" />} label="면접관 일정 회신 대기" tone="amber" value={summary.pendingRequiredInterviewerResponses} />
+          <SummaryMetricCard description="Slack 또는 나인하이어 연동에서 다시 확인이 필요한 작업 수입니다." icon={<Wifi className="size-5" />} label="연동 오류 확인" tone="rose" value={summary.pendingIntegrationRetries + summary.failedIntegrationRetries} />
+          <SummaryMetricCard description="이 대시보드의 정보를 마지막으로 불러온 시각입니다." icon={<ClipboardList className="size-5" />} label="화면 정보 갱신 시각" tone="blue" value={hydrated ? formatGeneratedAt(data.dashboard.generatedAt) : "초기 로드"} />
         </section>
         <section className="mt-6" aria-label="데이터 신선도">
           <Card>

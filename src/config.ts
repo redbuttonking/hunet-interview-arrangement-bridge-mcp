@@ -11,7 +11,7 @@ export interface AppConfig {
     calendarUrl?: string;
     browserProfileDir: string;
     remoteDebugPort: number;
-    edgeExecutablePath: string;
+    chromeExecutablePath: string;
   };
   slack: {
     appToken?: string;
@@ -75,12 +75,12 @@ export function getConfig(): AppConfig {
       url: optional("DAOU_OFFICE_URL") ?? "https://hug.hunet.co.kr/app/asset",
       calendarUrl: optional("DAOU_OFFICE_CALENDAR_URL") ?? "https://hug.hunet.co.kr/app/calendar",
       browserProfileDir: resolve(
-        optional("DAOU_BROWSER_PROFILE_DIR") ?? "./data/daou-office-profile",
+        optional("DAOU_CHROME_PROFILE_DIR") ?? "./data/daou-office-chrome-profile",
       ),
       remoteDebugPort: port("DAOU_BROWSER_REMOTE_DEBUG_PORT", 9222),
-      edgeExecutablePath:
-        optional("DAOU_EDGE_EXECUTABLE_PATH") ??
-        "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
+      chromeExecutablePath:
+        optional("DAOU_CHROME_EXECUTABLE_PATH") ??
+        "C:/Program Files/Google/Chrome/Application/chrome.exe",
     },
     slack: {
       appToken: optional("SLACK_APP_TOKEN"),

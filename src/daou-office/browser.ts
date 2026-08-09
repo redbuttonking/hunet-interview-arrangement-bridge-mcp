@@ -1,4 +1,4 @@
-// 다우오피스 전용 Edge 프로필을 열고 로컬 디버그 연결 상태를 확인한다.
+// 다우오피스 전용 Chrome 프로필을 열고 로컬 디버그 연결 상태를 확인한다.
 import { existsSync, mkdirSync } from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import type { AppConfig } from "../config.js";
@@ -13,7 +13,7 @@ export function daouOfficeDebugUrl(port: number): string {
   return `http://127.0.0.1:${port}`;
 }
 
-export function edgeLaunchArguments(config: AppConfig["daouOffice"]): string[] {
+export function chromeLaunchArguments(config: AppConfig["daouOffice"]): string[] {
   return [
     `--remote-debugging-address=127.0.0.1`,
     `--remote-debugging-port=${config.remoteDebugPort}`,
@@ -61,9 +61,9 @@ export class DaouOfficeBrowserController {
         url: this.config.url,
       };
     }
-    if (!existsSync(this.config.edgeExecutablePath)) {
+    if (!existsSync(this.config.chromeExecutablePath)) {
       throw new Error(
-        `Microsoft Edge executable was not found: ${this.config.edgeExecutablePath}`,
+        `Google Chrome executable was not found: ${this.config.chromeExecutablePath}`,
       );
     }
     mkdirSync(this.config.browserProfileDir, { recursive: true });
@@ -77,7 +77,7 @@ export class DaouOfficeBrowserController {
   }
 
   private launch(): ChildProcess {
-    return spawn(this.config.edgeExecutablePath, edgeLaunchArguments(this.config), {
+    return spawn(this.config.chromeExecutablePath, chromeLaunchArguments(this.config), {
       detached: true,
       stdio: "ignore",
       windowsHide: false,

@@ -16,7 +16,7 @@ const config: AppConfig = {
     url: "https://hug.hunet.co.kr/app/asset",
     browserProfileDir: "C:/temp/daou-profile",
     remoteDebugPort: 9222,
-    edgeExecutablePath: "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
+    chromeExecutablePath: "C:/Program Files/Google/Chrome/Application/chrome.exe",
   },
   slack: {},
   ninehire: { url: "https://example.invalid/mcp", authHeader: "Authorization", authScheme: "Bearer", timeoutMs: 30_000 },

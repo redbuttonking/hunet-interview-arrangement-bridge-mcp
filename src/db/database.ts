@@ -168,6 +168,11 @@ export interface IntegrationRetryRequeueResult {
   queued: boolean;
 }
 
+export interface OperationalDataResetResult {
+  deleted: Record<string, number>;
+  retainedSlackCursorCount: number;
+}
+
 export interface StoredSlackNotificationRow {
   id: string;
   eventType: string;
@@ -1372,6 +1377,43 @@ export class BridgeDatabase {
         "SELECT COUNT(*) AS count FROM integration_retry_jobs WHERE status = 'FAILED'",
       ),
     };
+  }
+
+  clearOperationalData(): OperationalDataResetResult {
+    return this.transaction(() => {
+      const tables = [
+        ["인터뷰 결정", "interview_skill_decisions"],
+        ["회의실 배정", "room_allocations"],
+        ["면접관 가능 일정", "availability_slots"],
+        ["면접관 리마인드", "reminders"],
+        ["Slack 메시지 초안", "message_drafts"],
+        ["취소 후속 작업", "cancellation_external_follow_ups"],
+        ["후보자별 인터뷰 계획", "case_interview_plans"],
+        ["후보자 업무 이력", "case_events"],
+        ["검토 대기", "workflow_reviews"],
+        ["후보자별 면접관", "case_interviewers"],
+        ["인터뷰 조율 건", "interview_cases"],
+        ["Slack 원본 알림", "slack_notifications"],
+        ["연동 재시도 작업", "integration_retry_jobs"],
+        ["회의실 예약 블록", "meeting_room_blocks"],
+        ["회의실 동기화 일자", "meeting_room_sync_dates"],
+      ] as const;
+      const deleted: Record<string, number> = {};
+      for (const [label, table] of tables) {
+        const result = this.connection.prepare(`DELETE FROM ${table}`).run();
+        deleted[label] = Number(result.changes);
+      }
+      const cursorResult = this.connection
+        .prepare("DELETE FROM sync_cursors WHERE cursor_key NOT LIKE 'slack:%:latest_ts'")
+        .run();
+      deleted["동기화 성공 시각"] = Number(cursorResult.changes);
+      const retainedSlackCursorCount = Number(
+        (this.connection
+          .prepare("SELECT COUNT(*) AS count FROM sync_cursors WHERE cursor_key LIKE 'slack:%:latest_ts'")
+          .get() as SqlRow).count,
+      );
+      return { deleted, retainedSlackCursorCount };
+    });
   }
 
   getWorkerHealth(workerKey: string): WorkerHealthRow | undefined {

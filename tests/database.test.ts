@@ -12,6 +12,75 @@ describe("BridgeDatabase", () => {
     expect(db.getLatestSchemaVersion()).toBe(18);
   });
 
+  it("clears candidate and room operation data while retaining Slack read positions and setup", () => {
+    db = new BridgeDatabase(":memory:");
+    const notification = db.insertNotification({
+      channelId: "C1",
+      messageTs: "1.0",
+      eventType: "EVALUATION_COMPLETED",
+      title: "평가 완료",
+      candidateName: "테스트 후보자",
+      recruitmentName: "테스트 채용",
+      payloadHash: "notification-hash",
+      payloadJson: "{}",
+    }, "PROCESSED");
+    const interviewCase = db.createInterviewCase({
+      notificationId: notification.id,
+      candidateName: "테스트 후보자",
+      recruitmentName: "테스트 채용",
+      proposalDates: ["2026-08-10"],
+    });
+    db.addOrUpdateInterviewer({
+      caseId: interviewCase.id,
+      displayName: "면접관",
+      source: "MANUAL",
+    });
+    db.createReview({
+      caseId: interviewCase.id,
+      reviewType: "INTERVIEW_ARRANGEMENT_START_REQUIRED",
+      reason: "테스트 검토",
+    });
+    db.syncMeetingRoomBlocks(["2026-08-10"], [{
+      sourceKey: "DAOU:reset-test",
+      roomId: "R1",
+      roomName: "행복룸",
+      reservedBy: "담당자",
+      purpose: "면접",
+      date: "2026-08-10",
+      startTime: "10:00",
+      endTime: "13:00",
+      sourcePayloadHash: "room-hash",
+    }]);
+    db.setCursor("slack:C1:latest_ts", "1.0");
+    db.setCursor("sync:slack:last_success", "2026-08-10T00:00:00.000Z");
+    db.connection.prepare(`
+      INSERT INTO identity_mappings(id, ninehire_user_id, slack_user_id, created_at, updated_at)
+      VALUES ('identity-1', 'N1', 'U1', '2026-08-10T00:00:00.000Z', '2026-08-10T00:00:00.000Z')
+    `).run();
+    db.connection.prepare(`
+      INSERT INTO recruitment_interview_templates(
+        recruitment_id, recruitment_name, pipeline_hash, steps_json, routes_json, approved_at, updated_at
+      ) VALUES ('R1', '테스트 채용', 'hash', '[]', '[]', '2026-08-10T00:00:00.000Z', '2026-08-10T00:00:00.000Z')
+    `).run();
+
+    const result = db.clearOperationalData();
+
+    expect(result.deleted["인터뷰 조율 건"]).toBe(1);
+    expect(result.deleted["회의실 예약 블록"]).toBe(1);
+    expect(result.deleted["Slack 원본 알림"]).toBe(1);
+    expect(result.retainedSlackCursorCount).toBe(1);
+    expect(db.getStatus()).toMatchObject({
+      notifications: 0,
+      openReviews: 0,
+      activeCases: 0,
+      activeMeetingRoomBlocks: 0,
+    });
+    expect(db.getCursor("slack:C1:latest_ts")).toBe("1.0");
+    expect(db.getCursor("sync:slack:last_success")).toBeUndefined();
+    expect(Number((db.connection.prepare("SELECT COUNT(*) AS count FROM identity_mappings").get() as { count: number }).count)).toBe(1);
+    expect(Number((db.connection.prepare("SELECT COUNT(*) AS count FROM recruitment_interview_templates").get() as { count: number }).count)).toBe(1);
+  });
+
   it("prevents a second worker from acquiring an active processing lease", () => {
     db = new BridgeDatabase(":memory:");
     const startedAt = new Date("2026-08-09T00:00:00.000Z");

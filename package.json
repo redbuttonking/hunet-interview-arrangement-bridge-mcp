@@ -13,6 +13,7 @@
     "dev:worker": "tsx src/worker/main.ts",
     "dev:dashboard": "npm run build && next dev apps/dashboard --hostname 127.0.0.1 --port 3100",
     "backup:db": "tsx src/cli/backup-database.ts",
+    "reset:operational-data": "tsx src/cli/reset-operational-data.ts",
     "inspect:ninehire": "tsx src/cli/inspect-ninehire.ts",
     "inspect:slack-source": "tsx src/cli/inspect-slack-source.ts",
     "daou:login": "tsx src/cli/open-daou-office.ts",

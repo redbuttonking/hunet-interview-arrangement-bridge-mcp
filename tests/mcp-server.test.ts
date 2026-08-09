@@ -20,7 +20,7 @@ describe("bridge MCP server", () => {
         url: "https://hug.hunet.co.kr/app/asset",
         browserProfileDir: "C:/temp/daou-profile",
         remoteDebugPort: 9222,
-        edgeExecutablePath:
+        chromeExecutablePath:
           "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
       },
       slack: {},
