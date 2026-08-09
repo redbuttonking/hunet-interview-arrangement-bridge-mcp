@@ -853,13 +853,15 @@ function SummaryMetricCard({
 
   return (
     <Card className="h-full">
-      <CardContent className="min-h-44 p-6 pt-6 sm:p-7 sm:pt-7">
-        <div className="flex items-center gap-4">
-          <span className={`grid size-11 shrink-0 place-items-center rounded-xl ${toneClass}`}>{icon}</span>
-          <p className="text-base font-semibold leading-6 text-slate-700">{label}</p>
+      <CardContent className="min-h-32 p-5 pt-5 sm:p-6 sm:pt-6">
+        <div className="flex items-center gap-3">
+          <span className={`grid size-10 shrink-0 place-items-center rounded-xl ${toneClass}`}>{icon}</span>
+          <div className="flex min-w-0 flex-1 items-center justify-between gap-3">
+            <p className="text-base font-semibold leading-6 text-slate-700">{label}</p>
+            <strong className="shrink-0 text-2xl font-semibold leading-none tracking-tight text-slate-950">{value}</strong>
+          </div>
         </div>
-        <strong className="mt-5 block text-3xl font-semibold leading-none tracking-tight text-slate-950">{value}</strong>
-        <p className="mt-3 text-sm leading-6 text-slate-500">{description}</p>
+        <p className="mt-3 ml-[3.25rem] text-sm leading-6 text-slate-500">{description}</p>
       </CardContent>
     </Card>
   );
