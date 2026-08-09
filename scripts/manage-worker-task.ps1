@@ -25,6 +25,18 @@ function Assert-BuiltWorker {
     }
 }
 
+function Get-WorkerProcessCount {
+    @(
+        Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.CommandLine -and (
+                    $_.CommandLine -like "*$WorkerEntryPoint*" -or
+                    $_.CommandLine -like "*src\worker\main.ts*"
+                )
+            }
+    ).Count
+}
+
 switch ($Action) {
     "Install" {
         Assert-BuiltWorker
@@ -90,6 +102,7 @@ switch ($Action) {
             LastRunTime = $info.LastRunTime
             LastTaskResult = $info.LastTaskResult
             NextRunTime = $info.NextRunTime
+            WorkerProcessCount = Get-WorkerProcessCount
         }
         break
     }

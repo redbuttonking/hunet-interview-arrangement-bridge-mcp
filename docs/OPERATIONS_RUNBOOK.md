@@ -42,6 +42,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\manage-worker-task
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\manage-worker-task.ps1 -Action Status
 ```
 
+워커와 별개로 SQLite 백업도 작업 스케줄러에 등록합니다. 매일 오전 3시 15분과 Windows 로그인 직후에 실행되며, 같은 날짜에는 한 번만 백업합니다. PC가 꺼져 있어 정해진 시각을 놓쳐도 다음 로그인 때 백업합니다.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\manage-backup-task.ps1 -Action Install
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\manage-backup-task.ps1 -Action Status
+```
+
 운영 중에는 다음으로 재시작하거나 중지합니다.
 
 ```powershell
@@ -58,6 +65,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\manage-worker-task
 
 `Status`의 작업 스케줄러 상태만으로 정상 여부를 판단하지 않습니다. 대시보드 또는 `bridge_status`에서 heartbeat, 마지막 성공 주기, 실패 재시도 대기열을 함께 확인해야 합니다.
 
+`WorkerProcessCount`가 `2` 이상이면 작업 스케줄러 워커와 별도 `npm run start:worker` 또는 개발 워커가 동시에 실행 중일 수 있습니다. 외부 Slack 수신과 리마인더 처리가 중복될 위험이 있으므로, 운영에서는 작업 스케줄러 작업 하나만 남기고 별도 워커를 종료한 뒤 다시 상태를 확인합니다.
+
 ## 워커 장애 복구
 
 1. `Status`와 대시보드의 워커 상태에서 마지막 heartbeat와 마지막 성공 동기화 시각을 확인합니다.
@@ -73,6 +82,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\manage-worker-task
 6. 실패 재시도 작업이 남아 있으면 원인과 대상을 확인합니다. 복구가 가능하다고 판단한 작업만 `retry_integration_job` 또는 대시보드의 `재시도 승인`으로 다음 워커 주기에 다시 넣습니다. 이 작업은 외부 메시지를 즉시 발송하지 않습니다.
 
 DB를 복구할 때는 실행 중인 워커를 먼저 중지하고 백업 파일을 별도 복구 폴더에 복사해 내용을 검증합니다. 검증하지 않은 백업으로 `data/bridge.db`를 덮어쓰지 않습니다.
+
+실제 DB 교체는 되돌리기 어려운 작업이므로 자동화하지 않습니다. 복구가 필요하면 다음 순서로 담당자가 직접 처리합니다.
+
+1. `manage-worker-task.ps1 -Action Stop`으로 워커를 중지합니다.
+2. 현재 `data/bridge.db`를 날짜가 포함된 별도 보관 폴더에 복사합니다.
+3. 선택한 `data/backups/bridge-YYYY-MM-DD.db`를 임시 위치에서 열어 후보자·일정 수가 기대와 맞는지 확인합니다.
+4. 검증이 끝난 경우에만 해당 백업을 `data/bridge.db`로 복사하고, 워커를 `Start`합니다.
+5. `bridge_status`에서 워커 heartbeat와 최근 동기화 시각을 확인합니다.
 
 ## 대시보드와 MCP 실행
 

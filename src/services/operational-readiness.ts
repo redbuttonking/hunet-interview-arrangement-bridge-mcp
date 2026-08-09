@@ -31,7 +31,15 @@ function workerStatus(
   health: ReturnType<BridgeDatabase["getWorkerHealth"]>,
 ): "RUNNING" | "STALE" | "DEGRADED" | "UNKNOWN" {
   if (!health) return "UNKNOWN";
-  if (Date.now() - Date.parse(health.lastHeartbeatAt) > WORKER_DOWNTIME_THRESHOLD_MS) {
+  const heartbeatTimestamp = Date.parse(health.lastHeartbeatAt);
+  if (Number.isNaN(heartbeatTimestamp)) return "UNKNOWN";
+  const leaseTimestamp = health.leaseExpiresAt
+    ? Date.parse(health.leaseExpiresAt)
+    : Number.NaN;
+  if (
+    (!Number.isNaN(leaseTimestamp) && leaseTimestamp <= Date.now()) ||
+    Date.now() - heartbeatTimestamp > WORKER_DOWNTIME_THRESHOLD_MS
+  ) {
     return "STALE";
   }
   return health.lastErrorMessage ? "DEGRADED" : "RUNNING";
@@ -81,6 +89,7 @@ export class OperationalReadinessService {
         status: currentWorkerStatus,
         lastStartedAt: health?.lastStartedAt ?? null,
         lastHeartbeatAt: health?.lastHeartbeatAt ?? null,
+        leaseExpiresAt: health?.leaseExpiresAt ?? null,
         lastSuccessfulCycleAt: health?.lastSuccessfulCycleAt ?? null,
         lastErrorMessage: health?.lastErrorMessage ?? null,
       },

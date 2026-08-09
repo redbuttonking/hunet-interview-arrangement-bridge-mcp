@@ -2,8 +2,9 @@
 // 다우오피스 회의실 예약과 인터뷰 배정을 같은 시간축에서 확인한다.
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
-import { CalendarDays, ChevronLeft, ChevronRight, Clock3, RefreshCw, UsersRound } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { useEffect, useMemo, useState, useTransition } from "react";
+import { CalendarDays, ChevronLeft, ChevronRight, Clock3, Loader2, RefreshCw, UsersRound } from "lucide-react";
 import { AppHeader, PageHeader } from "./app-shell";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
@@ -163,6 +164,8 @@ function RoomCalendarRow({
 }
 
 export function RoomsClient({ data }: { data: DashboardSnapshot }) {
+  const router = useRouter();
+  const [isRefreshing, startRefresh] = useTransition();
   const dates = useMemo(() => [...new Set([
     ...data.meetingRoomBlocks.map((block) => block.date),
     ...data.dashboard.cases.flatMap((interviewCase) => [
@@ -228,12 +231,18 @@ export function RoomsClient({ data }: { data: DashboardSnapshot }) {
   });
   const freshness = freshnessCopy(data.dashboard.summary.freshness.daouOffice);
   const hasRoomData = roomNames.length > 0;
+  const refreshCalendar = () => startRefresh(() => router.refresh());
 
   return (
     <div className="min-h-screen bg-slate-50">
       <AppHeader active="rooms" />
       <main className="mx-auto max-w-[1440px] px-4 pb-12 sm:px-8" id="main-content">
-        <PageHeader eyebrow="ROOM CALENDAR" title="회의실 캘린더" description="다우오피스에 확보된 회의실 시간과 실제 인터뷰 배정을 같은 시간축에서 확인합니다." />
+        <PageHeader
+          actions={<Button disabled={isRefreshing} onClick={refreshCalendar} variant="outline">{isRefreshing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}{isRefreshing ? "갱신 중" : "화면 새로고침"}</Button>}
+          eyebrow="ROOM CALENDAR"
+          title="회의실 캘린더"
+          description="다우오피스에 확보된 회의실 시간과 실제 인터뷰 배정을 같은 시간축에서 확인합니다. 새로고침은 로컬에 마지막으로 동기화된 정보를 다시 읽습니다."
+        />
 
         <Card className="overflow-hidden">
           <CardHeader className="gap-5 border-b border-slate-200 p-5 sm:p-6">

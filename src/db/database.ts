@@ -130,6 +130,13 @@ export interface WorkerHealthRow {
   lastErrorMessage: string | null;
   lastDowntimeStartedAt: string | null;
   lastDowntimeDetectedAt: string | null;
+  leaseExpiresAt: string | null;
+}
+
+export interface WorkerLeaseResult {
+  acquired: boolean;
+  health: WorkerHealthRow;
+  downtime?: WorkerDowntime;
 }
 
 export interface WorkerDowntime {
@@ -290,8 +297,11 @@ function asString(value: unknown): string {
 function safeErrorSummary(value: string): string {
   return value
     .split(/\r?\n/u, 1)[0]!
-    .replace(/\b(?:xox[abpr]-)[A-Za-z0-9-]+/gu, "[REDACTED_SLACK_TOKEN]")
+    .replace(/\b(?:xox[a-z]-|xapp-)[A-Za-z0-9-]+/giu, "[REDACTED_SLACK_TOKEN]")
     .replace(/\b(?:api[-_ ]?key|authorization|token|secret)\s*[:=]\s*\S+/giu, "[REDACTED_SECRET]")
+    .replace(/([?&](?:api[-_]?key|access[_-]?token|token|secret|authorization)=)[^&\s]+/giu, "$1[REDACTED]")
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/giu, "[REDACTED_EMAIL]")
+    .replace(/\b(?:\+82[-\s]?)?0?1[016789][-\s]?\d{3,4}[-\s]?\d{4}\b/gu, "[REDACTED_PHONE]")
     .slice(0, 500);
 }
 
@@ -435,6 +445,7 @@ function toWorkerHealth(row: SqlRow): WorkerHealthRow {
     lastErrorMessage: nullableString(row.last_error_message),
     lastDowntimeStartedAt: nullableString(row.last_downtime_started_at),
     lastDowntimeDetectedAt: nullableString(row.last_downtime_detected_at),
+    leaseExpiresAt: nullableString(row.lease_expires_at),
   };
 }
 
@@ -743,6 +754,7 @@ export class BridgeDatabase {
         reminder_number INTEGER NOT NULL,
         due_at TEXT NOT NULL,
         sent_at TEXT,
+        sending_started_at TEXT,
         UNIQUE(case_id, interviewer_id, reminder_number)
       );
 
@@ -798,7 +810,9 @@ export class BridgeDatabase {
         last_successful_cycle_at TEXT,
         last_error_message TEXT,
         last_downtime_started_at TEXT,
-        last_downtime_detected_at TEXT
+        last_downtime_detected_at TEXT,
+        worker_owner_token TEXT,
+        lease_expires_at TEXT
       );
 
       CREATE TABLE IF NOT EXISTS integration_retry_jobs (
@@ -1266,6 +1280,48 @@ export class BridgeDatabase {
         )
         .run();
     }
+
+    const versionSeventeen = this.connection
+      .prepare("SELECT version FROM schema_migrations WHERE version = 17")
+      .get() as SqlRow | undefined;
+    if (!versionSeventeen) {
+      const workerColumns = this.connection
+        .prepare("PRAGMA table_info(worker_runtime_health)")
+        .all() as SqlRow[];
+      const existingColumns = new Set(workerColumns.map((column) => asString(column.name)));
+      if (!existingColumns.has("worker_owner_token")) {
+        this.connection.exec(
+          "ALTER TABLE worker_runtime_health ADD COLUMN worker_owner_token TEXT",
+        );
+      }
+      if (!existingColumns.has("lease_expires_at")) {
+        this.connection.exec(
+          "ALTER TABLE worker_runtime_health ADD COLUMN lease_expires_at TEXT",
+        );
+      }
+      this.connection
+        .prepare(
+          "INSERT INTO schema_migrations(version, applied_at) VALUES (17, datetime('now'))",
+        )
+        .run();
+    }
+
+    const versionEighteen = this.connection
+      .prepare("SELECT version FROM schema_migrations WHERE version = 18")
+      .get() as SqlRow | undefined;
+    if (!versionEighteen) {
+      const reminderColumns = this.connection
+        .prepare("PRAGMA table_info(reminders)")
+        .all() as SqlRow[];
+      if (!reminderColumns.some((column) => asString(column.name) === "sending_started_at")) {
+        this.connection.exec("ALTER TABLE reminders ADD COLUMN sending_started_at TEXT");
+      }
+      this.connection
+        .prepare(
+          "INSERT INTO schema_migrations(version, applied_at) VALUES (18, datetime('now'))",
+        )
+        .run();
+    }
   }
 
   transaction<T>(operation: () => T): T {
@@ -1375,38 +1431,180 @@ export class BridgeDatabase {
     return { health: this.getWorkerHealth(input.workerKey)!, downtime };
   }
 
-  recordWorkerHeartbeat(workerKey: string, now = new Date()): void {
+  acquireWorkerLease(input: {
+    workerKey: string;
+    ownerToken: string;
+    leaseDurationMs: number;
+    now?: Date;
+    downtimeThresholdMs?: number;
+  }): WorkerLeaseResult {
+    const now = input.now ?? new Date();
+    const nowIso = now.toISOString();
+    const leaseExpiresAt = new Date(now.getTime() + input.leaseDurationMs).toISOString();
+    return this.transaction(() => {
+      const previous = this.getWorkerHealth(input.workerKey);
+      const previousLeaseExpiresAt = previous?.leaseExpiresAt
+        ? Date.parse(previous.leaseExpiresAt)
+        : Number.NaN;
+      if (
+        previous &&
+        !Number.isNaN(previousLeaseExpiresAt) &&
+        previousLeaseExpiresAt > now.getTime()
+      ) {
+        return { acquired: false, health: previous };
+      }
+
+      const previousHeartbeatMs = previous
+        ? Date.parse(previous.lastHeartbeatAt)
+        : Number.NaN;
+      const downtimeThreshold =
+        input.downtimeThresholdMs ?? WORKER_DOWNTIME_THRESHOLD_MS;
+      const downtime =
+        previous &&
+        !Number.isNaN(previousHeartbeatMs) &&
+        now.getTime() - previousHeartbeatMs >= downtimeThreshold
+          ? {
+              workerKey: input.workerKey,
+              startedAt: previous.lastHeartbeatAt,
+              detectedAt: nowIso,
+              durationMs: now.getTime() - previousHeartbeatMs,
+            }
+          : undefined;
+
+      const write = this.connection
+        .prepare(`
+          INSERT INTO worker_runtime_health(
+            worker_key, last_started_at, last_heartbeat_at,
+            last_successful_cycle_at, last_error_message,
+            last_downtime_started_at, last_downtime_detected_at,
+            worker_owner_token, lease_expires_at
+          ) VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?)
+          ON CONFLICT(worker_key) DO UPDATE SET
+            last_started_at = excluded.last_started_at,
+            last_heartbeat_at = excluded.last_heartbeat_at,
+            last_successful_cycle_at = COALESCE(excluded.last_successful_cycle_at, worker_runtime_health.last_successful_cycle_at),
+            last_error_message = NULL,
+            last_downtime_started_at = COALESCE(excluded.last_downtime_started_at, worker_runtime_health.last_downtime_started_at),
+            last_downtime_detected_at = COALESCE(excluded.last_downtime_detected_at, worker_runtime_health.last_downtime_detected_at),
+            worker_owner_token = excluded.worker_owner_token,
+            lease_expires_at = excluded.lease_expires_at
+          WHERE worker_runtime_health.lease_expires_at IS NULL
+             OR worker_runtime_health.lease_expires_at <= ?
+        `)
+        .run(
+          input.workerKey,
+          nowIso,
+          nowIso,
+          downtime?.startedAt ?? null,
+          downtime?.detectedAt ?? null,
+          input.ownerToken,
+          leaseExpiresAt,
+          nowIso,
+        );
+      const health = this.getWorkerHealth(input.workerKey)!;
+      return {
+        acquired: write.changes === 1,
+        health,
+        ...(write.changes === 1 && downtime ? { downtime } : {}),
+      };
+    });
+  }
+
+  renewWorkerLease(input: {
+    workerKey: string;
+    ownerToken: string;
+    leaseDurationMs: number;
+    now?: Date;
+  }): boolean {
+    const now = input.now ?? new Date();
+    const result = this.connection
+      .prepare(`
+        UPDATE worker_runtime_health
+        SET last_heartbeat_at = ?, lease_expires_at = ?
+        WHERE worker_key = ?
+          AND worker_owner_token = ?
+          AND lease_expires_at > ?
+      `)
+      .run(
+        now.toISOString(),
+        new Date(now.getTime() + input.leaseDurationMs).toISOString(),
+        input.workerKey,
+        input.ownerToken,
+        now.toISOString(),
+      );
+    return result.changes === 1;
+  }
+
+  releaseWorkerLease(workerKey: string, ownerToken: string): void {
+    const releasedAt = new Date().toISOString();
     this.connection
+      .prepare(`
+        UPDATE worker_runtime_health
+        SET worker_owner_token = NULL, lease_expires_at = ?
+        WHERE worker_key = ? AND worker_owner_token = ?
+      `)
+      .run(releasedAt, workerKey, ownerToken);
+  }
+
+  recordWorkerHeartbeat(
+    workerKey: string,
+    now = new Date(),
+    ownerToken?: string,
+  ): boolean {
+    const result = this.connection
       .prepare(`
         UPDATE worker_runtime_health
         SET last_heartbeat_at = ?
         WHERE worker_key = ?
+          AND (? IS NULL OR worker_owner_token = ?)
       `)
-      .run(now.toISOString(), workerKey);
+      .run(now.toISOString(), workerKey, ownerToken ?? null, ownerToken ?? null);
+    return result.changes === 1;
   }
 
-  recordWorkerCycleSuccess(workerKey: string, now = new Date()): void {
-    this.connection
+  recordWorkerCycleSuccess(
+    workerKey: string,
+    now = new Date(),
+    ownerToken?: string,
+  ): boolean {
+    const result = this.connection
       .prepare(`
         UPDATE worker_runtime_health
         SET last_heartbeat_at = ?, last_successful_cycle_at = ?, last_error_message = NULL
         WHERE worker_key = ?
+          AND (? IS NULL OR worker_owner_token = ?)
       `)
-      .run(now.toISOString(), now.toISOString(), workerKey);
+      .run(
+        now.toISOString(),
+        now.toISOString(),
+        workerKey,
+        ownerToken ?? null,
+        ownerToken ?? null,
+      );
+    return result.changes === 1;
   }
 
   recordWorkerCycleFailure(
     workerKey: string,
     errorMessage: string,
     now = new Date(),
-  ): void {
-    this.connection
+    ownerToken?: string,
+  ): boolean {
+    const result = this.connection
       .prepare(`
         UPDATE worker_runtime_health
         SET last_heartbeat_at = ?, last_error_message = ?
         WHERE worker_key = ?
+          AND (? IS NULL OR worker_owner_token = ?)
       `)
-      .run(now.toISOString(), safeErrorSummary(errorMessage), workerKey);
+      .run(
+        now.toISOString(),
+        safeErrorSummary(errorMessage),
+        workerKey,
+        ownerToken ?? null,
+        ownerToken ?? null,
+      );
+    return result.changes === 1;
   }
 
   enqueueIntegrationRetry(input: {
@@ -2237,17 +2435,28 @@ export class BridgeDatabase {
     const followUps = this.listCancellationExternalFollowUps({ limit });
     const integrationRetries = this.listIntegrationRetryJobs({ limit });
     const workerHealth = this.getWorkerHealth(INTERVIEW_BRIDGE_WORKER_KEY);
-    const heartbeatAgeMs = workerHealth
-      ? Math.max(0, Date.now() - Date.parse(workerHealth.lastHeartbeatAt))
+    const heartbeatTimestamp = workerHealth
+      ? Date.parse(workerHealth.lastHeartbeatAt)
+      : Number.NaN;
+    const leaseTimestamp = workerHealth?.leaseExpiresAt
+      ? Date.parse(workerHealth.leaseExpiresAt)
+      : Number.NaN;
+    const heartbeatAgeMs = workerHealth && !Number.isNaN(heartbeatTimestamp)
+      ? Math.max(0, Date.now() - heartbeatTimestamp)
       : null;
-    const workerStatus =
-      !workerHealth
-        ? "UNKNOWN"
-        : heartbeatAgeMs !== null && heartbeatAgeMs > WORKER_DOWNTIME_THRESHOLD_MS
-          ? "STALE"
-          : workerHealth.lastErrorMessage
-            ? "DEGRADED"
-            : "RUNNING";
+    let workerStatus: "UNKNOWN" | "STALE" | "DEGRADED" | "RUNNING";
+    if (!workerHealth || heartbeatAgeMs === null) {
+      workerStatus = "UNKNOWN";
+    } else if (
+      (!Number.isNaN(leaseTimestamp) && leaseTimestamp <= Date.now()) ||
+      heartbeatAgeMs > WORKER_DOWNTIME_THRESHOLD_MS
+    ) {
+      workerStatus = "STALE";
+    } else if (workerHealth.lastErrorMessage) {
+      workerStatus = "DEGRADED";
+    } else {
+      workerStatus = "RUNNING";
+    }
     const followUpsByCase = new Map<string, CancellationExternalFollowUpRow[]>();
     for (const followUp of followUps) {
       const items = followUpsByCase.get(followUp.caseId) ?? [];
@@ -2371,6 +2580,7 @@ export class BridgeDatabase {
               status: workerStatus,
               lastStartedAt: workerHealth.lastStartedAt,
               lastHeartbeatAt: workerHealth.lastHeartbeatAt,
+              leaseExpiresAt: workerHealth.leaseExpiresAt,
               lastSuccessfulCycleAt: workerHealth.lastSuccessfulCycleAt,
               lastErrorMessage: workerHealth.lastErrorMessage,
               lastDowntimeStartedAt: workerHealth.lastDowntimeStartedAt,
@@ -2753,6 +2963,55 @@ export class BridgeDatabase {
       roomName: interviewCase.scheduledRoomName,
     });
     return this.getCase(caseId)!;
+  }
+
+  recordExternallyConfirmedCandidateSchedule(input: {
+    caseId: string;
+    sourceEventId: string;
+    date: string;
+    startTime: string;
+    endTime: string;
+    sourceLocation?: string;
+  }): InterviewCaseRow {
+    const interviewCase = this.getCase(input.caseId);
+    if (!interviewCase) throw new Error(`Case not found: ${input.caseId}`);
+    if (
+      interviewCase.status === "CONFIRMED" &&
+      interviewCase.scheduledDate === input.date &&
+      interviewCase.scheduledStartTime === input.startTime &&
+      interviewCase.scheduledEndTime === input.endTime
+    ) {
+      return interviewCase;
+    }
+    if (interviewCase.status !== "AWAITING_CANDIDATE_CONFIRMATION") {
+      throw new Error("Only an interview awaiting candidate confirmation can be recorded from an external confirmation.");
+    }
+    if (!this.hasCandidateScheduleProposalSent(input.caseId)) {
+      throw new Error("The candidate schedule proposal has not been recorded as sent.");
+    }
+    if (!input.sourceEventId.trim()) {
+      throw new Error("An external confirmation source event is required.");
+    }
+    if (
+      interviewCase.scheduledDate !== input.date ||
+      interviewCase.scheduledStartTime !== input.startTime ||
+      interviewCase.scheduledEndTime !== input.endTime
+    ) {
+      throw new Error("The externally confirmed schedule does not match the proposed candidate schedule.");
+    }
+
+    this.transaction(() => {
+      this.setCaseStatus(input.caseId, "CONFIRMED");
+      this.addEvent(input.caseId, "CANDIDATE_SCHEDULE_CONFIRMED", "NINEHIRE_MCP", {
+        sourceEventId: input.sourceEventId,
+        date: input.date,
+        startTime: input.startTime,
+        endTime: input.endTime,
+        sourceLocation: input.sourceLocation ?? null,
+        externalSchedule: true,
+      });
+    });
+    return this.getCase(input.caseId)!;
   }
 
   confirmCandidateSchedule(input: {
@@ -4679,14 +4938,53 @@ export class BridgeDatabase {
     }));
   }
 
+  claimReminder(
+    id: string,
+    now = new Date(),
+    leaseDurationMs = 120_000,
+  ): boolean {
+    const nowIso = now.toISOString();
+    const staleBefore = new Date(now.getTime() - leaseDurationMs).toISOString();
+    const result = this.connection
+      .prepare(`
+        UPDATE reminders
+        SET sending_started_at = ?
+        WHERE id = ?
+          AND sent_at IS NULL
+          AND (sending_started_at IS NULL OR sending_started_at <= ?)
+          AND EXISTS (
+            SELECT 1
+            FROM case_interviewers AS interviewer
+            JOIN interview_cases AS interview_case ON interview_case.id = reminders.case_id
+            WHERE interviewer.id = reminders.interviewer_id
+              AND interviewer.active = 1
+              AND interviewer.status = 'PENDING'
+              AND interview_case.status IN ('REQUEST_SENT', 'COLLECTING_AVAILABILITY')
+          )
+      `)
+      .run(nowIso, id, staleBefore);
+    return result.changes === 1;
+  }
+
+  releaseReminder(id: string): void {
+    this.connection
+      .prepare(
+        "UPDATE reminders SET sending_started_at = NULL WHERE id = ? AND sent_at IS NULL",
+      )
+      .run(id);
+  }
+
   markReminderSent(id: string): void {
     const row = this.connection
       .prepare("SELECT * FROM reminders WHERE id = ?")
       .get(id) as SqlRow | undefined;
     if (!row) throw new Error(`Reminder not found: ${id}`);
-    this.connection
-      .prepare("UPDATE reminders SET sent_at = ? WHERE id = ?")
+    const updated = this.connection
+      .prepare(
+        "UPDATE reminders SET sent_at = ?, sending_started_at = NULL WHERE id = ? AND sent_at IS NULL",
+      )
       .run(new Date().toISOString(), id);
+    if (updated.changes === 0) return;
     if (Number(row.reminder_number) === 2) {
       const caseId = asString(row.case_id);
       this.createReview({

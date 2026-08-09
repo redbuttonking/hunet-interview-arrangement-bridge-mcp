@@ -2242,4 +2242,81 @@ describe("evaluation approval workflow", () => {
       },
     ]);
   });
+
+  it("reconciles a direct NineHire candidate confirmation after an internal proposal", async () => {
+    db = new BridgeDatabase(":memory:");
+    const interviewCase = db.createInterviewCase({
+      candidateRef: "A3",
+      candidateName: "Direct confirmation candidate",
+      recruitmentRef: "R3",
+      recruitmentName: "Direct confirmation recruitment",
+      proposalDates: ["2099-08-06"],
+    });
+    db.setCaseStatus(interviewCase.id, "READY_TO_SCHEDULE");
+    const [block] = db.syncMeetingRoomBlocks(["2099-08-06"], [
+      {
+        sourceKey: "DAOU:direct-candidate-confirmation",
+        roomId: "R3",
+        roomName: "Room C",
+        reservedBy: "Recruiter",
+        purpose: "Interview",
+        date: "2099-08-06",
+        startTime: "15:00",
+        endTime: "18:00",
+        sourcePayloadHash: "direct-candidate-confirmation",
+      },
+    ]);
+    db.allocateRoomBlock({
+      caseId: interviewCase.id,
+      roomBlockId: block!.id,
+      startTime: "16:00",
+      endTime: "17:00",
+    });
+    db.confirmInternalSchedule(interviewCase.id);
+    db.recordCandidateScheduleProposalSent(interviewCase.id);
+
+    const ninehire: NinehireWorkflowAdapter = {
+      async lookupCompletedEvaluation() {
+        return { reason: "Not used in this test." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+      async listCandidateSchedules() {
+        return [{
+          eventId: "E3",
+          candidateRef: "A3",
+          candidateName: "Direct confirmation candidate",
+          recruitmentRef: "R3",
+          recruitmentName: "Direct confirmation recruitment",
+          date: "2099-08-06",
+          startTime: "16:00",
+          endTime: "17:00",
+          attendeeNames: [],
+        }];
+      },
+    };
+    const workflow = new WorkflowService(db, config, ninehire);
+
+    await expect(workflow.reconcileNinehireConfirmedSchedules()).resolves.toMatchObject({
+      trackedCandidates: 1,
+      discoveredSchedules: 1,
+      confirmedCases: 1,
+      manuallyRecorded: 0,
+      roomSelectionRequired: 0,
+      roomReviewRequired: 0,
+    });
+    expect(db.getCase(interviewCase.id)).toMatchObject({
+      status: "CONFIRMED",
+      scheduledDate: "2099-08-06",
+      scheduledStartTime: "16:00",
+      scheduledEndTime: "17:00",
+    });
+    expect(db.getConfirmedInterviewSchedule(interviewCase.id)).toMatchObject({
+      roomName: "Room C",
+    });
+  });
 });

@@ -2,7 +2,7 @@
 // 인터뷰 운영자가 우선순위 업무와 다음 일정을 같은 기준으로 처리하게 한다.
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, ArrowRight, CalendarClock, CheckCircle2, ClipboardList, Clock3, Loader2, RefreshCw, Search, SearchX, TriangleAlert, UsersRound, Wifi } from "lucide-react";
 import { AppHeader, PageHeader } from "./app-shell";
 import { Badge } from "./ui/badge";
@@ -784,8 +784,8 @@ function retryStatusInfo(status: string) {
 
 function readinessStatusInfo(status: string | undefined) {
   if (status === "READY") return { label: "연결 정상", variant: "success" as const };
-  if (status === "DEGRADED") return { label: "일부 확인 필요", variant: "warning" as const };
-  if (status === "NOT_READY") return { label: "연결 확인 필요", variant: "warning" as const };
+  if (status === "ATTENTION" || status === "DEGRADED") return { label: "일부 확인 필요", variant: "warning" as const };
+  if (status === "BLOCKED" || status === "NOT_READY") return { label: "설정 확인 필요", variant: "destructive" as const };
   return { label: "확인 중", variant: "secondary" as const };
 }
 
@@ -800,19 +800,23 @@ function OperationsReadinessCard() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [retryingId, setRetryingId] = useState<string | null>(null);
+  const requestId = useRef(0);
 
   const load = async (external: boolean) => {
+    const currentRequestId = ++requestId.current;
     setLoading(true);
     setError(null);
     try {
       const response = await fetch(`/api/operations/readiness?external=${external}`);
       const result = await response.json() as OperationalReadinessPayload & { error?: string };
       if (!response.ok) throw new Error(result.error ?? "운영 상태를 확인하지 못했습니다.");
-      setData(result);
+      if (currentRequestId === requestId.current) setData(result);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "운영 상태를 확인하지 못했습니다.");
+      if (currentRequestId === requestId.current) {
+        setError(caught instanceof Error ? caught.message : "운영 상태를 확인하지 못했습니다.");
+      }
     } finally {
-      setLoading(false);
+      if (currentRequestId === requestId.current) setLoading(false);
     }
   };
 
@@ -1009,16 +1013,22 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
   const [page, setPage] = useState(1);
   const [hydrated, setHydrated] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const refreshRequestId = useRef(0);
 
   const refresh = useCallback(async () => {
+    const requestId = ++refreshRequestId.current;
     setRefreshing(true);
     try {
       const response = await fetch("/api/dashboard", { cache: "no-store" });
       if (!response.ok) throw new Error("운영 현황을 새로 불러오지 못했습니다.");
-      setData(await response.json() as DashboardSnapshot);
+      const nextData = await response.json() as DashboardSnapshot;
+      if (requestId !== refreshRequestId.current) return;
+      setData(nextData);
       setError(null);
+    } catch (caught) {
+      if (requestId === refreshRequestId.current) throw caught;
     } finally {
-      setRefreshing(false);
+      if (requestId === refreshRequestId.current) setRefreshing(false);
     }
   }, []);
 
@@ -1227,6 +1237,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
     summary.worker.status !== "RUNNING" || summary.freshness.worker.state !== "FRESH" ? "워커 처리" : null,
     summary.freshness.slack.state !== "FRESH" ? "Slack 알림" : null,
     summary.freshness.ninehire.state !== "FRESH" ? "나인하이어 데이터" : null,
+    summary.freshness.daouOffice.state !== "FRESH" ? "회의실 예약" : null,
   ].filter((source): source is string => Boolean(source));
   const progress = [
     { label: "조율 시작", statuses: ["READY_FOR_DRAFT", "DRAFT_CREATED"] },

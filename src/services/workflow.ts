@@ -1131,7 +1131,7 @@ export class WorkflowService {
     const targets = new Map<string, {
       candidateRef: string;
       recruitmentRef: string;
-      kind: "CASE" | "REVIEW";
+      kind: "CASE" | "CANDIDATE_CONFIRMATION" | "REVIEW";
       caseId?: string;
       reviewId?: string;
       candidateName: string;
@@ -1146,17 +1146,37 @@ export class WorkflowService {
       ) {
         continue;
       }
-      targets.set(
-        `${interviewCase.candidateRef}:${interviewCase.recruitmentRef}`,
-        {
-          candidateRef: interviewCase.candidateRef,
-          recruitmentRef: interviewCase.recruitmentRef,
-          kind: "CASE",
-          caseId: interviewCase.id,
-          candidateName: interviewCase.candidateName,
-          recruitmentName: interviewCase.recruitmentName,
-        },
-      );
+      const key = `${interviewCase.candidateRef}:${interviewCase.recruitmentRef}`;
+      if (targets.has(key)) continue;
+      targets.set(key, {
+        candidateRef: interviewCase.candidateRef,
+        recruitmentRef: interviewCase.recruitmentRef,
+        kind: "CASE",
+        caseId: interviewCase.id,
+        candidateName: interviewCase.candidateName,
+        recruitmentName: interviewCase.recruitmentName,
+      });
+    }
+    for (const interviewCase of this.db.listCases("AWAITING_CANDIDATE_CONFIRMATION")) {
+      if (
+        !interviewCase.candidateRef ||
+        !interviewCase.recruitmentRef ||
+        !interviewCase.candidateName ||
+        !interviewCase.recruitmentName ||
+        !this.db.hasCandidateScheduleProposalSent(interviewCase.id)
+      ) {
+        continue;
+      }
+      const key = `${interviewCase.candidateRef}:${interviewCase.recruitmentRef}`;
+      if (targets.has(key)) continue;
+      targets.set(key, {
+        candidateRef: interviewCase.candidateRef,
+        recruitmentRef: interviewCase.recruitmentRef,
+        kind: "CANDIDATE_CONFIRMATION",
+        caseId: interviewCase.id,
+        candidateName: interviewCase.candidateName,
+        recruitmentName: interviewCase.recruitmentName,
+      });
     }
     for (const review of this.db.listOpenReviews()) {
       if (review.reviewType !== "INTERVIEW_ARRANGEMENT_START_REQUIRED") continue;
@@ -1242,6 +1262,32 @@ export class WorkflowService {
           } else if (roomResult === "INTERVIEW_CONFIRMED_ROOM_REVIEW_REQUIRED") {
             roomReviewRequired += 1;
           }
+        } catch (error) {
+          this.db.setCaseStatus(target.caseId, "REVIEW_REQUIRED");
+          if (!this.db.hasCaseReview(target.caseId, "NINEHIRE_SCHEDULE_RECONCILIATION_REQUIRED")) {
+            this.db.createReview({
+              caseId: target.caseId,
+              reviewType: "NINEHIRE_SCHEDULE_RECONCILIATION_REQUIRED",
+              reason: error instanceof Error ? error.message : String(error),
+              summary: this.reconciledScheduleSummary(schedule),
+            });
+          }
+          roomReviewRequired += 1;
+        }
+        continue;
+      }
+
+      if (target.kind === "CANDIDATE_CONFIRMATION" && target.caseId) {
+        try {
+          this.db.recordExternallyConfirmedCandidateSchedule({
+            caseId: target.caseId,
+            sourceEventId: schedule.eventId,
+            date: schedule.date,
+            startTime: schedule.startTime,
+            endTime: schedule.endTime,
+            sourceLocation: schedule.location,
+          });
+          confirmedCases += 1;
         } catch (error) {
           this.db.setCaseStatus(target.caseId, "REVIEW_REQUIRED");
           if (!this.db.hasCaseReview(target.caseId, "NINEHIRE_SCHEDULE_RECONCILIATION_REQUIRED")) {

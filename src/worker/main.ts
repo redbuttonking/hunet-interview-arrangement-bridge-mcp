@@ -1,5 +1,6 @@
 import { App, LogLevel } from "@slack/bolt";
 import type { WebClient } from "@slack/web-api";
+import { randomUUID } from "node:crypto";
 import { getConfig, requireWorkerConfig } from "../config.js";
 import { BridgeDatabase } from "../db/database.js";
 import {
@@ -9,6 +10,7 @@ import {
   INTERVIEW_BRIDGE_WORKER_KEY,
   WORKER_DOWNTIME_THRESHOLD_MS,
   WORKER_HEARTBEAT_INTERVAL_MS,
+  WORKER_LEASE_DURATION_MS,
 } from "../domain/worker-health.js";
 import {
   NinehireRecruitmentWorkflowAdapter,
@@ -305,6 +307,13 @@ async function reconcileNinehireConfirmedSchedules(): Promise<void> {
 
 async function runIntegrationRetryCycle(): Promise<void> {
   if (retryCycleRunning || cycleRunning) return;
+  if (!db.renewWorkerLease({
+    workerKey: INTERVIEW_BRIDGE_WORKER_KEY,
+    ownerToken: workerOwnerToken,
+    leaseDurationMs: WORKER_LEASE_DURATION_MS,
+  })) {
+    return;
+  }
   retryCycleRunning = true;
   let failure: string | undefined;
   try {
@@ -335,10 +344,10 @@ async function runIntegrationRetryCycle(): Promise<void> {
       }
     }
     if (failure) {
-      db.recordWorkerCycleFailure(INTERVIEW_BRIDGE_WORKER_KEY, failure);
+      db.recordWorkerCycleFailure(INTERVIEW_BRIDGE_WORKER_KEY, failure, new Date(), workerOwnerToken);
       process.stderr.write(`[Integration retry] ${failure}\n`);
     } else if (jobs.length > 0) {
-      db.recordWorkerCycleSuccess(INTERVIEW_BRIDGE_WORKER_KEY);
+      db.recordWorkerCycleSuccess(INTERVIEW_BRIDGE_WORKER_KEY, new Date(), workerOwnerToken);
     }
   } finally {
     retryCycleRunning = false;
@@ -347,6 +356,13 @@ async function runIntegrationRetryCycle(): Promise<void> {
 
 async function runCycle(): Promise<void> {
   if (cycleRunning || retryCycleRunning) return;
+  if (!db.renewWorkerLease({
+    workerKey: INTERVIEW_BRIDGE_WORKER_KEY,
+    ownerToken: workerOwnerToken,
+    leaseDurationMs: WORKER_LEASE_DURATION_MS,
+  })) {
+    return;
+  }
   cycleRunning = true;
   const failures: string[] = [];
   const runStep = async (label: string, step: () => Promise<unknown>) => {
@@ -367,32 +383,60 @@ async function runCycle(): Promise<void> {
     }
     for (const reminder of db.listDueReminders()) {
       await runStep(`리마인드 발송 ${reminder.id}`, async () => {
+        if (!db.renewWorkerLease({
+          workerKey: INTERVIEW_BRIDGE_WORKER_KEY,
+          ownerToken: workerOwnerToken,
+          leaseDurationMs: WORKER_LEASE_DURATION_MS,
+        })) {
+          throw new Error("워커 임대를 잃어 리마인드 발송을 중단했습니다.");
+        }
+        if (!db.claimReminder(reminder.id)) return;
         const ordinal = reminder.reminderNumber === 1 ? "1차" : "2차(최종)";
-        await app.client.chat.postMessage({
-          channel: requestChannelId,
-          text: `<@${reminder.slackUserId}> 인터뷰 가능 일정 입력 ${ordinal} 리마인드입니다. 기존 요청 메시지의 [가능 일정 입력] 버튼을 눌러 주세요.`,
-        });
-        db.markReminderSent(reminder.id);
+        try {
+          await app.client.chat.postMessage({
+            channel: requestChannelId,
+            text: `<@${reminder.slackUserId}> 인터뷰 가능 일정 입력 ${ordinal} 리마인드입니다. 기존 요청 메시지의 [가능 일정 입력] 버튼을 눌러 주세요.`,
+          });
+          db.markReminderSent(reminder.id);
+        } catch (error) {
+          db.releaseReminder(reminder.id);
+          throw error;
+        }
       });
     }
     if (failures.length > 0) {
       throw new Error(failures.join(" | "));
     }
-    db.recordWorkerCycleSuccess(INTERVIEW_BRIDGE_WORKER_KEY);
+    db.recordWorkerCycleSuccess(INTERVIEW_BRIDGE_WORKER_KEY, new Date(), workerOwnerToken);
   } catch (error) {
     const message = errorMessage(error);
-    db.recordWorkerCycleFailure(INTERVIEW_BRIDGE_WORKER_KEY, message);
+    db.recordWorkerCycleFailure(INTERVIEW_BRIDGE_WORKER_KEY, message, new Date(), workerOwnerToken);
     process.stderr.write(`[Worker cycle] ${message}\n`);
   } finally {
     cycleRunning = false;
   }
 }
 
-await app.start();
-const workerStart = db.registerWorkerStart({
+const workerOwnerToken = randomUUID();
+const workerStart = db.acquireWorkerLease({
   workerKey: INTERVIEW_BRIDGE_WORKER_KEY,
+  ownerToken: workerOwnerToken,
+  leaseDurationMs: WORKER_LEASE_DURATION_MS,
   downtimeThresholdMs: WORKER_DOWNTIME_THRESHOLD_MS,
 });
+if (!workerStart.acquired) {
+  process.stderr.write(
+    "Another interview bridge worker already owns the active lease. This process will stop.\n",
+  );
+  db.close();
+} else {
+try {
+  await app.start();
+} catch (error) {
+  db.releaseWorkerLease(INTERVIEW_BRIDGE_WORKER_KEY, workerOwnerToken);
+  db.close();
+  throw error;
+}
 if (workerStart.downtime) {
   const recovery = workflow.createWorkerDowntimeReviews(workerStart.downtime);
   process.stdout.write(
@@ -403,7 +447,17 @@ process.stdout.write(
   `Interview bridge worker started. Reconciliation interval: ${config.pollIntervalMs}ms\n`,
 );
 const heartbeatInterval = setInterval(
-  () => db.recordWorkerHeartbeat(INTERVIEW_BRIDGE_WORKER_KEY),
+  () => {
+    const renewed = db.renewWorkerLease({
+      workerKey: INTERVIEW_BRIDGE_WORKER_KEY,
+      ownerToken: workerOwnerToken,
+      leaseDurationMs: WORKER_LEASE_DURATION_MS,
+    });
+    if (!renewed) {
+      process.stderr.write("Worker lease was lost. Stopping the worker.\n");
+      void shutdown("worker lease lost");
+    }
+  },
   WORKER_HEARTBEAT_INTERVAL_MS,
 );
 await runCycle();
@@ -412,15 +466,20 @@ const retryInterval = setInterval(
   () => void runIntegrationRetryCycle(),
   INTEGRATION_RETRY_POLL_INTERVAL_MS,
 );
+let shuttingDown = false;
 
 async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
   clearInterval(interval);
   clearInterval(retryInterval);
   clearInterval(heartbeatInterval);
   process.stdout.write(`Received ${signal}; stopping worker.\n`);
   await app.stop();
+  db.releaseWorkerLease(INTERVIEW_BRIDGE_WORKER_KEY, workerOwnerToken);
   db.close();
 }
 
 process.once("SIGINT", () => void shutdown("SIGINT"));
 process.once("SIGTERM", () => void shutdown("SIGTERM"));
+}

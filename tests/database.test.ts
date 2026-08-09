@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { BridgeDatabase } from "../src/db/database.js";
+import { INTERVIEW_BRIDGE_WORKER_KEY } from "../src/domain/worker-health.js";
 
 let db: BridgeDatabase | undefined;
 afterEach(() => db?.close());
@@ -8,7 +9,154 @@ describe("BridgeDatabase", () => {
   it("applies every schema migration when the database opens", () => {
     db = new BridgeDatabase(":memory:");
 
-    expect(db.getLatestSchemaVersion()).toBe(16);
+    expect(db.getLatestSchemaVersion()).toBe(18);
+  });
+
+  it("prevents a second worker from acquiring an active processing lease", () => {
+    db = new BridgeDatabase(":memory:");
+    const startedAt = new Date("2026-08-09T00:00:00.000Z");
+    const first = db.acquireWorkerLease({
+      workerKey: "worker",
+      ownerToken: "owner-a",
+      leaseDurationMs: 75_000,
+      now: startedAt,
+    });
+    const second = db.acquireWorkerLease({
+      workerKey: "worker",
+      ownerToken: "owner-b",
+      leaseDurationMs: 75_000,
+      now: new Date("2026-08-09T00:00:30.000Z"),
+    });
+
+    expect(first.acquired).toBe(true);
+    expect(second.acquired).toBe(false);
+    expect(second.health.leaseExpiresAt).toBe("2026-08-09T00:01:15.000Z");
+    expect(
+      db.renewWorkerLease({
+        workerKey: "worker",
+        ownerToken: "owner-b",
+        leaseDurationMs: 75_000,
+        now: new Date("2026-08-09T00:00:30.000Z"),
+      }),
+    ).toBe(false);
+  });
+
+  it("allows a replacement worker only after the previous lease expires", () => {
+    db = new BridgeDatabase(":memory:");
+    db.acquireWorkerLease({
+      workerKey: INTERVIEW_BRIDGE_WORKER_KEY,
+      ownerToken: "owner-a",
+      leaseDurationMs: 75_000,
+      now: new Date("2026-08-09T00:00:00.000Z"),
+    });
+
+    const replacement = db.acquireWorkerLease({
+      workerKey: INTERVIEW_BRIDGE_WORKER_KEY,
+      ownerToken: "owner-b",
+      leaseDurationMs: 75_000,
+      now: new Date("2026-08-09T00:01:31.000Z"),
+      downtimeThresholdMs: 90_000,
+    });
+
+    expect(replacement.acquired).toBe(true);
+    expect(replacement.downtime).toMatchObject({
+      workerKey: INTERVIEW_BRIDGE_WORKER_KEY,
+      startedAt: "2026-08-09T00:00:00.000Z",
+    });
+    expect(
+      db.renewWorkerLease({
+        workerKey: INTERVIEW_BRIDGE_WORKER_KEY,
+        ownerToken: "owner-b",
+        leaseDurationMs: 75_000,
+        now: new Date("2026-08-09T00:01:32.000Z"),
+      }),
+    ).toBe(true);
+
+    db.releaseWorkerLease(INTERVIEW_BRIDGE_WORKER_KEY, "owner-b");
+    expect(
+      (db.getOperationsDashboard().summary as { worker: { status: string } }).worker.status,
+    ).toBe("STALE");
+  });
+
+  it("ignores cycle results written by a worker that lost its lease", () => {
+    db = new BridgeDatabase(":memory:");
+    const startedAt = new Date("2026-08-09T00:00:00.000Z");
+    db.acquireWorkerLease({
+      workerKey: "worker",
+      ownerToken: "owner-a",
+      leaseDurationMs: 75_000,
+      now: startedAt,
+    });
+    db.acquireWorkerLease({
+      workerKey: "worker",
+      ownerToken: "owner-b",
+      leaseDurationMs: 75_000,
+      now: new Date("2026-08-09T00:01:31.000Z"),
+    });
+
+    expect(
+      db.recordWorkerCycleSuccess(
+        "worker",
+        new Date("2026-08-09T00:01:32.000Z"),
+        "owner-a",
+      ),
+    ).toBe(false);
+    expect(
+      db.recordWorkerCycleFailure(
+        "worker",
+        "authorization=secret-value",
+        new Date("2026-08-09T00:01:32.000Z"),
+        "owner-a",
+      ),
+    ).toBe(false);
+    expect(db.getWorkerHealth("worker")).toMatchObject({
+      lastSuccessfulCycleAt: null,
+      lastErrorMessage: null,
+    });
+  });
+
+  it("claims reminders before sending and resolves a second reminder only once", () => {
+    const database = (db = new BridgeDatabase(":memory:"));
+    const interviewCase = database.createInterviewCase({
+      candidateName: "Candidate",
+      proposalDates: ["2026-08-10"],
+    });
+    database.addOrUpdateInterviewer({
+      caseId: interviewCase.id,
+      displayName: "Interviewer",
+      slackUserId: "U1",
+      source: "MANUAL",
+    });
+    const draft = database.createDraft({
+      caseId: interviewCase.id,
+      channelId: "C1",
+      previewText: "Availability request",
+      blocksJson: "[]",
+      payloadHash: "reminder-claim",
+      messageType: "INTERVIEWER_REQUEST",
+    });
+    database.approveDraft(draft.id);
+    database.markDraftSent(
+      draft.id,
+      "100.0",
+      new Date("2026-08-03T00:00:00.000Z"),
+    );
+
+    const reminders = database.listDueReminders(new Date("2026-08-06T03:00:00.000Z"));
+    expect(reminders).toHaveLength(2);
+    const first = reminders.find((reminder) => reminder.reminderNumber === 1)!;
+    expect(database.claimReminder(first.id, new Date("2026-08-06T03:00:00.000Z"))).toBe(true);
+    expect(database.claimReminder(first.id, new Date("2026-08-06T03:00:30.000Z"))).toBe(false);
+    expect(database.claimReminder(first.id, new Date("2026-08-06T03:03:00.000Z"))).toBe(true);
+    database.releaseReminder(first.id);
+
+    const second = reminders.find((reminder) => reminder.reminderNumber === 2)!;
+    expect(database.claimReminder(second.id, new Date("2026-08-06T03:00:00.000Z"))).toBe(true);
+    database.markReminderSent(second.id);
+    database.markReminderSent(second.id);
+    expect(
+      database.listOpenReviews().filter((review) => review.reviewType === "INTERVIEWER_NO_RESPONSE"),
+    ).toHaveLength(1);
   });
 
   it("does not recreate a resolved case review as an active duplicate", () => {
@@ -379,14 +527,38 @@ describe("BridgeDatabase", () => {
 
     const failed = db.failIntegrationRetryJob(
       queued.id,
-      "Authorization: Bearer xoxb-test\nsecret details should not persist",
+      "Authorization: Bearer xoxb-test xapp-test\nsecret details should not persist",
       new Date("2026-07-30T00:01:00.000Z"),
     );
 
     expect(failed.lastError).toContain("[REDACTED_SECRET]");
     expect(failed.lastError).toContain("[REDACTED_SLACK_TOKEN]");
     expect(failed.lastError).not.toContain("xoxb-");
+    expect(failed.lastError).not.toContain("xapp-");
     expect(failed.lastError).not.toContain("secret details");
+  });
+
+  it("redacts candidate contact details from retry errors", () => {
+    db = new BridgeDatabase(":memory:");
+    const queued = db.enqueueIntegrationRetry({
+      jobType: "SLACK_NOTIFICATION_RECONCILIATION",
+      dedupeKey: "contact-redaction",
+      payload: {},
+      now: new Date("2026-08-09T00:00:00.000Z"),
+    });
+
+    const failed = db.failIntegrationRetryJob(
+      queued.id,
+      "Candidate test@example.com requested a callback at 010-1234-5678?access_token=private-value",
+      new Date("2026-08-09T00:01:00.000Z"),
+    );
+
+    expect(failed.lastError).toContain("[REDACTED_EMAIL]");
+    expect(failed.lastError).toContain("[REDACTED_PHONE]");
+    expect(failed.lastError).toContain("access_token=[REDACTED]");
+    expect(failed.lastError).not.toContain("test@example.com");
+    expect(failed.lastError).not.toContain("010-1234-5678");
+    expect(failed.lastError).not.toContain("private-value");
   });
 
   it("rejects empty or malformed interviewer availability", () => {
@@ -531,6 +703,24 @@ describe("BridgeDatabase", () => {
 
     expect(second).toMatchObject({ status: "CONFIRMED", id: first.id });
     expect(db.listCaseEvents(interviewCase.id)).toHaveLength(2);
+  });
+
+  it("records a direct candidate confirmation only after the proposal was sent", () => {
+    db = new BridgeDatabase(":memory:");
+    const interviewCase = db.createInterviewCase({
+      candidateName: "Candidate",
+      proposalDates: ["2026-07-30"],
+    });
+    db!.setCaseStatus(interviewCase.id, "AWAITING_CANDIDATE_CONFIRMATION");
+    expect(() =>
+      db!.recordExternallyConfirmedCandidateSchedule({
+        caseId: interviewCase.id,
+        sourceEventId: "event-1",
+        date: "2026-07-30",
+        startTime: "15:00",
+        endTime: "16:00",
+      }),
+    ).toThrow("proposal has not been recorded as sent");
   });
 
   it("confirms an allocated room slot while preserving the candidate confirmation boundary", () => {

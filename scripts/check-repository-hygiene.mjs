@@ -31,9 +31,11 @@ const inspectExtensions = new Set([
   ".md",
 ]);
 const secretPatterns = [
-  /\bxox[abpr]-[A-Za-z0-9-]{20,}\b/u,
+  /\bxox[abcdepr]-[A-Za-z0-9-]{20,}\b/u,
+  /\bxapp-[A-Za-z0-9-]{20,}\b/u,
   /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/u,
   /\bsk-[A-Za-z0-9]{20,}\b/u,
+  /\b(?:NINEHIRE_MCP_API_KEY|SLACK_(?:BOT|APP)_TOKEN|OPENAI_API_KEY)\s*[:=]\s*["']?[A-Za-z0-9._-]{16,}/iu,
 ];
 const leakedSecrets = new Set();
 
