@@ -237,7 +237,12 @@ export class BrowserDaouOfficeReservationAdapter
         const startDateTime = stringValue(event.startTime);
         const endDateTime = stringValue(event.endTime);
         if (!title || !startDateTime || !endDateTime) continue;
-        entries.push({ title, startDateTime, endDateTime });
+        entries.push({
+          title,
+          startDateTime,
+          endDateTime,
+          ...(stringValue(event.location) ? { location: stringValue(event.location) } : {}),
+        });
       }
     }
     return parseDaouInterviewCalendarEntries(entries);

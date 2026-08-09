@@ -9,6 +9,7 @@ export interface DaouInterviewCalendarEvent {
   date: string;
   startTime: string;
   endTime: string;
+  roomName?: string;
   rawText: string;
 }
 
@@ -16,7 +17,21 @@ export interface DaouInterviewCalendarEntry {
   title: string;
   startDateTime: string;
   endDateTime: string;
+  location?: string;
   rawText?: string;
+}
+
+const interviewRoomAliases = [
+  { roomName: "열정룸", aliases: ["열정룸"] },
+  { roomName: "행복룸", aliases: ["행복룸"] },
+  { roomName: "게임체인저", aliases: ["게임체인저"] },
+  { roomName: "의문당", aliases: ["의문당", "疑問堂"] },
+] as const;
+
+function interviewRoomName(location: string | undefined): string | undefined {
+  if (!location) return undefined;
+  return interviewRoomAliases.find((room) => room.aliases.some((alias) => location.includes(alias)))
+    ?.roomName;
 }
 
 function normalizeText(value: string): string {
@@ -79,6 +94,7 @@ function toCalendarEvent(
   startTime: string,
   endTime: string,
   rawText: string,
+  roomName?: string,
 ): DaouInterviewCalendarEvent {
   return {
     sourceEventId: eventId(title.title, date, startTime, endTime),
@@ -86,6 +102,7 @@ function toCalendarEvent(
     date,
     startTime,
     endTime,
+    ...(roomName ? { roomName } : {}),
     rawText,
   };
 }
@@ -108,6 +125,7 @@ export function parseDaouInterviewCalendarEntries(
       start.time,
       end.time,
       entry.rawText ?? `${entry.title} ${entry.startDateTime} ${entry.endDateTime}`,
+      interviewRoomName(entry.location),
     );
     events.set(event.sourceEventId, event);
   }

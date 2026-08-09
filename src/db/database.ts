@@ -201,6 +201,7 @@ export interface ExternalConfirmedInterviewRow {
   date: string;
   startTime: string;
   endTime: string;
+  roomName: string | null;
   linkedCaseId: string | null;
   firstSeenAt: string;
   lastSeenAt: string;
@@ -622,6 +623,7 @@ function toExternalConfirmedInterview(row: SqlRow): ExternalConfirmedInterviewRo
     date: asString(row.date),
     startTime: asString(row.start_time),
     endTime: asString(row.end_time),
+    roomName: nullableString(row.room_name),
     linkedCaseId: nullableString(row.linked_case_id),
     firstSeenAt: asString(row.first_seen_at),
     lastSeenAt: asString(row.last_seen_at),
@@ -908,6 +910,7 @@ export class BridgeDatabase {
         date TEXT NOT NULL,
         start_time TEXT NOT NULL,
         end_time TEXT NOT NULL,
+        room_name TEXT,
         linked_case_id TEXT REFERENCES interview_cases(id),
         first_seen_at TEXT NOT NULL,
         last_seen_at TEXT NOT NULL,
@@ -1392,6 +1395,7 @@ export class BridgeDatabase {
           date TEXT NOT NULL,
           start_time TEXT NOT NULL,
           end_time TEXT NOT NULL,
+          room_name TEXT,
           linked_case_id TEXT REFERENCES interview_cases(id),
           first_seen_at TEXT NOT NULL,
           last_seen_at TEXT NOT NULL,
@@ -1404,6 +1408,23 @@ export class BridgeDatabase {
       this.connection
         .prepare(
           "INSERT INTO schema_migrations(version, applied_at) VALUES (19, datetime('now'))",
+        )
+        .run();
+    }
+
+    const versionTwenty = this.connection
+      .prepare("SELECT version FROM schema_migrations WHERE version = 20")
+      .get() as SqlRow | undefined;
+    if (!versionTwenty) {
+      const columns = this.connection
+        .prepare("PRAGMA table_info(external_confirmed_interviews)")
+        .all() as SqlRow[];
+      if (!columns.some((column) => asString(column.name) === "room_name")) {
+        this.connection.exec("ALTER TABLE external_confirmed_interviews ADD COLUMN room_name TEXT");
+      }
+      this.connection
+        .prepare(
+          "INSERT INTO schema_migrations(version, applied_at) VALUES (20, datetime('now'))",
         )
         .run();
     }
@@ -3556,13 +3577,13 @@ export class BridgeDatabase {
       const insert = this.connection.prepare(`
         INSERT INTO external_confirmed_interviews(
           id, source_event_id, candidate_name, recruitment_name,
-          date, start_time, end_time, linked_case_id,
+          date, start_time, end_time, room_name, linked_case_id,
           first_seen_at, last_seen_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
       `);
       const update = this.connection.prepare(`
         UPDATE external_confirmed_interviews
-        SET candidate_name = ?, recruitment_name = ?, date = ?, start_time = ?, end_time = ?,
+        SET candidate_name = ?, recruitment_name = ?, date = ?, start_time = ?, end_time = ?, room_name = ?,
             last_seen_at = ?, updated_at = ?
         WHERE source_event_id = ?
       `);
@@ -3575,6 +3596,7 @@ export class BridgeDatabase {
             event.date,
             event.startTime,
             event.endTime,
+            event.roomName ?? null,
             seenAt,
             seenAt,
             event.sourceEventId,
@@ -3588,6 +3610,7 @@ export class BridgeDatabase {
             event.date,
             event.startTime,
             event.endTime,
+            event.roomName ?? null,
             seenAt,
             seenAt,
             seenAt,

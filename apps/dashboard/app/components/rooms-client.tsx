@@ -9,7 +9,7 @@ import { AppHeader, PageHeader } from "./app-shell";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
-import type { CandidateCase, DashboardSnapshot, DataFreshness } from "../lib/dashboard-types";
+import type { DashboardSnapshot, DataFreshness } from "../lib/dashboard-types";
 
 const calendarStartHour = 9;
 const calendarEndHour = 18;
@@ -58,8 +58,9 @@ function todayInSeoul(value?: string) {
   return `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, "0")}-${String(shifted.getUTCDate()).padStart(2, "0")}`;
 }
 
-function scheduleStatusLabel(status: CandidateCase["status"]) {
-  return status === "CONFIRMED" ? "최종 확정" : "후보자 응답 대기";
+function scheduleStatusLabel(item: ScheduledCalendarItem) {
+  if (item.source === "DAOU_OFFICE_CALENDAR") return "다우오피스 확정";
+  return item.status === "CONFIRMED" ? "최종 확정" : "후보자 응답 대기";
 }
 
 function timeCardStyle(startTime: string, endTime: string) {
@@ -81,10 +82,18 @@ function freshnessCopy(freshness: DataFreshness) {
   return { label: "회의실 정보 확인 필요", variant: "secondary" as const, description: "아직 회의실 동기화가 확인되지 않았습니다." };
 }
 
-type ScheduledCalendarItem = Pick<
-  CandidateCase,
-  "id" | "candidateName" | "status" | "scheduledRoomName" | "scheduledStartTime" | "scheduledEndTime"
-> & { caseId: string };
+type ScheduledCalendarItem = {
+  id: string;
+  caseId?: string;
+  candidateName: string | null;
+  recruitmentName: string | null;
+  status?: "CONFIRMED" | "AWAITING_CANDIDATE_CONFIRMATION";
+  source: "LOCAL" | "DAOU_OFFICE_CALENDAR";
+  roomName: string;
+  startTime: string;
+  endTime: string;
+  href: string | null;
+};
 
 type TimedItem = {
   id: string;
@@ -115,11 +124,7 @@ function RoomCalendarRow({
   scheduled: ScheduledCalendarItem[];
 }) {
   const blockLayouts = layoutTimedItems(blocks);
-  const scheduledLayouts = layoutTimedItems(scheduled.filter((item) => item.scheduledStartTime && item.scheduledEndTime).map((item) => ({
-    ...item,
-    startTime: item.scheduledStartTime!,
-    endTime: item.scheduledEndTime!,
-  })));
+  const scheduledLayouts = layoutTimedItems(scheduled);
   const reservationHeight = Math.max(blockLayouts.length > 0 ? blockLayouts[blockLayouts.length - 1]!.lane + 1 : 0, 1) * 38;
   const assignedHeight = Math.max(scheduledLayouts.length > 0 ? scheduledLayouts[scheduledLayouts.length - 1]!.lane + 1 : 0, 1) * 88;
   const rowHeight = Math.max(168, 20 + reservationHeight + assignedHeight);
@@ -143,20 +148,38 @@ function RoomCalendarRow({
             <span className="truncate">예약 {block.startTime} – {block.endTime}</span>
           </span>
         ))}
-        {scheduledLayouts.map(({ item: interviewCase, lane }) => (
-          <Link
-            aria-label={`${interviewCase.candidateName ?? "후보자"} ${interviewCase.startTime}부터 ${interviewCase.endTime}까지 ${scheduleStatusLabel(interviewCase.status)}`}
-            className={`absolute z-10 grid min-w-0 content-center gap-1 overflow-hidden rounded-lg border px-3 py-2 shadow-sm transition-[transform,box-shadow] hover:z-20 hover:-translate-y-0.5 hover:shadow-md ${interviewCase.status === "AWAITING_CANDIDATE_CONFIRMATION" ? "border-amber-300 bg-amber-50 text-amber-950" : "border-blue-300 bg-blue-50 text-blue-950"}`}
-            href={`/cases/${interviewCase.caseId}`}
-            key={interviewCase.id}
-            style={{ ...timeCardStyle(interviewCase.startTime, interviewCase.endTime), top: `${54 + lane * 88}px`, height: "76px" }}
-            title={`${interviewCase.candidateName ?? "후보자 확인 필요"} · ${interviewCase.startTime} – ${interviewCase.endTime}`}
-          >
-            <strong className="truncate text-base font-bold">{interviewCase.startTime} – {interviewCase.endTime}</strong>
-            <span className="truncate text-sm font-medium">{interviewCase.candidateName ?? "후보자 확인 필요"}</span>
-            <span className="truncate text-xs opacity-75">{scheduleStatusLabel(interviewCase.status)}</span>
-          </Link>
-        ))}
+        {scheduledLayouts.map(({ item: interview, lane }) => {
+          const status = scheduleStatusLabel(interview);
+          const className = `absolute z-10 grid min-w-0 content-center gap-1 overflow-hidden rounded-lg border px-3 py-2 shadow-sm transition-[transform,box-shadow] hover:z-20 hover:-translate-y-0.5 hover:shadow-md ${interview.source === "DAOU_OFFICE_CALENDAR" ? "border-emerald-300 bg-emerald-50 text-emerald-950" : interview.status === "AWAITING_CANDIDATE_CONFIRMATION" ? "border-amber-300 bg-amber-50 text-amber-950" : "border-blue-300 bg-blue-50 text-blue-950"}`;
+          const style = { ...timeCardStyle(interview.startTime, interview.endTime), top: `${54 + lane * 88}px`, height: "76px" };
+          const content = <>
+            <strong className="truncate text-base font-bold">{interview.startTime} – {interview.endTime}</strong>
+            <span className="truncate text-sm font-medium">{interview.candidateName ?? "후보자 확인 필요"}</span>
+            <span className="truncate text-xs opacity-75">{status}</span>
+          </>;
+          return interview.href ? (
+            <Link
+              aria-label={`${interview.candidateName ?? "후보자"} ${interview.startTime}부터 ${interview.endTime}까지 ${status}`}
+              className={className}
+              href={interview.href}
+              key={interview.id}
+              style={style}
+              title={`${interview.candidateName ?? "후보자 확인 필요"} · ${interview.startTime} – ${interview.endTime}`}
+            >
+              {content}
+            </Link>
+          ) : (
+            <div
+              aria-label={`${interview.candidateName ?? "후보자"} ${interview.startTime}부터 ${interview.endTime}까지 ${status}`}
+              className={className}
+              key={interview.id}
+              style={style}
+              title={`${interview.candidateName ?? "후보자 확인 필요"} · ${interview.startTime} – ${interview.endTime}`}
+            >
+              {content}
+            </div>
+          );
+        })}
         {!hasItems ? <span className="absolute inset-0 grid place-items-center text-sm text-slate-400">예약 없음</span> : null}
       </div>
     </section>
@@ -172,6 +195,7 @@ export function RoomsClient({ data }: { data: DashboardSnapshot }) {
       ...interviewCase.scheduledSegments.map((segment) => segment.date),
       ...(interviewCase.scheduledDate ? [interviewCase.scheduledDate] : []),
     ]),
+    ...(data.externalConfirmedInterviews ?? []).map((interview) => interview.date),
   ])].sort(), [data]);
   const preferredDate = useMemo(() => {
     // 데이터가 만들어진 시각이 아니라 사용자가 화면을 여는 실제 날짜를 기준으로 한다.
@@ -188,6 +212,7 @@ export function RoomsClient({ data }: { data: DashboardSnapshot }) {
       ...interviewCase.scheduledSegments.map((segment) => segment.roomName),
       ...(interviewCase.scheduledRoomName ? [interviewCase.scheduledRoomName] : []),
     ]),
+    ...(data.externalConfirmedInterviews ?? []).flatMap((interview) => interview.roomName ? [interview.roomName] : []),
   ])], [data]);
   const roomNames = useMemo(() => {
     if (discoveredRoomNames.length === 0) return [];
@@ -205,7 +230,7 @@ export function RoomsClient({ data }: { data: DashboardSnapshot }) {
       (interviewCase.scheduledSegments.length === 0 && interviewCase.scheduledDate === selectedDate)) &&
     ["CONFIRMED", "AWAITING_CANDIDATE_CONFIRMATION"].includes(interviewCase.status),
   );
-  const scheduled = scheduledCases.flatMap((interviewCase) => {
+  const scheduled: ScheduledCalendarItem[] = scheduledCases.flatMap((interviewCase) => {
     const segments = interviewCase.scheduledSegments.length > 0
       ? interviewCase.scheduledSegments
       : interviewCase.scheduledDate && interviewCase.scheduledStartTime && interviewCase.scheduledEndTime && interviewCase.scheduledRoomName
@@ -223,12 +248,36 @@ export function RoomsClient({ data }: { data: DashboardSnapshot }) {
         id: `${interviewCase.id}-${segment.stepId ?? segment.startTime}`,
         caseId: interviewCase.id,
         candidateName: interviewCase.candidateName,
-        status: interviewCase.status,
-        scheduledRoomName: segment.roomName,
-        scheduledStartTime: segment.startTime,
-        scheduledEndTime: segment.endTime,
+        recruitmentName: interviewCase.recruitmentName,
+        status: interviewCase.status === "CONFIRMED" ? "CONFIRMED" : "AWAITING_CANDIDATE_CONFIRMATION",
+        source: "LOCAL" as const,
+        roomName: segment.roomName,
+        startTime: segment.startTime,
+        endTime: segment.endTime,
+        href: `/cases/${interviewCase.id}`,
       }));
   });
+  const externalConfirmed: ScheduledCalendarItem[] = (data.externalConfirmedInterviews ?? [])
+    .filter((interview) => interview.date === selectedDate && interview.roomName)
+    .filter((interview) => !scheduled.some((local) =>
+      local.caseId === interview.linkedCaseId
+      && local.startTime === interview.startTime
+      && local.endTime === interview.endTime
+      && roomMatches(local.roomName, interview.roomName!),
+    ))
+    .map((interview) => ({
+      id: `daou:${interview.id}`,
+      candidateName: interview.candidateName,
+      recruitmentName: interview.recruitmentName,
+      source: "DAOU_OFFICE_CALENDAR" as const,
+      roomName: interview.roomName!,
+      startTime: interview.startTime,
+      endTime: interview.endTime,
+      href: null,
+    }));
+  const unassignedExternalConfirmed = (data.externalConfirmedInterviews ?? [])
+    .filter((interview) => interview.date === selectedDate && !interview.roomName);
+  const calendarInterviews = [...scheduled, ...externalConfirmed];
   const freshness = freshnessCopy(data.dashboard.summary.freshness.daouOffice);
   const hasRoomData = roomNames.length > 0;
   const refreshCalendar = () => startRefresh(() => router.refresh());
@@ -241,7 +290,7 @@ export function RoomsClient({ data }: { data: DashboardSnapshot }) {
           actions={<Button disabled={isRefreshing} onClick={refreshCalendar} variant="outline">{isRefreshing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}{isRefreshing ? "갱신 중" : "화면 새로고침"}</Button>}
           eyebrow="ROOM CALENDAR"
           title="회의실 캘린더"
-          description="다우오피스에 확보된 회의실 시간과 실제 인터뷰 배정을 같은 시간축에서 확인합니다. 새로고침은 로컬에 마지막으로 동기화된 정보를 다시 읽습니다."
+          description="다우오피스 회의실 예약과 캘린더에서 확인한 확정 인터뷰를 같은 시간축에서 확인합니다. 새로고침은 로컬에 마지막으로 동기화된 정보를 다시 읽습니다."
         />
 
         <Card className="overflow-hidden">
@@ -251,6 +300,7 @@ export function RoomsClient({ data }: { data: DashboardSnapshot }) {
                 <span className="flex items-center gap-2"><i aria-hidden="true" className="size-2.5 rounded-sm bg-slate-300" />회의실 예약</span>
                 <span className="flex items-center gap-2"><i aria-hidden="true" className="size-2.5 rounded-sm bg-blue-500" />인터뷰 배정</span>
                 <span className="flex items-center gap-2"><i aria-hidden="true" className="size-2.5 rounded-sm bg-amber-400" />후보자 응답 대기</span>
+                <span className="flex items-center gap-2"><i aria-hidden="true" className="size-2.5 rounded-sm bg-emerald-500" />다우오피스 확정</span>
                 <Badge variant="outline">다우오피스 읽기 전용</Badge>
               </div>
               <div className="flex items-center gap-2 rounded-lg bg-slate-50 px-3 py-2">
@@ -278,7 +328,7 @@ export function RoomsClient({ data }: { data: DashboardSnapshot }) {
                     blocks={blocks.filter((block) => block.roomName === roomName)}
                     key={roomName}
                     roomName={roomName}
-                    scheduled={scheduled.filter((interviewCase) => interviewCase.scheduledRoomName === roomName)}
+                    scheduled={calendarInterviews.filter((interview) => roomMatches(interview.roomName, roomName))}
                   />
                 ))}
               </div>
@@ -290,8 +340,10 @@ export function RoomsClient({ data }: { data: DashboardSnapshot }) {
           </CardContent>
         </Card>
 
+        {unassignedExternalConfirmed.length > 0 ? <Card className="mt-5 border-amber-200 bg-amber-50/50"><CardHeader className="border-b border-amber-100"><CardTitle className="text-lg">회의실 확인이 필요한 확정 인터뷰</CardTitle></CardHeader><CardContent className="divide-y divide-amber-100">{unassignedExternalConfirmed.map((interview) => <div className="py-3 first:pt-0 last:pb-0" key={interview.id}><p className="font-bold text-slate-950">{interview.candidateName}</p><p className="mt-1 text-sm text-slate-600">{interview.recruitmentName} · {interview.startTime}–{interview.endTime}</p><p className="mt-1 text-sm text-amber-800">다우오피스 캘린더에 회의실명이 없어 시간표 행에는 표시하지 않았습니다.</p></div>)}</CardContent></Card> : null}
+
         <div className="mt-5 flex items-start gap-2 rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm leading-6 text-slate-600"><Clock3 className="mt-0.5 size-4 shrink-0 text-slate-400" /><span>예약 블록은 취소하지 않고 유지합니다. 인터뷰를 취소하거나 변경해도 다우오피스의 기존 회의실 예약에는 영향을 주지 않습니다.</span></div>
-        {scheduledCases.length > 0 ? <div className="mt-4 flex items-center gap-2 text-sm text-slate-600"><UsersRound className="size-4 text-blue-600" />선택한 날짜에 인터뷰 {scheduledCases.length}건이 배정되어 있습니다.</div> : null}
+        {calendarInterviews.length > 0 ? <div className="mt-4 flex items-center gap-2 text-sm text-slate-600"><UsersRound className="size-4 text-blue-600" />선택한 날짜에 회의실이 확인된 인터뷰 {calendarInterviews.length}건이 표시되어 있습니다.</div> : null}
       </main>
     </div>
   );

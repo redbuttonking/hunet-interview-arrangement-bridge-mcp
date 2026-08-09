@@ -268,6 +268,7 @@ export function getDashboardSnapshot(db: BridgeDatabase, limit = 100) {
       date: interview.date,
       startTime: interview.startTime,
       endTime: interview.endTime,
+      roomName: interview.roomName,
       linkedCaseId: interview.linkedCaseId,
       lastSeenAt: interview.lastSeenAt,
       })),

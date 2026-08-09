@@ -145,6 +145,7 @@ export type DashboardSnapshot = {
     date: string;
     startTime: string;
     endTime: string;
+    roomName: string | null;
     linkedCaseId: string | null;
     lastSeenAt: string;
   }>;

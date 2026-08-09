@@ -49,12 +49,14 @@ describe("DaouOffice interview calendar parser", () => {
       title: "[면접] B2B 기업교육 AI 강사 인터뷰 (장세환)",
       startDateTime: "2026-08-04T16:00:00.000+09:00",
       endDateTime: "2026-08-04T17:00:00.000+09:00",
+      location: "[818호] 행복룸",
     }])).toMatchObject([{
       candidateName: "장세환",
       recruitmentName: "B2B 기업교육 AI 강사 인터뷰",
       date: "2026-08-04",
       startTime: "16:00",
       endTime: "17:00",
+      roomName: "행복룸",
     }]);
   });
 });
