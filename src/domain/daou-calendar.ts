@@ -12,6 +12,13 @@ export interface DaouInterviewCalendarEvent {
   rawText: string;
 }
 
+export interface DaouInterviewCalendarEntry {
+  title: string;
+  startDateTime: string;
+  endDateTime: string;
+  rawText?: string;
+}
+
 function normalizeText(value: string): string {
   return value
     .replace(/\u00a0/g, " ")
@@ -60,6 +67,55 @@ function eventId(title: string, date: string, startTime: string, endTime: string
   return `DAOU_CALENDAR:${createHash("sha256").update(`${title}|${date}|${startTime}|${endTime}`).digest("hex")}`;
 }
 
+function parseIsoDateTime(value: string): { date: string; time: string } | undefined {
+  const match = value.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/);
+  if (!match) return undefined;
+  return { date: match[1]!, time: match[2]! };
+}
+
+function toCalendarEvent(
+  title: { title: string; recruitmentName: string; candidateName: string },
+  date: string,
+  startTime: string,
+  endTime: string,
+  rawText: string,
+): DaouInterviewCalendarEvent {
+  return {
+    sourceEventId: eventId(title.title, date, startTime, endTime),
+    ...title,
+    date,
+    startTime,
+    endTime,
+    rawText,
+  };
+}
+
+/** 다우오피스 일정 API의 제목과 ISO 시간을 최종 확정 인터뷰 일정으로 변환한다. */
+export function parseDaouInterviewCalendarEntries(
+  entries: DaouInterviewCalendarEntry[],
+): DaouInterviewCalendarEvent[] {
+  const events = new Map<string, DaouInterviewCalendarEvent>();
+  for (const entry of entries) {
+    const title = interviewTitle(entry.title);
+    const start = parseIsoDateTime(entry.startDateTime);
+    const end = parseIsoDateTime(entry.endDateTime);
+    if (!title || !start || !end || start.date !== end.date || start.time >= end.time) {
+      continue;
+    }
+    const event = toCalendarEvent(
+      title,
+      start.date,
+      start.time,
+      end.time,
+      entry.rawText ?? `${entry.title} ${entry.startDateTime} ${entry.endDateTime}`,
+    );
+    events.set(event.sourceEventId, event);
+  }
+  return [...events.values()].sort((left, right) =>
+    `${left.date}T${left.startTime}${left.candidateName}`.localeCompare(`${right.date}T${right.startTime}${right.candidateName}`),
+  );
+}
+
 /** 캘린더 본문의 일정 줄과 주변 날짜·시간을 읽어 인터뷰 일정만 반환한다. */
 export function parseDaouInterviewCalendarText(text: string): DaouInterviewCalendarEvent[] {
   const lines = text.split(/\r?\n/).map(normalizeText).filter(Boolean);
@@ -73,14 +129,8 @@ export function parseDaouInterviewCalendarText(text: string): DaouInterviewCalen
     const date = parseDate(context);
     const time = parseTimeRange(lines.slice(index, Math.min(lines.length, index + 4)).join(" ")) ?? parseTimeRange(context);
     if (!date || !time) continue;
-    const sourceEventId = eventId(title.title, date, time.startTime, time.endTime);
-    events.set(sourceEventId, {
-      sourceEventId,
-      ...title,
-      date,
-      ...time,
-      rawText: context,
-    });
+    const event = toCalendarEvent(title, date, time.startTime, time.endTime, context);
+    events.set(event.sourceEventId, event);
   }
   return [...events.values()].sort((left, right) =>
     `${left.date}T${left.startTime}${left.candidateName}`.localeCompare(`${right.date}T${right.startTime}${right.candidateName}`),

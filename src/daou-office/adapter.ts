@@ -1,7 +1,12 @@
-// 인증된 전용 Edge 브라우저를 통해 다우오피스 인터뷰 회의실 예약 블록을 읽는다.
+// 인증된 전용 Chrome 브라우저를 통해 다우오피스 인터뷰 회의실 예약 블록을 읽는다.
 import { chromium, type Page } from "playwright-core";
 import type { AppConfig } from "../config.js";
-import { parseDaouInterviewCalendarText, type DaouInterviewCalendarEvent } from "../domain/daou-calendar.js";
+import {
+  parseDaouInterviewCalendarEntries,
+  parseDaouInterviewCalendarText,
+  type DaouInterviewCalendarEntry,
+  type DaouInterviewCalendarEvent,
+} from "../domain/daou-calendar.js";
 import {
   DAOU_INTERVIEW_ROOM_NAMES,
   DAOU_MEETING_ROOM_ASSET_NAME,
@@ -149,6 +154,8 @@ export class BrowserDaouOfficeReservationAdapter
       const page = await this.calendarPage(browser.contexts().flatMap((context) => context.pages()));
       await this.ensureInterviewCalendars(page);
       await page.waitForTimeout(300);
+      const apiEvents = await this.calendarInterviewEvents(page);
+      if (apiEvents.length > 0) return apiEvents;
       return parseDaouInterviewCalendarText(await page.locator("body").innerText());
     } finally {
       await browser.close();
@@ -203,6 +210,37 @@ export class BrowserDaouOfficeReservationAdapter
         if (checkbox && !checkbox.checked) checkbox.click();
       }
     }, ["내 일정(기본)", "내 일정(강해빈)", "내 일정(김성은)"]);
+  }
+
+  private async calendarInterviewEvents(
+    page: Page,
+  ): Promise<DaouInterviewCalendarEvent[]> {
+    const paths = await page.evaluate(() =>
+      [...new Set(
+        performance
+          .getEntriesByType("resource")
+          .map((entry) => entry.name)
+          .filter((url) => url.includes("/api/calendar/event?"))
+          .map((url) => {
+            const parsed = new URL(url);
+            return `${parsed.pathname}${parsed.search}`;
+          }),
+      )],
+    );
+    const entries: DaouInterviewCalendarEntry[] = [];
+    for (const path of paths) {
+      const response = asRecord(await this.fetchJson(page, path), "calendar event list");
+      const data = asArray(response.data, "calendar event list");
+      for (const value of data) {
+        const event = asRecord(value, "calendar event");
+        const title = stringValue(event.summary);
+        const startDateTime = stringValue(event.startTime);
+        const endDateTime = stringValue(event.endTime);
+        if (!title || !startDateTime || !endDateTime) continue;
+        entries.push({ title, startDateTime, endDateTime });
+      }
+    }
+    return parseDaouInterviewCalendarEntries(entries);
   }
 
   private async fetchJson(page: Page, path: string): Promise<unknown> {

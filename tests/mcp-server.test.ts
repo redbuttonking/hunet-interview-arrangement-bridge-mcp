@@ -244,7 +244,7 @@ describe("bridge MCP server", () => {
     expect(status.isError).not.toBe(true);
     expect(status.structuredContent).toMatchObject({
       database: { activeCases: 0 },
-      integrations: { daouOffice: { mode: "DEDICATED_EDGE_PROFILE" } },
+      integrations: { daouOffice: { mode: "DEDICATED_CHROME_PROFILE" } },
     });
 
     const skillOperations = await client.callTool({

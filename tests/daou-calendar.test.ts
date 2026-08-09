@@ -1,6 +1,9 @@
 // 다우오피스 캘린더 인터뷰 일정 파서를 검증한다.
 import { describe, expect, it } from "vitest";
-import { parseDaouInterviewCalendarText } from "../src/domain/daou-calendar.js";
+import {
+  parseDaouInterviewCalendarEntries,
+  parseDaouInterviewCalendarText,
+} from "../src/domain/daou-calendar.js";
 
 describe("DaouOffice interview calendar parser", () => {
   it("extracts interview title, candidate, date, and Korean time range", () => {
@@ -35,6 +38,20 @@ describe("DaouOffice interview calendar parser", () => {
   it("handles an event title and time rendered on one line", () => {
     expect(parseDaouInterviewCalendarText(`2026-08-04 [면접] 데이터 엔지니어 인터뷰 (김누리) 16:00 ~ 17:00`)).toMatchObject([{
       candidateName: "김누리",
+      date: "2026-08-04",
+      startTime: "16:00",
+      endTime: "17:00",
+    }]);
+  });
+
+  it("extracts final interview events from the calendar API ISO times", () => {
+    expect(parseDaouInterviewCalendarEntries([{
+      title: "[면접] B2B 기업교육 AI 강사 인터뷰 (장세환)",
+      startDateTime: "2026-08-04T16:00:00.000+09:00",
+      endDateTime: "2026-08-04T17:00:00.000+09:00",
+    }])).toMatchObject([{
+      candidateName: "장세환",
+      recruitmentName: "B2B 기업교육 AI 강사 인터뷰",
       date: "2026-08-04",
       startTime: "16:00",
       endTime: "17:00",

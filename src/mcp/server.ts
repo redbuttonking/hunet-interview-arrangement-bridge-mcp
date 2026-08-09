@@ -159,7 +159,7 @@ export function createBridgeMcpServer(
           ninehireEvaluationSummary: gateway.isConfigured(),
           ninehireRecruitmentParticipants: gateway.isConfigured(),
           daouOffice: {
-            mode: "DEDICATED_EDGE_PROFILE",
+            mode: "DEDICATED_CHROME_PROFILE",
             url: config.daouOffice.url,
           },
         },
@@ -190,7 +190,7 @@ export function createBridgeMcpServer(
     {
       title: "다우오피스 브라우저 상태",
       description:
-        "전용 Edge 프로필과 로컬 전용 디버그 연결의 준비 상태를 확인합니다. 다우오피스 예약을 읽거나 변경하지 않습니다.",
+        "전용 Chrome 프로필과 로컬 전용 디버그 연결의 준비 상태를 확인합니다. 다우오피스 예약을 읽거나 변경하지 않습니다.",
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -206,7 +206,7 @@ export function createBridgeMcpServer(
     {
       title: "다우오피스 전용 로그인 브라우저 열기",
       description:
-        "개인 브라우저와 분리된 로컬 Edge 프로필로 다우오피스를 엽니다. 최초 로그인은 사용자가 직접 수행하며, 예약을 읽거나 변경하지 않습니다.",
+        "개인 브라우저와 분리된 로컬 Chrome 프로필로 다우오피스를 엽니다. 최초 로그인은 사용자가 직접 수행하며, 예약을 읽거나 변경하지 않습니다.",
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
