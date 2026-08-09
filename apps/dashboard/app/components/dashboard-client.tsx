@@ -853,7 +853,7 @@ function SummaryMetricCard({
 
   return (
     <Card className="h-full">
-      <CardContent className="min-h-44 p-6">
+      <CardContent className="min-h-44 p-6 pt-6 sm:p-7 sm:pt-7">
         <div className="flex items-center gap-4">
           <span className={`grid size-11 shrink-0 place-items-center rounded-xl ${toneClass}`}>{icon}</span>
           <p className="text-base font-semibold leading-6 text-slate-700">{label}</p>
