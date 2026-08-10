@@ -156,12 +156,13 @@ function RoomCalendarRow({
         {scheduledLayouts.map(({ item: interview, lane }) => {
           const status = scheduleStatusLabel(interview);
           const duration = toMinutes(interview.endTime) - toMinutes(interview.startTime);
-          const isCompact = duration < 60;
+          // 한 시간 이하는 카드 폭이 좁아 시간과 후보자 이름을 우선 표시한다.
+          const isCompact = duration <= 60;
           const className = `absolute z-10 grid min-w-0 content-center gap-0.5 overflow-hidden rounded-lg border shadow-sm transition-[transform,box-shadow] hover:z-20 hover:-translate-y-0.5 hover:shadow-md ${isCompact ? "px-1.5 py-1" : "px-3 py-2"} ${interview.source === "DAOU_OFFICE_CALENDAR" ? "border-emerald-300 bg-emerald-50 text-emerald-950" : interview.status === "AWAITING_CANDIDATE_CONFIRMATION" ? "border-amber-300 bg-amber-50 text-amber-950" : "border-blue-300 bg-blue-50 text-blue-950"}`;
           const style = { ...timeCardStyle(interview.startTime, interview.endTime), top: `${54 + lane * 82}px`, height: "70px" };
           const content = <>
-            <strong className={`${isCompact ? "text-[11px] leading-4" : "text-base leading-5"} truncate font-bold tabular-nums`}>{isCompact ? interview.startTime : `${interview.startTime} – ${interview.endTime}`}</strong>
-            <span className={`${isCompact ? "text-[11px] leading-4" : "text-sm leading-5"} truncate font-semibold`}>{interview.candidateName ?? "후보자 확인 필요"}</span>
+            <strong className={`${isCompact ? "text-[13px] leading-4" : "text-base leading-5"} ${isCompact ? "whitespace-nowrap" : "truncate"} font-bold tabular-nums`}>{duration < 60 ? interview.startTime : `${interview.startTime}–${interview.endTime}`}</strong>
+            <span className="truncate text-sm leading-5 font-semibold">{interview.candidateName ?? "후보자 확인 필요"}</span>
             {!isCompact ? <span className="truncate text-xs leading-4 opacity-75">{status}</span> : null}
           </>;
           return interview.href ? (
