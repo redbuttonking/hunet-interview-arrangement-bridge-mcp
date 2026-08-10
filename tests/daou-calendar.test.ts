@@ -56,7 +56,27 @@ describe("DaouOffice interview calendar parser", () => {
       date: "2026-08-04",
       startTime: "16:00",
       endTime: "17:00",
-      roomName: "행복룸",
+      roomName: "[818호] 행복룸",
     }]);
+  });
+
+  it("normalizes calendar room aliases to the room reservation names", () => {
+    expect(parseDaouInterviewCalendarEntries([
+      {
+        title: "[면접] 영업대표 인터뷰 (김가람)",
+        startDateTime: "2026-08-11T10:00:00.000+09:00",
+        endDateTime: "2026-08-11T11:00:00.000+09:00",
+        location: "열정룸",
+      },
+      {
+        title: "[면접] 영업대표 인터뷰 (이바다)",
+        startDateTime: "2026-08-11T11:00:00.000+09:00",
+        endDateTime: "2026-08-11T12:00:00.000+09:00",
+        location: "의문당",
+      },
+    ])).toMatchObject([
+      { roomName: "[818호] 열정룸" },
+      { roomName: "[710호] 疑問堂(의문당)" },
+    ]);
   });
 });

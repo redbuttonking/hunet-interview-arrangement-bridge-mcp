@@ -15,10 +15,10 @@ const calendarStartHour = 9;
 const calendarEndHour = 18;
 const calendarHours = Array.from({ length: calendarEndHour - calendarStartHour }, (_, index) => calendarStartHour + index);
 const roomDisplayOrder = [
-  { label: "열정룸", aliases: ["열정룸"] },
-  { label: "행복룸", aliases: ["행복룸"] },
+  { label: "[818호] 열정룸", aliases: ["[818호] 열정룸", "열정룸"] },
+  { label: "[818호] 행복룸", aliases: ["[818호] 행복룸", "행복룸"] },
   { label: "게임체인저", aliases: ["게임체인저"] },
-  { label: "의문당", aliases: ["의문당", "疑問堂"] },
+  { label: "[710호] 疑問堂(의문당)", aliases: ["[710호] 疑問堂(의문당)", "의문당", "疑問堂"] },
 ] as const;
 
 function roomOrder(roomName: string) {
@@ -29,6 +29,11 @@ function roomOrder(roomName: string) {
 function roomMatches(roomName: string, roomLabel: string) {
   const room = roomDisplayOrder.find((item) => item.label === roomLabel);
   return room?.aliases.some((alias) => roomName.includes(alias)) ?? roomName === roomLabel;
+}
+
+function canonicalRoomName(roomName: string) {
+  const room = roomDisplayOrder.find((item) => item.aliases.some((alias) => roomName.includes(alias)));
+  return room?.label ?? roomName;
 }
 
 function toMinutes(value: string) {
@@ -126,12 +131,12 @@ function RoomCalendarRow({
   const blockLayouts = layoutTimedItems(blocks);
   const scheduledLayouts = layoutTimedItems(scheduled);
   const reservationHeight = Math.max(blockLayouts.length > 0 ? blockLayouts[blockLayouts.length - 1]!.lane + 1 : 0, 1) * 38;
-  const assignedHeight = Math.max(scheduledLayouts.length > 0 ? scheduledLayouts[scheduledLayouts.length - 1]!.lane + 1 : 0, 1) * 88;
-  const rowHeight = Math.max(168, 20 + reservationHeight + assignedHeight);
+  const assignedHeight = Math.max(scheduledLayouts.length > 0 ? scheduledLayouts[scheduledLayouts.length - 1]!.lane + 1 : 0, 1) * 82;
+  const rowHeight = Math.max(164, 20 + reservationHeight + assignedHeight);
   const hasItems = blockLayouts.length > 0 || scheduledLayouts.length > 0;
 
   return (
-    <section className="grid min-w-[1060px] grid-cols-[188px_minmax(872px,1fr)] border-t border-slate-200 first:border-t-0" style={{ minHeight: rowHeight }}>
+    <section className="grid min-w-[1280px] grid-cols-[188px_minmax(1092px,1fr)] border-t border-slate-200 first:border-t-0" style={{ minHeight: rowHeight }}>
       <h3 className="sticky left-0 z-20 flex items-start border-r border-slate-200 bg-white px-5 pt-6 text-base font-bold tracking-tight text-slate-900">{roomName}</h3>
       <div className="relative overflow-hidden bg-white" style={{ minHeight: rowHeight }}>
         <div aria-hidden="true" className="absolute inset-0 grid grid-cols-9">
@@ -150,12 +155,14 @@ function RoomCalendarRow({
         ))}
         {scheduledLayouts.map(({ item: interview, lane }) => {
           const status = scheduleStatusLabel(interview);
-          const className = `absolute z-10 grid min-w-0 content-center gap-1 overflow-hidden rounded-lg border px-3 py-2 shadow-sm transition-[transform,box-shadow] hover:z-20 hover:-translate-y-0.5 hover:shadow-md ${interview.source === "DAOU_OFFICE_CALENDAR" ? "border-emerald-300 bg-emerald-50 text-emerald-950" : interview.status === "AWAITING_CANDIDATE_CONFIRMATION" ? "border-amber-300 bg-amber-50 text-amber-950" : "border-blue-300 bg-blue-50 text-blue-950"}`;
-          const style = { ...timeCardStyle(interview.startTime, interview.endTime), top: `${54 + lane * 88}px`, height: "76px" };
+          const duration = toMinutes(interview.endTime) - toMinutes(interview.startTime);
+          const isCompact = duration < 60;
+          const className = `absolute z-10 grid min-w-0 content-center gap-0.5 overflow-hidden rounded-lg border shadow-sm transition-[transform,box-shadow] hover:z-20 hover:-translate-y-0.5 hover:shadow-md ${isCompact ? "px-1.5 py-1" : "px-3 py-2"} ${interview.source === "DAOU_OFFICE_CALENDAR" ? "border-emerald-300 bg-emerald-50 text-emerald-950" : interview.status === "AWAITING_CANDIDATE_CONFIRMATION" ? "border-amber-300 bg-amber-50 text-amber-950" : "border-blue-300 bg-blue-50 text-blue-950"}`;
+          const style = { ...timeCardStyle(interview.startTime, interview.endTime), top: `${54 + lane * 82}px`, height: "70px" };
           const content = <>
-            <strong className="truncate text-base font-bold">{interview.startTime} – {interview.endTime}</strong>
-            <span className="truncate text-sm font-medium">{interview.candidateName ?? "후보자 확인 필요"}</span>
-            <span className="truncate text-xs opacity-75">{status}</span>
+            <strong className={`${isCompact ? "text-[11px] leading-4" : "text-base leading-5"} truncate font-bold tabular-nums`}>{isCompact ? interview.startTime : `${interview.startTime} – ${interview.endTime}`}</strong>
+            <span className={`${isCompact ? "text-[11px] leading-4" : "text-sm leading-5"} truncate font-semibold`}>{interview.candidateName ?? "후보자 확인 필요"}</span>
+            {!isCompact ? <span className="truncate text-xs leading-4 opacity-75">{status}</span> : null}
           </>;
           return interview.href ? (
             <Link
@@ -216,8 +223,9 @@ export function RoomsClient({ data }: { data: DashboardSnapshot }) {
   ])], [data]);
   const roomNames = useMemo(() => {
     if (discoveredRoomNames.length === 0) return [];
-    const preferred = roomDisplayOrder.map((room) => discoveredRoomNames.find((name) => roomMatches(name, room.label)) ?? room.label);
-    const additional = discoveredRoomNames.filter((name) => !preferred.some((preferredName) => preferredName === name));
+    const canonicalNames = [...new Set(discoveredRoomNames.map(canonicalRoomName))];
+    const preferred = roomDisplayOrder.map((room) => room.label).filter((roomName) => canonicalNames.includes(roomName));
+    const additional = canonicalNames.filter((roomName) => !roomDisplayOrder.some((room) => room.label === roomName));
     return [...preferred, ...additional].sort((left, right) => {
       const orderDifference = roomOrder(left) - roomOrder(right);
       if (orderDifference !== 0) return orderDifference;
@@ -251,7 +259,7 @@ export function RoomsClient({ data }: { data: DashboardSnapshot }) {
         recruitmentName: interviewCase.recruitmentName,
         status: interviewCase.status === "CONFIRMED" ? "CONFIRMED" : "AWAITING_CANDIDATE_CONFIRMATION",
         source: "LOCAL" as const,
-        roomName: segment.roomName,
+        roomName: canonicalRoomName(segment.roomName),
         startTime: segment.startTime,
         endTime: segment.endTime,
         href: `/cases/${interviewCase.id}`,
@@ -270,7 +278,7 @@ export function RoomsClient({ data }: { data: DashboardSnapshot }) {
       candidateName: interview.candidateName,
       recruitmentName: interview.recruitmentName,
       source: "DAOU_OFFICE_CALENDAR" as const,
-      roomName: interview.roomName!,
+      roomName: canonicalRoomName(interview.roomName!),
       startTime: interview.startTime,
       endTime: interview.endTime,
       href: null,
@@ -319,13 +327,13 @@ export function RoomsClient({ data }: { data: DashboardSnapshot }) {
           <CardContent className="p-0">
             {hasRoomData ? (
               <div className="overflow-x-auto" tabIndex={0} aria-label="회의실 시간표. 좌우로 스크롤할 수 있습니다.">
-                <div className="grid min-w-[1060px] grid-cols-[188px_minmax(872px,1fr)] bg-slate-50 text-sm font-semibold text-slate-600">
+                <div className="grid min-w-[1280px] grid-cols-[188px_minmax(1092px,1fr)] bg-slate-50 text-sm font-semibold text-slate-600">
                   <span className="sticky left-0 z-30 flex h-12 items-center border-r border-slate-200 bg-slate-50 px-5">회의실</span>
                   <div className="grid grid-cols-9">{calendarHours.map((hour) => <span className="flex h-12 items-center border-r border-slate-200 px-3" key={hour}>{String(hour).padStart(2, "0")}:00</span>)}</div>
                 </div>
                 {roomNames.map((roomName) => (
                   <RoomCalendarRow
-                    blocks={blocks.filter((block) => block.roomName === roomName)}
+                    blocks={blocks.filter((block) => roomMatches(block.roomName, roomName))}
                     key={roomName}
                     roomName={roomName}
                     scheduled={calendarInterviews.filter((interview) => roomMatches(interview.roomName, roomName))}

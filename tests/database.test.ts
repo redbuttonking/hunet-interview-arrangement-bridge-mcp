@@ -9,7 +9,7 @@ describe("BridgeDatabase", () => {
   it("applies every schema migration when the database opens", () => {
     db = new BridgeDatabase(":memory:");
 
-    expect(db.getLatestSchemaVersion()).toBe(21);
+    expect(db.getLatestSchemaVersion()).toBe(22);
   });
 
   it("stores a Slack request channel per recruitment and resolves it for a case", () => {

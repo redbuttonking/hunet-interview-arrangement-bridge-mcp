@@ -22,10 +22,10 @@ export interface DaouInterviewCalendarEntry {
 }
 
 const interviewRoomAliases = [
-  { roomName: "열정룸", aliases: ["열정룸"] },
-  { roomName: "행복룸", aliases: ["행복룸"] },
+  { roomName: "[818호] 열정룸", aliases: ["[818호] 열정룸", "열정룸"] },
+  { roomName: "[818호] 행복룸", aliases: ["[818호] 행복룸", "행복룸"] },
   { roomName: "게임체인저", aliases: ["게임체인저"] },
-  { roomName: "의문당", aliases: ["의문당", "疑問堂"] },
+  { roomName: "[710호] 疑問堂(의문당)", aliases: ["[710호] 疑問堂(의문당)", "의문당", "疑問堂"] },
 ] as const;
 
 function interviewRoomName(location: string | undefined): string | undefined {

@@ -1461,6 +1461,27 @@ export class BridgeDatabase {
         )
         .run();
     }
+
+    const versionTwentyTwo = this.connection
+      .prepare("SELECT version FROM schema_migrations WHERE version = 22")
+      .get() as SqlRow | undefined;
+    if (!versionTwentyTwo) {
+      this.connection.exec(`
+        UPDATE external_confirmed_interviews
+        SET room_name = CASE
+          WHEN room_name LIKE '%열정룸%' THEN '[818호] 열정룸'
+          WHEN room_name LIKE '%행복룸%' THEN '[818호] 행복룸'
+          WHEN room_name LIKE '%의문당%' OR room_name LIKE '%疑問堂%' THEN '[710호] 疑問堂(의문당)'
+          ELSE room_name
+        END
+        WHERE room_name IS NOT NULL;
+      `);
+      this.connection
+        .prepare(
+          "INSERT INTO schema_migrations(version, applied_at) VALUES (22, datetime('now'))",
+        )
+        .run();
+    }
   }
 
   transaction<T>(operation: () => T): T {
