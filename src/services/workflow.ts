@@ -375,6 +375,15 @@ export class WorkflowService {
     private readonly identityResolver?: SlackIdentityResolver,
   ) {}
 
+  private requestChannelIdForCase(caseId: string): string {
+    const mappedChannelId = this.db.getRequestChannelForCase(caseId);
+    if (mappedChannelId) return mappedChannelId;
+    if (this.config.slack.requestChannelId) return this.config.slack.requestChannelId;
+    throw new Error(
+      "No Slack request channel is configured for this recruitment or as a default.",
+    );
+  }
+
   async previewRecruitmentInterviewTemplate(recruitmentId: string) {
     if (!this.ninehire.getRecruitmentPipeline) {
       throw new Error("NineHire recruitment pipeline lookup is not available.");
@@ -775,6 +784,10 @@ export class WorkflowService {
       });
       return { notificationId, result: "REVIEW_REQUIRED" };
     }
+    if (["passed", "failed"].includes(evaluation.summary.currentStatus ?? "")) {
+      this.db.updateNotificationStatus(notificationId, "NOT_ELIGIBLE");
+      return { notificationId, result: "EVALUATION_IGNORED_FINALIZED_CANDIDATE" };
+    }
     const eligibility = classifyInterviewArrangementEligibility(
       evaluation.summary,
     );
@@ -960,9 +973,6 @@ export class WorkflowService {
   }
 
   createAvailabilityRecoveryDraft(reviewId: string): DraftRow {
-    if (!this.config.slack.requestChannelId) {
-      throw new Error("SLACK_REQUEST_CHANNEL_ID is not configured.");
-    }
     const review = this.db.getReview(reviewId);
     if (
       !review ||
@@ -1008,7 +1018,7 @@ export class WorkflowService {
     const draft = this.db.createDraft({
       caseId: review.caseId,
       workflowReviewId: review.id,
-      channelId: this.config.slack.requestChannelId,
+      channelId: this.requestChannelIdForCase(review.caseId),
       previewText: payload.text,
       blocksJson: JSON.stringify(payload.blocks),
       payloadHash: hashPayload(payload.text, payload.blocks),
@@ -2195,9 +2205,6 @@ export class WorkflowService {
   }
 
   async createRequestDraft(caseId: string): Promise<DraftRow> {
-    if (!this.config.slack.requestChannelId) {
-      throw new Error("SLACK_REQUEST_CHANNEL_ID is not configured.");
-    }
     await this.syncCaseInterviewers(caseId);
     const bundle = this.db.getCaseBundle(caseId);
     if (!bundle) throw new Error(`Case not found: ${caseId}`);
@@ -2226,7 +2233,7 @@ export class WorkflowService {
     const payload = buildRequestMessage(bundle, { plan });
     return this.db.createDraft({
       caseId,
-      channelId: this.config.slack.requestChannelId,
+      channelId: this.requestChannelIdForCase(caseId),
       previewText: payload.text,
       blocksJson: JSON.stringify(payload.blocks),
       payloadHash: hashPayload(payload.text, payload.blocks),
@@ -2243,9 +2250,6 @@ export class WorkflowService {
     availabilityPolicy: RescheduleAvailabilityPolicy;
     reason: string;
   }): ScheduleTransitionResult & { scheduleUpdateDraft: DraftRow | null } {
-    if (!this.config.slack.requestChannelId) {
-      throw new Error("SLACK_REQUEST_CHANNEL_ID is not configured.");
-    }
     const transition = this.db.reopenScheduleForReschedule(input);
     const bundle = this.db.getCaseBundle(input.caseId);
     if (!bundle) throw new Error(`Case not found: ${input.caseId}`);
@@ -2268,9 +2272,6 @@ export class WorkflowService {
       BridgeDatabase["createCancellationExternalFollowUps"]
     >;
   } {
-    if (!this.config.slack.requestChannelId) {
-      throw new Error("SLACK_REQUEST_CHANNEL_ID is not configured.");
-    }
     const transition = this.db.cancelInterviewArrangement(input);
     const bundle = this.db.getCaseBundle(input.caseId);
     if (!bundle) throw new Error(`Case not found: ${input.caseId}`);
@@ -2344,9 +2345,6 @@ export class WorkflowService {
   }
 
   createScheduleConfirmationDraft(caseId: string): DraftRow {
-    if (!this.config.slack.requestChannelId) {
-      throw new Error("SLACK_REQUEST_CHANNEL_ID is not configured.");
-    }
     const bundle = this.db.getCaseBundle(caseId);
     if (!bundle) throw new Error(`Case not found: ${caseId}`);
     if (
@@ -2362,7 +2360,7 @@ export class WorkflowService {
     const payload = this.buildScheduleConfirmationPayload(caseId, bundle);
     return this.db.createDraft({
       caseId,
-      channelId: this.config.slack.requestChannelId,
+      channelId: this.requestChannelIdForCase(caseId),
       previewText: payload.text,
       blocksJson: JSON.stringify(payload.blocks),
       payloadHash: hashPayload(payload.text, payload.blocks),
@@ -2532,7 +2530,7 @@ export class WorkflowService {
     );
     return this.db.createDraft({
       caseId: bundle.interviewCase.id,
-      channelId: this.config.slack.requestChannelId!,
+      channelId: this.requestChannelIdForCase(bundle.interviewCase.id),
       previewText: payload.text,
       blocksJson: JSON.stringify(payload.blocks),
       payloadHash: hashPayload(payload.text, payload.blocks),

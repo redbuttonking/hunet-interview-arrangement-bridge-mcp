@@ -66,6 +66,55 @@ function createAwaitingCandidateConfirmationCase(
 }
 
 describe("evaluation approval workflow", () => {
+  it("ignores a late evaluation notification for a finalized candidate", async () => {
+    db = new BridgeDatabase(":memory:");
+    const workflow = new WorkflowService(db, config, {
+      async lookupCompletedEvaluation() {
+        return {
+          context: {
+            candidateRef: "A1",
+            candidateName: "Finalized candidate",
+            recruitmentRef: "R1",
+            recruitmentName: "Recruitment",
+          },
+          summary: {
+            applicantProgressId: "A1",
+            recruitmentId: "R1",
+            currentStatus: "passed",
+            scoreSheets: [],
+          },
+        };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    });
+
+    const ingested = await workflow.ingestSlackNotification({
+      channelId: "C1",
+      messageTs: "finalized.1",
+      parsed: {
+        eventType: "EVALUATION_COMPLETED",
+        title: "Evaluation completed",
+        text: "Evaluation completed",
+        links: [],
+        payloadHash: "finalized-candidate",
+        payloadJson: "{}",
+        candidateName: "Finalized candidate",
+        recruitmentName: "Recruitment",
+      },
+    });
+
+    expect(ingested.result).toBe("EVALUATION_IGNORED_FINALIZED_CANDIDATE");
+    expect(db.listOpenReviews()).toHaveLength(0);
+    expect(db.getNotification(ingested.notificationId)?.processing_status).toBe(
+      "NOT_ELIGIBLE",
+    );
+  });
+
   it("creates an operator review when a non-evaluation integration retry is exhausted", () => {
     db = new BridgeDatabase(":memory:");
     const workflow = new WorkflowService(db, config, {

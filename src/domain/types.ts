@@ -116,6 +116,7 @@ export interface ScoreSheetSummary {
 export interface EvaluationSummary {
   applicantProgressId: string;
   recruitmentId: string;
+  currentStatus?: string;
   scoreSheets: ScoreSheetSummary[];
   currentStep?: {
     stepId: string;

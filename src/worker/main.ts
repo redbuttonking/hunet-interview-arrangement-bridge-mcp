@@ -423,7 +423,7 @@ async function runCycle(): Promise<void> {
         const ordinal = reminder.reminderNumber === 1 ? "1차" : "2차(최종)";
         try {
           await app.client.chat.postMessage({
-            channel: requestChannelId,
+            channel: db.getRequestChannelForCase(reminder.caseId) ?? requestChannelId,
             text: `<@${reminder.slackUserId}> 인터뷰 가능 일정 입력 ${ordinal} 리마인드입니다. 기존 요청 메시지의 [가능 일정 입력] 버튼을 눌러 주세요.`,
           });
           db.markReminderSent(reminder.id);

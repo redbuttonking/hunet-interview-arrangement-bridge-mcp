@@ -228,6 +228,7 @@ function summarizeCompletedScoreSheets(
   return {
     applicantProgressId,
     recruitmentId,
+    ...(codeOf(detail.status) ? { currentStatus: codeOf(detail.status) } : {}),
     scoreSheets,
     ...(stepId && stepName
       ? {

@@ -9,7 +9,27 @@ describe("BridgeDatabase", () => {
   it("applies every schema migration when the database opens", () => {
     db = new BridgeDatabase(":memory:");
 
-    expect(db.getLatestSchemaVersion()).toBe(20);
+    expect(db.getLatestSchemaVersion()).toBe(21);
+  });
+
+  it("stores a Slack request channel per recruitment and resolves it for a case", () => {
+    db = new BridgeDatabase(":memory:");
+    db.upsertRecruitmentSlackChannel({
+      recruitmentId: "R1",
+      recruitmentName: "Sales recruitment",
+      channelId: "C123",
+    });
+    const interviewCase = db.createInterviewCase({
+      candidateName: "Candidate",
+      recruitmentRef: "R1",
+      recruitmentName: "Sales recruitment",
+      proposalDates: ["2026-08-10"],
+    });
+
+    expect(db.getRequestChannelForCase(interviewCase.id)).toBe("C123");
+    expect(db.listRecruitmentSlackChannels()).toMatchObject([
+      { recruitmentId: "R1", channelId: "C123" },
+    ]);
   });
 
   it("clears candidate and room operation data while retaining Slack read positions and setup", () => {

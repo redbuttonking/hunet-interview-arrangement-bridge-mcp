@@ -861,6 +861,43 @@ export function createBridgeMcpServer(
   );
 
   server.registerTool(
+    "set_recruitment_slack_channel",
+    {
+      title: "채용별 Slack 발송 채널 설정",
+      description:
+        "특정 채용의 면접관 일정 요청·확정 안내·변경 안내·리마인드를 보낼 Slack 채널을 로컬 설정에 저장합니다. Slack 메시지를 보내지는 않습니다.",
+      inputSchema: {
+        recruitmentId: z.string().min(1),
+        recruitmentName: z.string().trim().min(1).max(200),
+        channelId: z.string().trim().regex(/^[CG][A-Z0-9]+$/),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (input) => result(db.upsertRecruitmentSlackChannel(input)),
+  );
+
+  server.registerTool(
+    "list_recruitment_slack_channels",
+    {
+      title: "채용별 Slack 발송 채널 조회",
+      description:
+        "로컬에 저장된 채용별 Slack 발송 채널 매핑만 조회합니다. Slack이나 나인하이어에는 요청하지 않습니다.",
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () => result({ channels: db.listRecruitmentSlackChannels() }),
+  );
+
+  server.registerTool(
     "list_closed_recruitments",
     {
       title: "종료된 나인하이어 채용 목록",

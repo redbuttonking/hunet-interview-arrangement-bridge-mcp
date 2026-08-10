@@ -209,6 +209,13 @@ export interface ExternalConfirmedInterviewRow {
   updatedAt: string;
 }
 
+export interface RecruitmentSlackChannelRow {
+  recruitmentId: string;
+  recruitmentName: string;
+  channelId: string;
+  updatedAt: string;
+}
+
 export interface RoomAllocationRow {
   id: string;
   caseId: string;
@@ -948,6 +955,13 @@ export class BridgeDatabase {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS recruitment_slack_channels (
+        recruitment_id TEXT PRIMARY KEY,
+        recruitment_name TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS case_interview_plans (
         case_id TEXT PRIMARY KEY REFERENCES interview_cases(id),
         source TEXT NOT NULL,
@@ -1425,6 +1439,25 @@ export class BridgeDatabase {
       this.connection
         .prepare(
           "INSERT INTO schema_migrations(version, applied_at) VALUES (20, datetime('now'))",
+        )
+        .run();
+    }
+
+    const versionTwentyOne = this.connection
+      .prepare("SELECT version FROM schema_migrations WHERE version = 21")
+      .get() as SqlRow | undefined;
+    if (!versionTwentyOne) {
+      this.connection.exec(`
+        CREATE TABLE IF NOT EXISTS recruitment_slack_channels (
+          recruitment_id TEXT PRIMARY KEY,
+          recruitment_name TEXT NOT NULL,
+          channel_id TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+      `);
+      this.connection
+        .prepare(
+          "INSERT INTO schema_migrations(version, applied_at) VALUES (21, datetime('now'))",
         )
         .run();
     }
@@ -2874,6 +2907,63 @@ export class BridgeDatabase {
       .prepare("SELECT * FROM interview_cases WHERE id = ?")
       .get(id) as SqlRow | undefined;
     return row ? toCase(row) : undefined;
+  }
+
+  upsertRecruitmentSlackChannel(input: {
+    recruitmentId: string;
+    recruitmentName: string;
+    channelId: string;
+  }): RecruitmentSlackChannelRow {
+    const updatedAt = new Date().toISOString();
+    this.connection
+      .prepare(`
+        INSERT INTO recruitment_slack_channels(
+          recruitment_id, recruitment_name, channel_id, updated_at
+        ) VALUES (?, ?, ?, ?)
+        ON CONFLICT(recruitment_id) DO UPDATE SET
+          recruitment_name = excluded.recruitment_name,
+          channel_id = excluded.channel_id,
+          updated_at = excluded.updated_at
+      `)
+      .run(input.recruitmentId, input.recruitmentName, input.channelId, updatedAt);
+    return this.getRecruitmentSlackChannel(input.recruitmentId)!;
+  }
+
+  getRecruitmentSlackChannel(
+    recruitmentId: string | null | undefined,
+  ): RecruitmentSlackChannelRow | undefined {
+    if (!recruitmentId) return undefined;
+    const row = this.connection
+      .prepare("SELECT * FROM recruitment_slack_channels WHERE recruitment_id = ?")
+      .get(recruitmentId) as SqlRow | undefined;
+    return row
+      ? {
+          recruitmentId: asString(row.recruitment_id),
+          recruitmentName: asString(row.recruitment_name),
+          channelId: asString(row.channel_id),
+          updatedAt: asString(row.updated_at),
+        }
+      : undefined;
+  }
+
+  listRecruitmentSlackChannels(): RecruitmentSlackChannelRow[] {
+    const rows = this.connection
+      .prepare(`
+        SELECT * FROM recruitment_slack_channels
+        ORDER BY recruitment_name COLLATE NOCASE ASC
+      `)
+      .all() as SqlRow[];
+    return rows.map((row) => ({
+      recruitmentId: asString(row.recruitment_id),
+      recruitmentName: asString(row.recruitment_name),
+      channelId: asString(row.channel_id),
+      updatedAt: asString(row.updated_at),
+    }));
+  }
+
+  getRequestChannelForCase(caseId: string): string | undefined {
+    const interviewCase = this.getCase(caseId);
+    return this.getRecruitmentSlackChannel(interviewCase?.recruitmentRef)?.channelId;
   }
 
   upsertRecruitmentInterviewTemplate(input: {
