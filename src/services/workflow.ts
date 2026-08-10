@@ -384,6 +384,19 @@ export class WorkflowService {
     );
   }
 
+  private isRecruitmentInManagedScope(input: {
+    recruitmentId?: string;
+    recruitmentName?: string;
+  }): boolean {
+    const configuredChannels = this.db.listRecruitmentSlackChannels();
+    if (configuredChannels.length === 0) return true;
+    return configuredChannels.some(
+      (channel) =>
+        channel.recruitmentId === input.recruitmentId ||
+        channel.recruitmentName === input.recruitmentName,
+    );
+  }
+
   async previewRecruitmentInterviewTemplate(recruitmentId: string) {
     if (!this.ninehire.getRecruitmentPipeline) {
       throw new Error("NineHire recruitment pipeline lookup is not available.");
@@ -783,6 +796,13 @@ export class WorkflowService {
           "평가표를 조회했지만 검토에 필요한 정보를 만들지 못했습니다.",
       });
       return { notificationId, result: "REVIEW_REQUIRED" };
+    }
+    if (!this.isRecruitmentInManagedScope({
+      recruitmentId: evaluation.summary.recruitmentId,
+      recruitmentName: evaluation.context.recruitmentName,
+    })) {
+      this.db.updateNotificationStatus(notificationId, "IGNORED_OUT_OF_SCOPE");
+      return { notificationId, result: "EVALUATION_IGNORED_OUT_OF_SCOPE" };
     }
     if (["passed", "failed"].includes(evaluation.summary.currentStatus ?? "")) {
       this.db.updateNotificationStatus(notificationId, "NOT_ELIGIBLE");
@@ -1549,6 +1569,13 @@ export class WorkflowService {
       return { notificationId, result: "REVIEW_REQUIRED" };
     }
 
+    if (!this.isRecruitmentInManagedScope({
+      recruitmentName: parsed.recruitmentName,
+    })) {
+      this.db.updateNotificationStatus(notificationId, "IGNORED_OUT_OF_SCOPE");
+      return { notificationId, result: "SCHEDULE_CONFIRMATION_IGNORED_OUT_OF_SCOPE" };
+    }
+
     const previouslyRecorded =
       this.db.findCaseByScheduleConfirmationNotification(notificationId);
     if (previouslyRecorded) {
@@ -1617,6 +1644,30 @@ export class WorkflowService {
         parsed.recruitmentName,
       );
       if (readyMatches.length !== 1) {
+        if (readyMatches.length === 0) {
+          this.db.syncExternalConfirmedInterviews([
+            {
+              sourceEventId: `NINEHIRE_SLACK:${notificationId}`,
+              title: "NineHire confirmed interview",
+              rawText: parsed.text,
+              candidateName: parsed.candidateName,
+              recruitmentName: parsed.recruitmentName,
+              date: parsed.scheduledDate,
+              startTime: parsed.scheduledStartTime,
+              endTime: parsed.scheduledEndTime,
+            },
+          ]);
+          for (const review of this.db.listOpenReviews()) {
+            if (
+              review.notificationId === notificationId &&
+              review.reviewType === "SCHEDULE_CONFIRMATION_MATCH_REQUIRED"
+            ) {
+              this.db.resolveReview(review.id, "EXTERNAL_CONFIRMED_INTERVIEW_RECORDED");
+            }
+          }
+          this.db.updateNotificationStatus(notificationId, "PROCESSED");
+          return { notificationId, result: "INTERVIEW_CONFIRMED_EXTERNALLY_RECORDED" };
+        }
         this.db.updateNotificationStatus(notificationId, "REVIEW_REQUIRED");
         this.db.createReview({
           notificationId,

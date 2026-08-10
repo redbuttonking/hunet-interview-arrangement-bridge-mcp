@@ -115,6 +115,104 @@ describe("evaluation approval workflow", () => {
     );
   });
 
+  it("ignores evaluation notifications outside the configured recruitment scope", async () => {
+    db = new BridgeDatabase(":memory:");
+    db.upsertRecruitmentSlackChannel({
+      recruitmentId: "R-SALES",
+      recruitmentName: "Sales recruitment",
+      channelId: "C-SALES",
+    });
+    const workflow = new WorkflowService(db, config, {
+      async lookupCompletedEvaluation() {
+        return {
+          context: {
+            candidateRef: "A1",
+            candidateName: "Out-of-scope candidate",
+            recruitmentRef: "R-OTHER",
+            recruitmentName: "Other recruitment",
+          },
+          summary: {
+            applicantProgressId: "A1",
+            recruitmentId: "R-OTHER",
+            scoreSheets: [],
+          },
+        };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    });
+
+    const ingested = await workflow.ingestSlackNotification({
+      channelId: "C1",
+      messageTs: "out-of-scope.1",
+      parsed: {
+        eventType: "EVALUATION_COMPLETED",
+        title: "Evaluation completed",
+        text: "Evaluation completed",
+        links: [],
+        payloadHash: "out-of-scope-candidate",
+        payloadJson: "{}",
+        candidateName: "Out-of-scope candidate",
+        recruitmentName: "Other recruitment",
+      },
+    });
+
+    expect(ingested.result).toBe("EVALUATION_IGNORED_OUT_OF_SCOPE");
+    expect(db.listOpenReviews()).toHaveLength(0);
+  });
+
+  it("records a confirmed interview without a local case as an external schedule", async () => {
+    db = new BridgeDatabase(":memory:");
+    db.upsertRecruitmentSlackChannel({
+      recruitmentId: "R-SALES",
+      recruitmentName: "Sales recruitment",
+      channelId: "C-SALES",
+    });
+    const workflow = new WorkflowService(db, config, {
+      async lookupCompletedEvaluation() {
+        return { reason: "Not used in this test." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    });
+
+    const ingested = await workflow.ingestSlackNotification({
+      channelId: "C1",
+      messageTs: "external.1",
+      parsed: {
+        eventType: "SCHEDULE_CONFIRMED",
+        title: "Schedule confirmed",
+        text: "Schedule confirmed",
+        links: [],
+        payloadHash: "external-confirmed-schedule",
+        payloadJson: "{}",
+        candidateName: "Confirmed candidate",
+        recruitmentName: "Sales recruitment",
+        scheduledDate: "2026-08-20",
+        scheduledStartTime: "15:00",
+        scheduledEndTime: "16:00",
+      },
+    });
+
+    expect(ingested.result).toBe("INTERVIEW_CONFIRMED_EXTERNALLY_RECORDED");
+    expect(db.listOpenReviews()).toHaveLength(0);
+    expect(db.listExternalConfirmedInterviews()).toMatchObject([
+      {
+        candidateName: "Confirmed candidate",
+        recruitmentName: "Sales recruitment",
+        date: "2026-08-20",
+      },
+    ]);
+  });
+
   it("creates an operator review when a non-evaluation integration retry is exhausted", () => {
     db = new BridgeDatabase(":memory:");
     const workflow = new WorkflowService(db, config, {

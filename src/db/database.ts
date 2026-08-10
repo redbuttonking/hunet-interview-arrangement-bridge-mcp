@@ -2946,6 +2946,23 @@ export class BridgeDatabase {
       : undefined;
   }
 
+  getRecruitmentSlackChannelByName(
+    recruitmentName: string | null | undefined,
+  ): RecruitmentSlackChannelRow | undefined {
+    if (!recruitmentName) return undefined;
+    const row = this.connection
+      .prepare("SELECT * FROM recruitment_slack_channels WHERE recruitment_name = ?")
+      .get(recruitmentName) as SqlRow | undefined;
+    return row
+      ? {
+          recruitmentId: asString(row.recruitment_id),
+          recruitmentName: asString(row.recruitment_name),
+          channelId: asString(row.channel_id),
+          updatedAt: asString(row.updated_at),
+        }
+      : undefined;
+  }
+
   listRecruitmentSlackChannels(): RecruitmentSlackChannelRow[] {
     const rows = this.connection
       .prepare(`
@@ -3664,6 +3681,12 @@ export class BridgeDatabase {
       const existing = this.connection.prepare(
         "SELECT id FROM external_confirmed_interviews WHERE source_event_id = ?",
       );
+      const sameSchedule = this.connection.prepare(`
+        SELECT id FROM external_confirmed_interviews
+        WHERE candidate_name = ? AND recruitment_name = ?
+          AND date = ? AND start_time = ? AND end_time = ?
+        LIMIT 1
+      `);
       const insert = this.connection.prepare(`
         INSERT INTO external_confirmed_interviews(
           id, source_event_id, candidate_name, recruitment_name,
@@ -3676,6 +3699,13 @@ export class BridgeDatabase {
         SET candidate_name = ?, recruitment_name = ?, date = ?, start_time = ?, end_time = ?, room_name = ?,
             last_seen_at = ?, updated_at = ?
         WHERE source_event_id = ?
+      `);
+      const adoptSourceEvent = this.connection.prepare(`
+        UPDATE external_confirmed_interviews
+        SET source_event_id = ?, candidate_name = ?, recruitment_name = ?,
+            date = ?, start_time = ?, end_time = ?, room_name = ?,
+            last_seen_at = ?, updated_at = ?
+        WHERE id = ?
       `);
       for (const event of events) {
         const current = existing.get(event.sourceEventId) as SqlRow | undefined;
@@ -3692,6 +3722,28 @@ export class BridgeDatabase {
             event.sourceEventId,
           );
         } else {
+          const matchingSchedule = sameSchedule.get(
+            event.candidateName,
+            event.recruitmentName,
+            event.date,
+            event.startTime,
+            event.endTime,
+          ) as SqlRow | undefined;
+          if (matchingSchedule) {
+            adoptSourceEvent.run(
+              event.sourceEventId,
+              event.candidateName,
+              event.recruitmentName,
+              event.date,
+              event.startTime,
+              event.endTime,
+              event.roomName ?? null,
+              seenAt,
+              seenAt,
+              asString(matchingSchedule.id),
+            );
+            continue;
+          }
           insert.run(
             randomUUID(),
             event.sourceEventId,
