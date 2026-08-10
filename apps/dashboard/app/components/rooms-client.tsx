@@ -142,17 +142,24 @@ function RoomCalendarRow({
         <div aria-hidden="true" className="absolute inset-0 grid grid-cols-9">
           {calendarHours.map((hour) => <span className="border-r border-slate-100 bg-linear-to-b from-slate-50/60 to-white" key={hour} />)}
         </div>
-        {blockLayouts.map(({ item: block, lane }) => (
-          <span
-            aria-label={`${block.startTime}부터 ${block.endTime}까지 인터뷰용 회의실 예약`}
-            className="absolute z-10 flex min-w-0 items-center overflow-hidden rounded-md border border-slate-300 bg-slate-100 px-2.5 text-sm font-semibold text-slate-700 shadow-xs"
-            key={block.id}
-            style={{ ...timeCardStyle(block.startTime, block.endTime), top: `${12 + lane * 38}px`, height: "30px" }}
-            title={`회의실 예약 · ${block.startTime} – ${block.endTime}`}
-          >
-            <span className="truncate">예약 {block.startTime} – {block.endTime}</span>
-          </span>
-        ))}
+        {blockLayouts.map(({ item: block, lane }) => {
+          const duration = toMinutes(block.endTime) - toMinutes(block.startTime);
+          const isNarrow = duration < 60;
+          const label = isNarrow
+            ? `예약 · ${block.startTime}`
+            : `예약 · ${block.startTime}–${block.endTime}`;
+          return (
+            <span
+              aria-label={`${block.startTime}부터 ${block.endTime}까지 인터뷰용 회의실 예약`}
+              className={`absolute z-10 flex min-w-0 items-center overflow-hidden rounded-md border border-slate-300 bg-slate-100 font-semibold text-slate-700 shadow-xs ${isNarrow ? "px-1.5 text-[11px]" : "px-2 text-xs"}`}
+              key={block.id}
+              style={{ ...timeCardStyle(block.startTime, block.endTime), top: `${12 + lane * 38}px`, height: "30px" }}
+              title={`회의실 예약 · ${block.startTime} – ${block.endTime}`}
+            >
+              <span className="whitespace-nowrap tabular-nums">{label}</span>
+            </span>
+          );
+        })}
         {scheduledLayouts.map(({ item: interview, lane }) => {
           const status = scheduleStatusLabel(interview);
           const duration = toMinutes(interview.endTime) - toMinutes(interview.startTime);
