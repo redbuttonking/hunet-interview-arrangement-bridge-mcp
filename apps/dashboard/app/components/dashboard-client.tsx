@@ -347,6 +347,7 @@ function buildActionItems(data: DashboardSnapshot): ActionItem[] {
     description: decision.prompt,
     candidateName: decision.candidateName,
     recruitmentName: decision.recruitmentName,
+    caseId: decision.caseId ?? undefined,
     meta: "선택 적용 전에는 인터뷰 상태가 바뀌지 않습니다.",
     actionLabel: "결정 계속하기",
     href: decision.caseId ? `/cases/${decision.caseId}` : null,
@@ -378,6 +379,7 @@ function buildActionItems(data: DashboardSnapshot): ActionItem[] {
             : review.currentStepName ?? "상세 내용을 확인해 주세요.",
         candidateName: review.candidateName,
         recruitmentName: review.recruitmentName,
+        caseId: review.caseId ?? undefined,
         meta: integrationRetryExhausted
           ? "재동기화 전 워커와 연동 상태를 확인하세요. 이 화면에서는 외부 발송이나 자동 재시도를 실행하지 않습니다."
           : review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED" ? "승인 전에는 나인하이어·Slack에 변경이 없습니다." : null,
