@@ -453,7 +453,13 @@ export class InterviewArrangementSkills {
     return pendingDecision(this.db, {
       skillKey: "INTERVIEW_SCHEDULING",
       decisionType: "CONFIRM_STANDARD_SCHEDULE",
-      fingerprint: `case:${caseId}:standard:${choices.map((choice) => choice.optionId).join("|")}`,
+      fingerprint: `case:${caseId}:standard:${choices.map((choice) => [
+        choice.optionId,
+        choice.date,
+        choice.startTime,
+        choice.endTime,
+        choice.roomBlockId,
+      ].join(":")).join("|")}`,
       caseId,
       title: "인터뷰 시간과 회의실 선택",
       prompt: "추천 시간과 회의실 중 하나를 내부 확정하세요. 이 단계에서는 Slack 메시지를 발송하지 않습니다.",
@@ -854,7 +860,17 @@ export class InterviewArrangementSkills {
     return pendingDecision(this.db, {
       skillKey: "INTERVIEW_SCHEDULING",
       decisionType: "CONFIRM_SEQUENTIAL_SCHEDULE",
-      fingerprint: `case:${caseId}:sequential:${choices.map((choice) => choice.optionId).join("|")}`,
+      fingerprint: `case:${caseId}:sequential:${choices.map((choice) => [
+        choice.optionId,
+        choice.order,
+        choice.date,
+        ...choice.sessions.flatMap((session) => [
+          session.stepId,
+          session.startTime,
+          session.endTime,
+          session.room.roomBlockId,
+        ]),
+      ].join(":")).join("|")}`,
       caseId,
       title: "연속 인터뷰 시간과 회의실 선택",
       prompt: "단계 순서와 회의실 조합을 확인한 뒤 하나를 내부 확정하세요.",

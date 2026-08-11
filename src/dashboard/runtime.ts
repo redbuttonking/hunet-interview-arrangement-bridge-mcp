@@ -7,6 +7,7 @@ import { BridgeDatabase, type InterviewSkillDecisionRow } from "../db/database.j
 import { NinehireRecruitmentWorkflowAdapter } from "../ninehire/adapter.js";
 import { NinehireMcpGateway } from "../ninehire/gateway.js";
 import { OperationalReadinessService } from "../services/operational-readiness.js";
+import { ScheduleSelectionRevalidationService } from "../services/schedule-selection-revalidation.js";
 import { WorkflowService, type SlackIdentityResolver } from "../services/workflow.js";
 import { InterviewArrangementSkills } from "../skills/interview-arrangement.js";
 
@@ -56,6 +57,11 @@ function createRuntime() {
   const skills = new InterviewArrangementSkills(db, workflow, readiness);
   const daouOfficeBrowser = new DaouOfficeBrowserController(config.daouOffice);
   const daouOffice = new BrowserDaouOfficeReservationAdapter(config.daouOffice);
+  const scheduleSelectionRevalidation = new ScheduleSelectionRevalidationService(
+    db,
+    daouOffice,
+    skills,
+  );
   return {
     db,
     skills,
@@ -64,6 +70,7 @@ function createRuntime() {
     slackClient,
     daouOfficeBrowser,
     daouOffice,
+    scheduleSelectionRevalidation,
   };
 }
 
@@ -204,6 +211,26 @@ export async function resolveDashboardDecision(input: {
         outcome: existing.resolution ?? { action: input.optionId, nextAction: "NONE" },
         followUp: undefined,
       };
+    }
+    if (existing) {
+      let refreshedDecision: InterviewSkillDecisionRow | undefined;
+      try {
+        refreshedDecision = await runtime.scheduleSelectionRevalidation.refreshIfNeeded(existing);
+      } catch {
+        throw new Error(
+          "회의실 예약 현황을 다시 확인하지 못했습니다. 다우오피스 연결을 확인한 뒤 다시 시도해 주세요.",
+        );
+      }
+      if (refreshedDecision) {
+        return {
+          decision: refreshedDecision,
+          outcome: {
+            action: "SCHEDULE_RECOMMENDATION_REFRESHED",
+            nextAction: "RESELECT_SCHEDULE",
+          },
+          followUp: refreshedDecision,
+        };
+      }
     }
     const resolved = await runtime.skills.resolveDecision(input);
     didResolve = true;
