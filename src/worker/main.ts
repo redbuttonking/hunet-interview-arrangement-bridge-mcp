@@ -490,6 +490,12 @@ async function runCycle(): Promise<void> {
       throw new Error(failures.join(" | "));
     }
     db.recordWorkerCycleSuccess(INTERVIEW_BRIDGE_WORKER_KEY, new Date(), workerOwnerToken);
+    const recovered = workflow.resolveWorkerDowntimeAvailabilityReviewsAfterSuccessfulReconciliation();
+    if (recovered.reviewIds.length > 0) {
+      process.stdout.write(
+        `Worker recovery checks completed. Resolved availability warnings: ${recovered.reviewIds.length}\n`,
+      );
+    }
   } catch (error) {
     const message = errorMessage(error);
     db.recordWorkerCycleFailure(INTERVIEW_BRIDGE_WORKER_KEY, message, new Date(), workerOwnerToken);

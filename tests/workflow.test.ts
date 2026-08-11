@@ -1610,6 +1610,44 @@ describe("evaluation approval workflow", () => {
     expect(repeatedReminder.id).not.toBe(reminder.id);
   });
 
+  it("automatically clears worker downtime warnings after a successful reconciliation", () => {
+    db = new BridgeDatabase(":memory:");
+    const ninehire: NinehireWorkflowAdapter = {
+      async lookupCompletedEvaluation() {
+        return { reason: "Not used in this test." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    };
+    const workflow = new WorkflowService(
+      db,
+      { ...config, slack: { requestChannelId: "C1" } },
+      ninehire,
+    );
+    const interviewCase = db.createInterviewCase({
+      candidateName: "Candidate",
+      proposalDates: ["2026-07-30"],
+    });
+    const reviewId = db.createReview({
+      caseId: interviewCase.id,
+      reviewType: "WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED",
+      reason: "Worker downtime requires an availability check.",
+    });
+
+    expect(workflow.resolveWorkerDowntimeAvailabilityReviewsAfterSuccessfulReconciliation()).toEqual({
+      caseIds: [interviewCase.id],
+      reviewIds: [reviewId],
+    });
+    expect(db.getReview(reviewId)).toMatchObject({
+      status: "RESOLVED",
+      resolution: "AUTO_RESOLVED_AFTER_SUCCESSFUL_RECONCILIATION",
+    });
+  });
+
   it("adds direct recruitment participants and flags unresolved user groups", async () => {
     db = new BridgeDatabase(":memory:");
     const ninehire: NinehireWorkflowAdapter = {

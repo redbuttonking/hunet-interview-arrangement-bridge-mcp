@@ -1077,6 +1077,28 @@ export class WorkflowService {
     };
   }
 
+  resolveWorkerDowntimeAvailabilityReviewsAfterSuccessfulReconciliation(): {
+    caseIds: string[];
+    reviewIds: string[];
+  } {
+    const reviews = this.db
+      .listOpenReviews()
+      .filter((review) => review.reviewType === "WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED" && review.caseId);
+    const caseIds: string[] = [];
+    const reviewIds: string[] = [];
+    this.db.transaction(() => {
+      for (const review of reviews) {
+        this.db.resolveReview(review.id, "AUTO_RESOLVED_AFTER_SUCCESSFUL_RECONCILIATION");
+        this.db.addEvent(review.caseId!, "WORKER_DOWNTIME_AVAILABILITY_AUTO_RESOLVED", "SYSTEM", {
+          reviewId: review.id,
+        });
+        caseIds.push(review.caseId!);
+        reviewIds.push(review.id);
+      }
+    });
+    return { caseIds, reviewIds };
+  }
+
   createAvailabilityRecoveryDraft(reviewId: string): DraftRow {
     const review = this.db.getReview(reviewId);
     if (
