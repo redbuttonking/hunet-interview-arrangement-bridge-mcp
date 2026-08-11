@@ -155,6 +155,8 @@ app.action(OPEN_AVAILABILITY_ACTION, async ({ ack, body, client, respond }) => {
   ) {
     await respond({
       response_type: "ephemeral",
+      replace_original: false,
+      delete_original: false,
       text:
         "이전 일정 요청이거나 현재 면접관 정보와 일치하지 않습니다. 최신 일정 요청을 확인해 주세요.",
     });
@@ -179,6 +181,8 @@ app.action(DECLINE_INTERVIEW_ACTION, async ({ ack, body, respond }) => {
     if (!interviewCase || !acceptsAvailabilityResponse(interviewCase, scheduleRound)) {
       await respond({
         response_type: "ephemeral",
+        replace_original: false,
+        delete_original: false,
         text: "이전 일정 요청에는 응답할 수 없습니다. 최신 일정 요청을 확인해 주세요.",
       });
       return;
@@ -186,12 +190,16 @@ app.action(DECLINE_INTERVIEW_ACTION, async ({ ack, body, respond }) => {
     db.markInterviewerDeclined(caseId, slackUserId);
     await respond({
       response_type: "ephemeral",
+      replace_original: false,
+      delete_original: false,
       text:
         "참여 어려움으로 접수했습니다. 채용 담당자가 면접관 변경 또는 제외 여부를 검토합니다.",
     });
   } catch (error) {
     await respond({
       response_type: "ephemeral",
+      replace_original: false,
+      delete_original: false,
       text: error instanceof Error ? error.message : String(error),
     });
   }
