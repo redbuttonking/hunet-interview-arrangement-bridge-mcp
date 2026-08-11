@@ -2271,6 +2271,19 @@ export class BridgeDatabase {
     return Number(result.changes) === 1;
   }
 
+  discardPendingInterviewSkillDecisionsForCase(
+    caseId: string,
+    skillKey: InterviewSkillKey,
+  ): number {
+    const result = this.connection
+      .prepare(`
+        DELETE FROM interview_skill_decisions
+        WHERE case_id = ? AND skill_key = ? AND status = 'PENDING'
+      `)
+      .run(caseId, skillKey);
+    return Number(result.changes);
+  }
+
   listInterviewSkillDecisions(input: {
     status?: InterviewSkillDecisionStatus;
     limit?: number;

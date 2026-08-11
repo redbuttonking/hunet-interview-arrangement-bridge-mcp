@@ -20,6 +20,9 @@ import { BrowserDaouOfficeReservationAdapter } from "../daou-office/adapter.js";
 import { DaouOfficeBrowserController } from "../daou-office/browser.js";
 import { WorkflowService, type SlackIdentityResolver } from "../services/workflow.js";
 import { LocalDatabaseBackupService } from "../services/database-backup.js";
+import { AutomaticSchedulingPreparationService } from "../services/automatic-scheduling-preparation.js";
+import { OperationalReadinessService } from "../services/operational-readiness.js";
+import { InterviewArrangementSkills } from "../skills/interview-arrangement.js";
 import {
   AVAILABILITY_VIEW_CALLBACK,
   DECLINE_INTERVIEW_ACTION,
@@ -69,6 +72,19 @@ const workflow = new WorkflowService(
   config,
   ninehire,
   identityResolver,
+);
+const readiness = new OperationalReadinessService(
+  config,
+  db,
+  gateway,
+  daouOfficeBrowser,
+  app.client,
+);
+const skills = new InterviewArrangementSkills(db, workflow, readiness);
+const automaticScheduling = new AutomaticSchedulingPreparationService(
+  db,
+  daouOffice,
+  skills,
 );
 const databaseBackup = new LocalDatabaseBackupService(db, config.dbPath, {
   timeZone: config.timeZone,
@@ -253,6 +269,7 @@ app.view(AVAILABILITY_VIEW_CALLBACK, async ({ ack, body, view }) => {
   }
   db.replaceAvailability(caseId, slackUserId, slots);
   await ack();
+  void prepareReadySchedulingDecisions();
 });
 
 app.error(async (error) => {
@@ -261,6 +278,7 @@ app.error(async (error) => {
 
 let cycleRunning = false;
 let retryCycleRunning = false;
+let schedulingPreparationRunning = false;
 const slackReconciliationDedupeKey = config.slack.sourceChannelId;
 const ninehireScheduleReconciliationDedupeKey = "NINEHIRE_CONFIRMED_SCHEDULE_RECONCILIATION";
 const daouCalendarReconciliationDedupeKey = "DAOU_CALENDAR_RECONCILIATION";
@@ -390,6 +408,18 @@ async function runIntegrationRetryCycle(): Promise<void> {
   }
 }
 
+async function prepareReadySchedulingDecisions(): Promise<void> {
+  if (schedulingPreparationRunning) return;
+  schedulingPreparationRunning = true;
+  try {
+    await automaticScheduling.prepareReadyCases();
+  } catch (error) {
+    process.stderr.write(`[Automatic scheduling preparation] ${errorMessage(error)}\n`);
+  } finally {
+    schedulingPreparationRunning = false;
+  }
+}
+
 async function runCycle(): Promise<void> {
   if (cycleRunning || retryCycleRunning) return;
   if (!db.renewWorkerLease({
@@ -416,6 +446,7 @@ async function runCycle(): Promise<void> {
     await runStep("Slack 동기화", reconcileSlackNotifications);
     await runStep("나인하이어 일정 동기화", reconcileNinehireConfirmedSchedules);
     await runStep("다우오피스 캘린더 동기화", reconcileDaouCalendarConfirmedSchedules);
+    await runStep("Automatic scheduling preparation", prepareReadySchedulingDecisions);
     const dueBeforeRefresh = db.listDueReminders();
     const caseIds = [...new Set(dueBeforeRefresh.map((item) => item.caseId))];
     for (const caseId of caseIds) {
