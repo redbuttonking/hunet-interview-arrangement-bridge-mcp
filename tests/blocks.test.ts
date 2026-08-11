@@ -140,6 +140,7 @@ describe("availability modal", () => {
     });
 
     expect(JSON.stringify(request.blocks)).toContain("단계별 인터뷰 및 면접관");
+    expect(JSON.stringify(request.blocks)).not.toContain("예상 소요시간");
     expect(JSON.stringify(request.blocks)).toContain("1차 인터뷰");
     expect(JSON.stringify(request.blocks)).toContain("<@U1>");
     expect(JSON.stringify(request.blocks)).toContain("<@U2>");

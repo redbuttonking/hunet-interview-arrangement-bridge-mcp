@@ -115,7 +115,6 @@ export function buildRequestMessage(
           `*지원자:* ${candidateLabel(interviewCase)}`,
           `*채용:* ${interviewCase.recruitmentName ?? "채용 정보 미확인"}`,
           `*면접관:* ${mentions || "면접관 매핑 필요"}`,
-          `*예상 소요시간:* ${interviewCase.durationMinutes}분`,
           `*제안 날짜:* ${dates}`,
           ...(sequentialStageLines.length > 0
             ? ["*단계별 인터뷰 및 면접관:*", ...sequentialStageLines]
@@ -327,7 +326,6 @@ export function buildAvailabilityModal(
         text: [
           `*지원자:* ${candidateLabel(interviewCase)}`,
           `*면접관:* ${interviewer.displayName}`,
-          `*예상 소요시간:* ${interviewCase.durationMinutes}분`,
         ].join("\n"),
       },
     },
