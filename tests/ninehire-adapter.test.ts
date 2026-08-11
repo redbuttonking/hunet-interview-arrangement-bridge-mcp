@@ -3,6 +3,56 @@ import { describe, expect, it } from "vitest";
 import { NinehireRecruitmentWorkflowAdapter } from "../src/ninehire/adapter.js";
 
 describe("NineHire approval adapter", () => {
+  it("finds only receipt-stage candidates whose score sheets are all complete", async () => {
+    const adapter = new NinehireRecruitmentWorkflowAdapter({
+      async callTool(name, args) {
+        expect(name).toBe("get_applicant_progresses");
+        expect(args).toEqual({
+          recruitmentId: "R1",
+          status: ["progressing"],
+          limit: 100,
+        });
+        return {
+          structuredContent: {
+            results: [
+              {
+                applicantProgressId: "A1",
+                applicantName: "완료 지원자",
+                stepType: { code: "receipt" },
+                scoreSheets: [{ status: { code: "done" } }],
+              },
+              {
+                applicantProgressId: "A2",
+                applicantName: "평가 중 지원자",
+                stepType: { code: "receipt" },
+                scoreSheets: [{ status: { code: "waiting" } }],
+              },
+              {
+                applicantProgressId: "A3",
+                applicantName: "인터뷰 단계 지원자",
+                stepType: { code: "interview" },
+                scoreSheets: [{ status: { code: "done" } }],
+              },
+            ],
+          },
+        };
+      },
+    });
+
+    await expect(
+      adapter.listReceiptCandidatesWithCompletedScoreSheets({
+        recruitments: [{ recruitmentId: "R1", recruitmentName: "테스트 채용" }],
+      }),
+    ).resolves.toEqual([
+      {
+        candidateRef: "A1",
+        candidateName: "완료 지원자",
+        recruitmentRef: "R1",
+        recruitmentName: "테스트 채용",
+      },
+    ]);
+  });
+
   it("lists only in-progress recruitments", async () => {
     const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
     const adapter = new NinehireRecruitmentWorkflowAdapter({

@@ -66,6 +66,73 @@ function createAwaitingCandidateConfirmationCase(
 }
 
 describe("evaluation approval workflow", () => {
+  it("directly reconciles completed receipt evaluations without sending an external message", async () => {
+    db = new BridgeDatabase(":memory:");
+    db.upsertRecruitmentSlackChannel({
+      recruitmentId: "R1",
+      recruitmentName: "영업 채용",
+      channelId: "C1",
+    });
+    const workflow = new WorkflowService(db, config, {
+      async listReceiptCandidatesWithCompletedScoreSheets() {
+        return [{
+          candidateRef: "A1",
+          candidateName: "완료 지원자",
+          recruitmentRef: "R1",
+          recruitmentName: "영업 채용",
+        }];
+      },
+      async lookupCompletedEvaluation() {
+        return {
+          context: {
+            candidateRef: "A1",
+            candidateName: "완료 지원자",
+            recruitmentRef: "R1",
+            recruitmentName: "영업 채용",
+          },
+          summary: {
+            applicantProgressId: "A1",
+            recruitmentId: "R1",
+            scoreSheets: [{
+              scoreSheetId: "S1",
+              title: "서류 평가표",
+              evaluators: [{
+                name: "평가자",
+                items: [{
+                  title: "최종 평가",
+                  finalEvaluation: true,
+                  selectedOptions: [{ title: "합격" }],
+                }],
+              }],
+              participants: [],
+            }],
+          },
+        };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    });
+
+    await expect(workflow.reconcileReceiptEvaluationCompletions()).resolves.toEqual({
+      scanned: 1,
+      queuedForApproval: 1,
+      excluded: 0,
+      reviewRequired: 0,
+      skipped: 0,
+    });
+    expect(db.listOpenReviews()).toMatchObject([
+      { reviewType: "INTERVIEW_ARRANGEMENT_START_REQUIRED" },
+    ]);
+    await expect(workflow.reconcileReceiptEvaluationCompletions()).resolves.toMatchObject({
+      scanned: 1,
+      skipped: 1,
+    });
+  });
+
   it("ignores a late evaluation notification for a finalized candidate", async () => {
     db = new BridgeDatabase(":memory:");
     const workflow = new WorkflowService(db, config, {

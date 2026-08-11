@@ -14,6 +14,9 @@ export interface NinehireWorkflowAdapter {
   lookupCompletedEvaluation(
     context: CandidateContext,
   ): Promise<EvaluationLookup>;
+  listReceiptCandidatesWithCompletedScoreSheets?(input: {
+    recruitments: Array<{ recruitmentId: string; recruitmentName: string }>;
+  }): Promise<CandidateContext[]>;
   listInterviewers(context: CandidateContext): Promise<InterviewerLookup>;
   listInProgressRecruitments(input: {
     keyword?: string;
@@ -535,6 +538,57 @@ export class NinehireRecruitmentWorkflowAdapter
       }
     }
     return schedules;
+  }
+
+  async listReceiptCandidatesWithCompletedScoreSheets(input: {
+    recruitments: Array<{ recruitmentId: string; recruitmentName: string }>;
+  }): Promise<CandidateContext[]> {
+    const candidates: CandidateContext[] = [];
+
+    for (const recruitment of input.recruitments) {
+      const payload = asRecord(
+        upstreamPayload(
+          await this.gateway.callTool("get_applicant_progresses", {
+            recruitmentId: recruitment.recruitmentId,
+            status: ["progressing"],
+            limit: 100,
+          }),
+        ),
+      );
+
+      for (const applicant of records(payload?.results)) {
+        const applicantProgressId = text(applicant.applicantProgressId);
+        const candidateName = text(applicant.applicantName) ?? text(applicant.name);
+        const stepType = codeOf(applicant.stepType);
+        const scoreSheets = records(applicant.scoreSheets);
+        const allScoreSheetsCompleted =
+          scoreSheets.length > 0 &&
+          scoreSheets.every((scoreSheet) => codeOf(scoreSheet.status) === "done");
+
+        if (
+          !applicantProgressId ||
+          !candidateName ||
+          stepType !== "receipt" ||
+          !allScoreSheetsCompleted
+        ) {
+          continue;
+        }
+
+        candidates.push({
+          candidateRef: applicantProgressId,
+          candidateName,
+          recruitmentRef: recruitment.recruitmentId,
+          recruitmentName: recruitment.recruitmentName,
+        });
+      }
+    }
+
+    return candidates.sort((left, right) =>
+      `${left.recruitmentName}\u0000${left.candidateName}`.localeCompare(
+        `${right.recruitmentName}\u0000${right.candidateName}`,
+        "ko-KR",
+      ),
+    );
   }
 
   async lookupCompletedEvaluation(

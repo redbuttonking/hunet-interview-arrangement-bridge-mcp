@@ -109,6 +109,9 @@ describe("bridge MCP server", () => {
       "list_in_progress_recruitments",
     );
     expect(tools.tools.map((tool) => tool.name)).toContain(
+      "sync_ninehire_receipt_evaluations",
+    );
+    expect(tools.tools.map((tool) => tool.name)).toContain(
       "list_closed_recruitments",
     );
     expect(tools.tools.map((tool) => tool.name)).toContain(

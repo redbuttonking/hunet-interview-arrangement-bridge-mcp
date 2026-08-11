@@ -402,6 +402,9 @@ async function runCycle(): Promise<void> {
   };
   try {
     await ensureDailyDatabaseBackup();
+    await runStep("나인하이어 서류 평가 보완 동기화", () =>
+      workflow.reconcileReceiptEvaluationCompletions(),
+    );
     await runStep("Slack 동기화", reconcileSlackNotifications);
     await runStep("나인하이어 일정 동기화", reconcileNinehireConfirmedSchedules);
     await runStep("다우오피스 캘린더 동기화", reconcileDaouCalendarConfirmedSchedules);

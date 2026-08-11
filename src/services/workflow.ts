@@ -721,6 +721,88 @@ export class WorkflowService {
     }
   }
 
+  async reconcileReceiptEvaluationCompletions(): Promise<{
+    scanned: number;
+    queuedForApproval: number;
+    excluded: number;
+    reviewRequired: number;
+    skipped: number;
+  }> {
+    if (!this.ninehire.listReceiptCandidatesWithCompletedScoreSheets) {
+      return {
+        scanned: 0,
+        queuedForApproval: 0,
+        excluded: 0,
+        reviewRequired: 0,
+        skipped: 0,
+      };
+    }
+
+    const recruitments = this.db.listRecruitmentSlackChannels().map((channel) => ({
+      recruitmentId: channel.recruitmentId,
+      recruitmentName: channel.recruitmentName,
+    }));
+    if (recruitments.length === 0) {
+      return {
+        scanned: 0,
+        queuedForApproval: 0,
+        excluded: 0,
+        reviewRequired: 0,
+        skipped: 0,
+      };
+    }
+
+    const candidates = await this.ninehire.listReceiptCandidatesWithCompletedScoreSheets({
+      recruitments,
+    });
+    const summary = {
+      scanned: candidates.length,
+      queuedForApproval: 0,
+      excluded: 0,
+      reviewRequired: 0,
+      skipped: 0,
+    };
+
+    for (const candidate of candidates) {
+      if (!candidate.candidateRef || !candidate.candidateName || !candidate.recruitmentRef || !candidate.recruitmentName) {
+        summary.skipped += 1;
+        continue;
+      }
+      const reconciliation = await this.ingestSlackNotification({
+        channelId: "NINEHIRE_DIRECT_RECONCILIATION",
+        messageTs: `receipt-evaluation:${candidate.candidateRef}`,
+        parsed: {
+          eventType: "EVALUATION_COMPLETED",
+          title: "나인하이어 서류 평가 완료 확인",
+          text: "나인하이어 직접 조회에서 서류 평가 완료를 확인했습니다.",
+          links: [],
+          payloadHash: `receipt-evaluation:${candidate.candidateRef}`,
+          payloadJson: JSON.stringify({
+            source: "NINEHIRE_DIRECT_RECONCILIATION",
+            candidateRef: candidate.candidateRef,
+            recruitmentRef: candidate.recruitmentRef,
+          }),
+          ...candidate,
+        },
+      });
+
+      if (reconciliation.result === "EVALUATION_READY_FOR_APPROVAL") {
+        summary.queuedForApproval += 1;
+      } else if (
+        reconciliation.result === "EVALUATION_NOT_ELIGIBLE" ||
+        reconciliation.result === "EVALUATION_IGNORED_FINALIZED_CANDIDATE"
+      ) {
+        summary.excluded += 1;
+      } else if (reconciliation.result === "DUPLICATE") {
+        summary.skipped += 1;
+      } else {
+        summary.reviewRequired += 1;
+      }
+    }
+
+    return summary;
+  }
+
   async processIntegrationRetryJob(
     job: IntegrationRetryJobRow,
   ): Promise<void> {

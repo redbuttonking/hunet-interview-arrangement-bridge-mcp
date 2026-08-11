@@ -1051,6 +1051,22 @@ export function createBridgeMcpServer(
   );
 
   server.registerTool(
+    "sync_ninehire_receipt_evaluations",
+    {
+      title: "나인하이어 서류 평가 완료 즉시 확인",
+      description:
+        "Slack 알림 누락 여부와 관계없이 현재 관리 중인 채용의 접수 단계 완료 평가를 나인하이어에서 직접 확인합니다. 합격 표가 하나라도 있는 후보자는 조율 시작 검토로만 추가하며, 메시지 발송이나 나인하이어 상태 변경은 하지 않습니다.",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async () => result(await workflow.reconcileReceiptEvaluationCompletions()),
+  );
+
+  server.registerTool(
     "reprocess_interview_arrangement_eligibility_reviews",
     {
       title: "기존 인터뷰 조율 대상 재판정",
