@@ -31,17 +31,6 @@ function dateLabel(date: string): string {
   }).format(new Date(`${date}T00:00:00Z`));
 }
 
-function dateTimeLabel(value: string): string {
-  return new Intl.DateTimeFormat("ko-KR", {
-    month: "numeric",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-    timeZone: "Asia/Seoul",
-  }).format(new Date(value));
-}
-
 function candidateLabel(interviewCase: InterviewCaseRow): string {
   return interviewCase.candidateName ?? "이름 미확인 지원자";
 }
@@ -76,8 +65,8 @@ export function buildRequestMessage(
   const { interviewCase } = bundle;
   const isRescheduleRound = interviewCase.scheduleRound > 1;
   const defaultTitle = isRescheduleRound
-    ? "인터뷰 가능 일정 재입력 요청"
-    : "인터뷰 가능 일정 입력 요청";
+    ? "인터뷰 가능 일정 재입력"
+    : "인터뷰 가능 일정 입력";
   const defaultRequestText = isRescheduleRound
     ? "일정 변경 조율을 위해 가능한 시간을 다시 선택해 주세요. 이번 제출 내용만 새 일정 검토에 반영됩니다."
     : "가능한 시간을 선택해 주세요. 현재 참여가 어려운 경우 별도로 알려주시면 담당자가 면접관 구성을 검토합니다.";
@@ -146,19 +135,19 @@ export function buildRequestMessage(
         {
           type: "button",
           action_id: DECLINE_INTERVIEW_ACTION,
-          text: { type: "plain_text", text: "이번 인터뷰 참여 어려움" },
+          text: { type: "plain_text", text: "상기 일정 불가" },
           style: "danger",
           value: JSON.stringify({
             caseId: interviewCase.id,
             scheduleRound: interviewCase.scheduleRound,
           }),
           confirm: {
-            title: { type: "plain_text", text: "참여 어려움 확인" },
+            title: { type: "plain_text", text: "상기 일정 불가 확인" },
             text: {
               type: "mrkdwn",
-              text: "담당자 검토 대기 상태로 변경할까요?",
+              text: "상기 일정으로 인터뷰 참여가 어렵습니까?",
             },
-            confirm: { type: "plain_text", text: "변경" },
+            confirm: { type: "plain_text", text: "확인" },
             deny: { type: "plain_text", text: "취소" },
           },
         },
@@ -179,7 +168,7 @@ export function buildRequestMessage(
 
 export function buildAvailabilityRecoveryMessage(
   bundle: CaseBundle,
-  downtime: { startedAt: string; detectedAt: string },
+  _downtime: { startedAt: string; detectedAt: string },
   plan?: CaseInterviewPlanRow,
 ): { text: string; blocks: KnownBlock[] } {
   const pendingInterviewerIds = bundle.interviewers
@@ -191,10 +180,9 @@ export function buildAvailabilityRecoveryMessage(
     )
     .map((interviewer) => interviewer.id);
   return buildRequestMessage(bundle, {
-    title: "인터뷰 가능 일정 재제출 요청",
+    title: "인터뷰 가능 일정 재입력",
     requestText:
-      `${dateTimeLabel(downtime.startedAt)}~${dateTimeLabel(downtime.detectedAt)} 사이에 ` +
-      "일정 입력을 시도하셨다면 제출 결과를 보장할 수 없습니다. 아래 버튼으로 가능한 시간을 다시 입력해 주세요.",
+      "내부 시스템 중단으로 일정을 다시 요청드립니다. 아래 버튼으로 가능한 시간을 입력해 주세요.",
     targetInterviewerIds: pendingInterviewerIds,
     plan,
   });
@@ -205,6 +193,7 @@ export function buildScheduleConfirmationMessage(
   schedule: ConfirmedInterviewScheduleRow,
   options?: {
     sequentialSessions?: SequentialInterviewScheduleMessageSession[];
+    isScheduleChange?: boolean;
   },
 ): { text: string; blocks: KnownBlock[] } {
   const { interviewCase } = bundle;
@@ -214,21 +203,22 @@ export function buildScheduleConfirmationMessage(
       item.slackUserId ? `<@${item.slackUserId}>` : item.displayName,
     )
     .join(", ");
-  const candidateConfirmed = interviewCase.status === "CONFIRMED";
   const sequentialSessionLines = options?.sequentialSessions?.map((session) =>
     `• *${session.stepName}:* ${session.startTime}~${session.endTime} · ${session.roomName} · 면접관: ${interviewerMentions(bundle, session.interviewerIds) || "면접관 매핑 필요"}`,
   ) ?? [];
-  const text = candidateConfirmed
-    ? `${candidateLabel(interviewCase)} 지원자 인터뷰 일정 확정 안내`
-    : `${candidateLabel(interviewCase)} 지원자 인터뷰 내부 일정 확정 안내`;
+  const title = options?.isScheduleChange
+    ? "인터뷰 일정 변경 안내"
+    : "인터뷰 일정 확정 안내";
+  const context = options?.isScheduleChange
+    ? "인터뷰 일정이 변경되었습니다. 일정에 참고 바랍니다."
+    : "인터뷰가 확정되었습니다. 일정에 참고 바랍니다.";
+  const text = `${candidateLabel(interviewCase)} 지원자 ${title}`;
   const blocks: KnownBlock[] = [
     {
       type: "header",
       text: {
         type: "plain_text",
-        text: candidateConfirmed
-          ? "인터뷰 일정 확정 안내"
-          : "인터뷰 내부 일정 확정 안내",
+        text: title,
       },
     },
     {
@@ -253,9 +243,7 @@ export function buildScheduleConfirmationMessage(
       elements: [
         {
           type: "mrkdwn",
-          text: candidateConfirmed
-            ? "후보자 최종 확인이 완료된 확정 일정입니다."
-            : "후보자 최종 확인 전인 내부 확정 일정입니다. 변동 시 별도로 안내합니다.",
+          text: context,
         },
       ],
     },
@@ -278,8 +266,8 @@ export function buildScheduleUpdateMessage(
   const isCancellation = updateType === "CANCELLATION";
   const title = isCancellation ? "인터뷰 일정 취소 안내" : "인터뷰 일정 변경 안내";
   const context = isCancellation
-    ? "인터뷰가 취소되었습니다. 일정에 참조 부탁드립니다."
-    : "기존 확정 일정은 취소되었습니다. 새 일정은 최종 확정 후 다시 안내합니다.";
+    ? "인터뷰가 취소되었습니다."
+    : "인터뷰 일정이 변경되었습니다. 일정에 참고 바랍니다.";
   const text = `${candidateLabel(interviewCase)} 지원자 ${title}`;
   const blocks: KnownBlock[] = [
     {
@@ -293,8 +281,8 @@ export function buildScheduleUpdateMessage(
         text: [
           `*지원자:* ${candidateLabel(interviewCase)}`,
           `*채용:* ${interviewCase.recruitmentName ?? "채용 정보 미확인"}`,
-          `*기존 일시:* ${dateLabel(schedule.date)} ${schedule.startTime}~${schedule.endTime}`,
-          `*기존 회의실:* ${schedule.roomName}`,
+          `*일시:* ${dateLabel(schedule.date)} ${schedule.startTime}~${schedule.endTime}`,
+          `*회의실:* ${schedule.roomName}`,
           `*면접관:* ${mentions || "면접관 매핑 필요"}`,
         ].join("\n"),
       },

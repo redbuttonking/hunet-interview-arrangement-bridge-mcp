@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildAvailabilityRecoveryMessage,
   buildAvailabilityModal,
   buildRequestMessage,
   buildScheduleConfirmationMessage,
+  buildScheduleUpdateMessage,
 } from "../src/slack/blocks.js";
 import type {
   CaseBundle,
@@ -56,6 +58,51 @@ const interviewer: InterviewerRow = {
 };
 
 describe("availability modal", () => {
+  it("uses the approved availability and final schedule announcement wording", () => {
+    const bundle: CaseBundle = {
+      interviewCase,
+      interviewers: [interviewer],
+      availability: [],
+      drafts: [],
+    };
+    const schedule: ConfirmedInterviewScheduleRow = {
+      caseId: interviewCase.id,
+      roomAllocationId: null,
+      date: "2026-07-30",
+      startTime: "13:00",
+      endTime: "14:00",
+      roomName: "[818호] 행복룸",
+      confirmedAt: "2026-07-24T00:00:00.000Z",
+    };
+
+    const request = JSON.stringify(buildRequestMessage(bundle).blocks);
+    const recovery = JSON.stringify(buildAvailabilityRecoveryMessage(
+      bundle,
+      {
+        startedAt: "2026-07-24T00:00:00.000Z",
+        detectedAt: "2026-07-24T01:00:00.000Z",
+      },
+    ).blocks);
+    const changed = JSON.stringify(buildScheduleConfirmationMessage(bundle, schedule, {
+      isScheduleChange: true,
+    }).blocks);
+    const cancelled = JSON.stringify(buildScheduleUpdateMessage(
+      bundle,
+      schedule,
+      "CANCELLATION",
+    ).blocks);
+
+    expect(request).toContain("인터뷰 가능 일정 입력");
+    expect(request).toContain("상기 일정 불가");
+    expect(request).not.toContain("이번 인터뷰 참여 어려움");
+    expect(recovery).toContain("내부 시스템 중단으로 일정을 다시 요청드립니다.");
+    expect(changed).toContain("인터뷰 일정 변경 안내");
+    expect(changed).toContain("13:00~14:00");
+    expect(changed).not.toContain("기존 일시");
+    expect(cancelled).toContain("인터뷰가 취소되었습니다.");
+    expect(cancelled).not.toContain("참조 부탁드립니다.");
+  });
+
   it("has one all-day option plus nine hourly options per date", () => {
     const modal = buildAvailabilityModal(interviewCase, interviewer);
     const dateBlocks = modal.blocks.filter(

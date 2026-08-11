@@ -239,7 +239,7 @@ describe("interview arrangement skills", () => {
           startTime: "10:00",
           endTime: "11:00",
         },
-        nextAction: "CREATE_INTERVIEWER_SCHEDULE_CONFIRMATION_DRAFT",
+        nextAction: "CREATE_CANDIDATE_SCHEDULE_PROPOSAL_DECISION",
       },
     });
     expect(db.getCase(interviewCase.id)?.status).toBe("AWAITING_CANDIDATE_CONFIRMATION");

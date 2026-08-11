@@ -208,8 +208,7 @@ app.action(DECLINE_INTERVIEW_ACTION, async ({ ack, body, respond }) => {
       response_type: "ephemeral",
       replace_original: false,
       delete_original: false,
-      text:
-        "참여 어려움으로 접수했습니다. 채용 담당자가 면접관 변경 또는 제외 여부를 검토합니다.",
+      text: "참여 어려움으로 접수했습니다.",
     });
   } catch (error) {
     await respond({
@@ -473,11 +472,11 @@ async function runCycle(): Promise<void> {
           throw new Error("워커 임대를 잃어 리마인드 발송을 중단했습니다.");
         }
         if (!db.claimReminder(reminder.id)) return;
-        const ordinal = reminder.reminderNumber === 1 ? "1차" : "2차(최종)";
+        const candidateLabel = reminder.candidateName ?? "해당";
         try {
           await app.client.chat.postMessage({
             channel: db.getRequestChannelForCase(reminder.caseId) ?? requestChannelId,
-            text: `<@${reminder.slackUserId}> 인터뷰 가능 일정 입력 ${ordinal} 리마인드입니다. 기존 요청 메시지의 [가능 일정 입력] 버튼을 눌러 주세요.`,
+            text: `<@${reminder.slackUserId}> ${candidateLabel} 후보자 인터뷰 가능 일정 입력 리마인드입니다. Slack에서 “${candidateLabel} 후보자 인터뷰 가능 일정 입력” 메시지의 [가능 일정 입력] 버튼을 눌러 주세요.`,
           });
           db.markReminderSent(reminder.id);
         } catch (error) {

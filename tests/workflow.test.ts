@@ -1739,7 +1739,7 @@ describe("evaluation approval workflow", () => {
     ]));
   });
 
-  it("creates an internal schedule confirmation draft without sending Slack", () => {
+  it("creates a Slack schedule announcement only after the candidate confirms", () => {
     db = new BridgeDatabase(":memory:");
     const ninehire: NinehireWorkflowAdapter = {
       async lookupCompletedEvaluation() {
@@ -1793,6 +1793,10 @@ describe("evaluation approval workflow", () => {
     db.setCaseStatus(interviewCase.id, "READY_TO_SCHEDULE");
     workflow.confirmInternalSchedule(interviewCase.id);
 
+    expect(() => workflow.createScheduleConfirmationDraft(interviewCase.id)).toThrow(
+      "only after the candidate has confirmed",
+    );
+    db.setCaseStatus(interviewCase.id, "CONFIRMED");
     const draft = workflow.createScheduleConfirmationDraft(interviewCase.id);
 
     expect(draft).toMatchObject({
@@ -1800,10 +1804,8 @@ describe("evaluation approval workflow", () => {
       messageType: "SCHEDULE_CONFIRMATION",
       status: "DRAFT",
     });
-    expect(draft.previewText).toContain("내부 일정 확정 안내");
-    expect(db.getCase(interviewCase.id)?.status).toBe(
-      "AWAITING_CANDIDATE_CONFIRMATION",
-    );
+    expect(draft.previewText).toContain("인터뷰 일정 확정 안내");
+    expect(db.getCase(interviewCase.id)?.status).toBe("CONFIRMED");
 
     db.approveDraft(draft.id);
     db.markDraftSent(draft.id, "20.0");
@@ -1814,11 +1816,28 @@ describe("evaluation approval workflow", () => {
     });
     expect(reopened).toMatchObject({
       interviewCase: { status: "READY_FOR_DRAFT", scheduleRound: 2 },
-      scheduleUpdateDraft: {
-        messageType: "SCHEDULE_CHANGE",
-        status: "DRAFT",
-      },
+      scheduleUpdateDraft: null,
     });
+
+    db.setCaseStatus(interviewCase.id, "READY_TO_SCHEDULE");
+    db.allocateRoomBlock({
+      caseId: interviewCase.id,
+      roomBlockId: block!.id,
+      startTime: "16:00",
+      endTime: "17:00",
+    });
+    workflow.confirmInternalSchedule(interviewCase.id);
+    db.setCaseStatus(interviewCase.id, "CONFIRMED");
+
+    const changedDraft = workflow.createScheduleConfirmationDraft(interviewCase.id);
+
+    expect(changedDraft).toMatchObject({
+      messageType: "SCHEDULE_CHANGE",
+      status: "DRAFT",
+    });
+    expect(changedDraft.blocksJson).toContain("인터뷰 일정 변경 안내");
+    expect(changedDraft.blocksJson).toContain("16:00~17:00");
+    expect(changedDraft.blocksJson).not.toContain("기존 일시");
   });
 
   it("creates a sequential confirmation draft with stage-specific times, rooms, and interviewers", () => {
@@ -1915,6 +1934,7 @@ describe("evaluation approval workflow", () => {
       ],
     });
     db.confirmSequentialInternalSchedule(interviewCase.id);
+    db.setCaseStatus(interviewCase.id, "CONFIRMED");
 
     const draft = workflow.createScheduleConfirmationDraft(interviewCase.id);
 

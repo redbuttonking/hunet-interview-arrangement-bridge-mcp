@@ -2499,16 +2499,7 @@ export class WorkflowService {
     reason: string;
   }): ScheduleTransitionResult & { scheduleUpdateDraft: DraftRow | null } {
     const transition = this.db.reopenScheduleForReschedule(input);
-    const bundle = this.db.getCaseBundle(input.caseId);
-    if (!bundle) throw new Error(`Case not found: ${input.caseId}`);
-    const scheduleUpdateDraft = transition.hadSentScheduleConfirmation
-      ? this.createScheduleUpdateDraft(
-          bundle,
-          transition.previousSchedule!,
-          "SCHEDULE_CHANGE",
-        )
-      : null;
-    return { ...transition, scheduleUpdateDraft };
+    return { ...transition, scheduleUpdateDraft: null };
   }
 
   cancelInterviewArrangement(input: {
@@ -2595,14 +2586,9 @@ export class WorkflowService {
   createScheduleConfirmationDraft(caseId: string): DraftRow {
     const bundle = this.db.getCaseBundle(caseId);
     if (!bundle) throw new Error(`Case not found: ${caseId}`);
-    if (
-      ![
-        "AWAITING_CANDIDATE_CONFIRMATION",
-        "CONFIRMED",
-      ].includes(bundle.interviewCase.status)
-    ) {
+    if (bundle.interviewCase.status !== "CONFIRMED") {
       throw new Error(
-        "Confirm the internal schedule before creating a schedule confirmation draft.",
+        "Create a Slack schedule announcement only after the candidate has confirmed the interview schedule.",
       );
     }
     const payload = this.buildScheduleConfirmationPayload(caseId, bundle);
@@ -2612,7 +2598,7 @@ export class WorkflowService {
       previewText: payload.text,
       blocksJson: JSON.stringify(payload.blocks),
       payloadHash: hashPayload(payload.text, payload.blocks),
-      messageType: "SCHEDULE_CONFIRMATION",
+      messageType: payload.messageType,
     });
   }
 
@@ -2678,7 +2664,14 @@ export class WorkflowService {
     draftId: string,
     client: WebClient,
   ): Promise<DraftRow> {
-    return this.approveAndSendDraft(draftId, "SCHEDULE_CONFIRMATION", client);
+    const draft = this.db.getDraft(draftId);
+    if (
+      !draft ||
+      !["SCHEDULE_CONFIRMATION", "SCHEDULE_CHANGE"].includes(draft.messageType)
+    ) {
+      throw new Error("This draft is not a final interview schedule announcement.");
+    }
+    return this.approveAndSendDraft(draftId, draft.messageType, client);
   }
 
   async approveAndSendScheduleUpdate(
@@ -2686,13 +2679,8 @@ export class WorkflowService {
     client: WebClient,
   ): Promise<DraftRow> {
     const draft = this.db.getDraft(draftId);
-    if (
-      !draft ||
-      !["SCHEDULE_CHANGE", "SCHEDULE_CANCELLATION"].includes(
-        draft.messageType,
-      )
-    ) {
-      throw new Error("This draft is not a schedule change or cancellation draft.");
+    if (!draft || draft.messageType !== "SCHEDULE_CANCELLATION") {
+      throw new Error("This draft is not an interview schedule cancellation draft.");
     }
     return this.approveAndSendDraft(draftId, draft.messageType, client);
   }
@@ -2719,7 +2707,7 @@ export class WorkflowService {
         ? buildRequestMessage(currentBundle, {
             plan: this.db.getCaseInterviewPlan(existing.caseId),
           })
-        : messageType === "SCHEDULE_CONFIRMATION"
+        : ["SCHEDULE_CONFIRMATION", "SCHEDULE_CHANGE"].includes(messageType)
           ? this.buildScheduleConfirmationPayload(existing.caseId, currentBundle)
           : {
               text: existing.previewText,
@@ -2776,12 +2764,12 @@ export class WorkflowService {
   private createScheduleUpdateDraft(
     bundle: CaseBundle,
     schedule: ConfirmedInterviewScheduleRow,
-    messageType: "SCHEDULE_CHANGE" | "SCHEDULE_CANCELLATION",
+    messageType: "SCHEDULE_CANCELLATION",
   ): DraftRow {
     const payload = buildScheduleUpdateMessage(
       bundle,
       schedule,
-      messageType === "SCHEDULE_CANCELLATION" ? "CANCELLATION" : "CHANGE",
+      "CANCELLATION",
     );
     return this.db.createDraft({
       caseId: bundle.interviewCase.id,
@@ -2793,12 +2781,25 @@ export class WorkflowService {
     });
   }
 
-  private buildScheduleConfirmationPayload(caseId: string, bundle: CaseBundle) {
+  private buildScheduleConfirmationPayload(caseId: string, bundle: CaseBundle): {
+    text: string;
+    blocks: unknown;
+    messageType: "SCHEDULE_CONFIRMATION" | "SCHEDULE_CHANGE";
+  } {
     const schedule = this.db.getConfirmedInterviewSchedule(caseId);
     if (!schedule) throw new Error("The confirmed schedule record is missing.");
-    return buildScheduleConfirmationMessage(bundle, schedule, {
+    const isScheduleChange = Boolean(
+      bundle.interviewCase.lastScheduledDate &&
+      this.db.hasSentScheduleConfirmation(caseId),
+    );
+    const payload = buildScheduleConfirmationMessage(bundle, schedule, {
       sequentialSessions: this.getSequentialScheduleMessageSessions(caseId),
+      isScheduleChange,
     });
+    return {
+      ...payload,
+      messageType: isScheduleChange ? "SCHEDULE_CHANGE" : "SCHEDULE_CONFIRMATION",
+    };
   }
 
   private getSequentialScheduleMessageSessions(

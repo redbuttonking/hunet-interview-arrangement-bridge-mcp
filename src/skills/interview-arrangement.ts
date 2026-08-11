@@ -718,7 +718,7 @@ export class InterviewArrangementSkills {
         action: optionId,
         allocation,
         schedule,
-        nextAction: "CREATE_INTERVIEWER_SCHEDULE_CONFIRMATION_DRAFT",
+        nextAction: "CREATE_CANDIDATE_SCHEDULE_PROPOSAL_DECISION",
       };
     }
     if (decision.decisionType === "CANDIDATE_SCHEDULE_PROPOSAL_SENT") {
@@ -810,7 +810,7 @@ export class InterviewArrangementSkills {
         order: choice.order,
         allocations,
         schedule,
-        nextAction: "CREATE_INTERVIEWER_SCHEDULE_CONFIRMATION_DRAFT",
+        nextAction: "CREATE_CANDIDATE_SCHEDULE_PROPOSAL_DECISION",
       };
     }
     if (decision.decisionType === "CANDIDATE_INTERVIEW_ABSENCE") {

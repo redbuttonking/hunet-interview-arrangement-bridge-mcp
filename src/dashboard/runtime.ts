@@ -271,11 +271,8 @@ export async function resolveDashboardDecision(input: {
           })),
       };
     }
-    if (caseId && nextAction === "CREATE_INTERVIEWER_SCHEDULE_CONFIRMATION_DRAFT") {
-      followUp = {
-        draft: runtime.workflow.createScheduleConfirmationDraft(caseId),
-        decision: runtime.skills.createCandidateScheduleProposalDecision(caseId),
-      };
+    if (caseId && nextAction === "CREATE_CANDIDATE_SCHEDULE_PROPOSAL_DECISION") {
+      followUp = runtime.skills.createCandidateScheduleProposalDecision(caseId);
     }
     if (caseId && nextAction === "SYNC_DAOU_MEETING_ROOM_BLOCKS") {
       const interviewCase = runtime.db.getCase(caseId);
@@ -563,7 +560,7 @@ export async function approveDashboardDraft(draftId: string) {
         runtime.slackClient,
       );
     }
-    if (draft.messageType === "SCHEDULE_CONFIRMATION") {
+    if (["SCHEDULE_CONFIRMATION", "SCHEDULE_CHANGE"].includes(draft.messageType)) {
       return await runtime.workflow.approveAndSendScheduleConfirmation(
         draftId,
         runtime.slackClient,
@@ -575,7 +572,13 @@ export async function approveDashboardDraft(draftId: string) {
         runtime.slackClient,
       );
     }
-    if (["SCHEDULE_CHANGE", "SCHEDULE_CANCELLATION"].includes(draft.messageType)) {
+    if (draft.messageType === "AVAILABILITY_REMINDER") {
+      return await runtime.workflow.approveAndSendAvailabilityReminder(
+        draftId,
+        runtime.slackClient,
+      );
+    }
+    if (draft.messageType === "SCHEDULE_CANCELLATION") {
       return await runtime.workflow.approveAndSendScheduleUpdate(
         draftId,
         runtime.slackClient,

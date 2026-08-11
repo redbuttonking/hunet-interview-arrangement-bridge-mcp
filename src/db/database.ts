@@ -49,6 +49,10 @@ export interface InterviewCaseRow {
   scheduledStartTime: string | null;
   scheduledEndTime: string | null;
   internalScheduleConfirmedAt: string | null;
+  lastScheduledDate?: string | null;
+  lastScheduledStartTime?: string | null;
+  lastScheduledEndTime?: string | null;
+  lastScheduledRoomName?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -424,6 +428,10 @@ function toCase(row: SqlRow): InterviewCaseRow {
     internalScheduleConfirmedAt: nullableString(
       row.internal_schedule_confirmed_at,
     ),
+    lastScheduledDate: nullableString(row.last_scheduled_date),
+    lastScheduledStartTime: nullableString(row.last_scheduled_start_time),
+    lastScheduledEndTime: nullableString(row.last_scheduled_end_time),
+    lastScheduledRoomName: nullableString(row.last_scheduled_room_name),
     createdAt: asString(row.created_at),
     updatedAt: asString(row.updated_at),
   };
@@ -4496,12 +4504,13 @@ export class BridgeDatabase {
     };
   }
 
-  private hasSentScheduleConfirmation(caseId: string): boolean {
+  hasSentScheduleConfirmation(caseId: string): boolean {
     const row = this.connection
       .prepare(
         `
           SELECT 1 AS found FROM message_drafts
-          WHERE case_id = ? AND message_type = 'SCHEDULE_CONFIRMATION'
+          WHERE case_id = ?
+            AND message_type IN ('SCHEDULE_CONFIRMATION', 'SCHEDULE_CHANGE')
             AND status = 'SENT'
           LIMIT 1
         `,
@@ -5423,10 +5432,11 @@ export class BridgeDatabase {
     dueAt: string;
     slackUserId: string;
     displayName: string;
+    candidateName: string | null;
   }> {
     const rows = this.connection
       .prepare(`
-        SELECT r.*, i.slack_user_id, i.display_name
+        SELECT r.*, i.slack_user_id, i.display_name, c.candidate_name
         FROM reminders r
         JOIN case_interviewers i ON i.id = r.interviewer_id
         JOIN interview_cases c ON c.id = r.case_id
@@ -5447,6 +5457,8 @@ export class BridgeDatabase {
       dueAt: asString(row.due_at),
       slackUserId: asString(row.slack_user_id),
       displayName: asString(row.display_name),
+      candidateName:
+        typeof row.candidate_name === "string" ? row.candidate_name : null,
     }));
   }
 
