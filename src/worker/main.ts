@@ -29,6 +29,7 @@ import {
   OPEN_AVAILABILITY_ACTION,
   availabilityFromViewState,
   buildAvailabilityModal,
+  usesPreviousAvailabilityFromViewState,
 } from "../slack/blocks.js";
 import { SlackReconciler } from "../slack/reconciler.js";
 
@@ -178,9 +179,16 @@ app.action(OPEN_AVAILABILITY_ACTION, async ({ ack, body, client, respond }) => {
     });
     return;
   }
+  const reusablePreviousAvailability = db.findReusablePreviousAvailability({
+    caseId,
+    slackUserId,
+    proposalDates: interviewCase.proposalDates,
+  });
   await client.views.open({
     trigger_id: triggerId,
-    view: buildAvailabilityModal(interviewCase, interviewer),
+    view: buildAvailabilityModal(interviewCase, interviewer, {
+      hasReusablePreviousAvailability: reusablePreviousAvailability.length > 0,
+    }),
   });
 });
 
@@ -258,11 +266,21 @@ app.view(AVAILABILITY_VIEW_CALLBACK, async ({ ack, body, view }) => {
     string,
     Record<string, unknown>
   >;
-  const slots = availabilityFromViewState(interviewCase, values);
+  const slots = usesPreviousAvailabilityFromViewState(values)
+    ? db.findReusablePreviousAvailability({
+        caseId,
+        slackUserId,
+        proposalDates: interviewCase.proposalDates,
+      })
+    : availabilityFromViewState(interviewCase, values);
   if (slots.length === 0) {
     await ack({
       response_action: "errors",
-      errors: { global_all: "가능한 시간을 한 개 이상 선택해 주세요." },
+      errors: {
+        global_all: usesPreviousAvailabilityFromViewState(values)
+          ? "같은 제안 날짜에 이전 제출 일정이 없습니다. 가능한 시간을 새로 선택해 주세요."
+          : "가능한 시간을 한 개 이상 선택해 주세요.",
+      },
     });
     return;
   }

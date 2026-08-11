@@ -673,6 +673,36 @@ describe("BridgeDatabase", () => {
     ).toThrow("end time after");
   });
 
+  it("finds only an interviewer's previous availability on the same proposal dates", () => {
+    db = new BridgeDatabase(":memory:");
+    const previousCase = db.createInterviewCase({
+      candidateName: "이전 지원자",
+      proposalDates: ["2026-08-18", "2026-08-19"],
+    });
+    const previousInterviewer = db.addOrUpdateInterviewer({
+      caseId: previousCase.id,
+      displayName: "면접관",
+      slackUserId: "U1",
+      source: "MANUAL",
+    });
+    db.replaceAvailabilityForInterviewer(previousCase.id, previousInterviewer.id, [
+      { date: "2026-08-18", start: "10:00", end: "11:00" },
+      { date: "2026-08-19", start: "14:00", end: "15:00" },
+    ]);
+    const currentCase = db.createInterviewCase({
+      candidateName: "새 지원자",
+      proposalDates: ["2026-08-19", "2026-08-20"],
+    });
+
+    expect(db.findReusablePreviousAvailability({
+      caseId: currentCase.id,
+      slackUserId: "U1",
+      proposalDates: currentCase.proposalDates,
+    })).toEqual([
+      { date: "2026-08-19", start: "14:00", end: "15:00" },
+    ]);
+  });
+
   it("stores internal room allocations without overlapping a pre-booked block", () => {
     db = new BridgeDatabase(":memory:");
     const firstCase = db.createInterviewCase({

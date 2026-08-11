@@ -122,6 +122,20 @@ describe("availability modal", () => {
     expect(modal.blocks.length).toBeLessThanOrEqual(100);
   });
 
+  it("shows previous availability reuse only when the worker found an exact date match", () => {
+    const withoutReuse = JSON.stringify(
+      buildAvailabilityModal(interviewCase, interviewer).blocks,
+    );
+    const withReuse = JSON.stringify(
+      buildAvailabilityModal(interviewCase, interviewer, {
+        hasReusablePreviousAvailability: true,
+      }).blocks,
+    );
+
+    expect(withoutReuse).not.toContain("이전에 제출한 일정과 같음");
+    expect(withReuse).toContain("이전에 제출한 일정과 같음");
+  });
+
   it("shows each sequential interview stage and its assigned interviewer", () => {
     const secondInterviewer: InterviewerRow = {
       ...interviewer,

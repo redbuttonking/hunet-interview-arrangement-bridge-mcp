@@ -4879,6 +4879,55 @@ export class BridgeDatabase {
     return row ? toInterviewer(row) : undefined;
   }
 
+  findReusablePreviousAvailability(input: {
+    caseId: string;
+    slackUserId: string;
+    proposalDates: string[];
+  }): TimeSlot[] {
+    if (input.proposalDates.length === 0) return [];
+    const datePlaceholders = input.proposalDates.map(() => "?").join(", ");
+    const source = this.connection
+      .prepare(
+        `
+          SELECT availability.case_id, availability.interviewer_id, availability.submitted_at
+          FROM availability_slots AS availability
+          JOIN case_interviewers AS interviewer
+            ON interviewer.id = availability.interviewer_id
+          WHERE interviewer.slack_user_id = ?
+            AND availability.case_id <> ?
+            AND availability.date IN (${datePlaceholders})
+          ORDER BY availability.submitted_at DESC
+          LIMIT 1
+        `,
+      )
+      .get(input.slackUserId, input.caseId, ...input.proposalDates) as SqlRow | undefined;
+    if (!source) return [];
+
+    const rows = this.connection
+      .prepare(
+        `
+          SELECT date, start_time, end_time
+          FROM availability_slots
+          WHERE case_id = ?
+            AND interviewer_id = ?
+            AND submitted_at = ?
+            AND date IN (${datePlaceholders})
+          ORDER BY date ASC, start_time ASC
+        `,
+      )
+      .all(
+        asString(source.case_id),
+        asString(source.interviewer_id),
+        asString(source.submitted_at),
+        ...input.proposalDates,
+      ) as SqlRow[];
+    return rows.map((row) => ({
+      date: asString(row.date),
+      start: asString(row.start_time),
+      end: asString(row.end_time),
+    }));
+  }
+
   listInterviewers(caseId: string, activeOnly = true): InterviewerRow[] {
     const rows = this.connection
       .prepare(`

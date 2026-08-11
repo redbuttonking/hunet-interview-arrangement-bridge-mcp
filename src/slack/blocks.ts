@@ -298,6 +298,7 @@ export function buildScheduleUpdateMessage(
 export function buildAvailabilityModal(
   interviewCase: InterviewCaseRow,
   interviewer: InterviewerRow,
+  options?: { hasReusablePreviousAvailability?: boolean },
 ): ModalView {
   const slotOptions = defaultHourlySlots().map((slot) => ({
     text: {
@@ -333,10 +334,29 @@ export function buildAvailabilityModal(
             },
             value: "ALL_DATES",
           },
+          ...(options?.hasReusablePreviousAvailability
+            ? [{
+                text: {
+                  type: "plain_text" as const,
+                  text: "이전에 제출한 일정과 같음",
+                },
+                value: "REUSE_PREVIOUS_EXACT_DATES",
+              }]
+            : []),
         ],
       },
     },
   ];
+
+  if (options?.hasReusablePreviousAvailability) {
+    blocks.push({
+      type: "context",
+      elements: [{
+        type: "mrkdwn",
+        text: "이전에 제출한 일정과 같음을 선택하면 동일한 제안 날짜의 이전 제출 시간만 반영됩니다.",
+      }],
+    });
+  }
 
   for (const date of interviewCase.proposalDates) {
     blocks.push({
@@ -410,4 +430,12 @@ export function availabilityFromViewState(
     }
   }
   return normalizeSlots(slots);
+}
+
+export function usesPreviousAvailabilityFromViewState(
+  values: Record<string, Record<string, unknown>>,
+): boolean {
+  return selectedValues(values.global_all?.all_dates).includes(
+    "REUSE_PREVIOUS_EXACT_DATES",
+  );
 }
