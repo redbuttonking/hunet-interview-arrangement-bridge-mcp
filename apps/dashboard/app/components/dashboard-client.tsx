@@ -392,6 +392,11 @@ function buildActionItems(data: DashboardSnapshot): ActionItem[] {
         review,
       };
     });
+  const caseIdsWithException = new Set(
+    reviewItems
+      .filter((item) => item.queue === "EXCEPTION" && item.caseId)
+      .map((item) => item.caseId!),
+  );
   const cancellationItems: ActionItem[] = data.dashboard.cases.flatMap((interviewCase) => {
     const pending = interviewCase.cancellationExternalFollowUps.filter(
       (followUp) => followUp.status === "PENDING" && followUp.followUpType === "NINEHIRE_CANDIDATE_SCHEDULE",
@@ -414,7 +419,7 @@ function buildActionItems(data: DashboardSnapshot): ActionItem[] {
     }];
   });
   const caseItems = data.dashboard.cases
-    .filter((interviewCase) => !caseIdsWithDecision.has(interviewCase.id))
+    .filter((interviewCase) => !caseIdsWithDecision.has(interviewCase.id) && !caseIdsWithException.has(interviewCase.id))
     .map(caseAction)
     .filter((item): item is ActionItem => Boolean(item));
 
