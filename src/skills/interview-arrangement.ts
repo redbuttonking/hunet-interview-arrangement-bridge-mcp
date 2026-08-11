@@ -525,6 +525,7 @@ export class InterviewArrangementSkills {
       selectionMode: "SINGLE",
       options: decisionOptions([
         ["CREATE_RECOVERY_DRAFT", "재제출 요청 초안 만들기", "미제출 필수 면접관에게 보낼 Slack 재제출 요청 초안을 만듭니다. 아직 발송하지 않습니다."],
+        ["CONFIRM_NO_RECOVERY_NEEDED", "현재 상태 확인, 경고 해제", "현재 미제출 상태가 맞음을 확인하고 외부 메시지 없이 안전 경고만 해제합니다."],
         ["HOLD", "보류", "현재 복구 요청을 보내지 않고 검토 건을 보류합니다."],
       ]),
       context: {
@@ -731,14 +732,24 @@ export class InterviewArrangementSkills {
       };
     }
     if (decision.decisionType === "CREATE_AVAILABILITY_RECOVERY_DRAFT") {
-      if (optionId !== "CREATE_RECOVERY_DRAFT") {
-        throw new Error(`Unsupported availability recovery option: ${optionId}`);
+      if (optionId === "CONFIRM_NO_RECOVERY_NEEDED") {
+        const reviewId = requiredReviewId(decision);
+        const caseId = requiredCaseId(decision);
+        this.db.resolveReview(reviewId, "AVAILABILITY_RECOVERY_NOT_NEEDED");
+        this.db.addEvent(caseId, "AVAILABILITY_RECOVERY_NOT_NEEDED", "USER", { reviewId });
+        return {
+          action: optionId,
+          nextAction: "WAIT_FOR_AVAILABILITY",
+        };
       }
-      return {
-        action: optionId,
-        draft: this.workflow.createAvailabilityRecoveryDraft(requiredReviewId(decision)),
-        nextAction: "REVIEW_AND_APPROVE_AVAILABILITY_RECOVERY",
-      };
+      if (optionId === "CREATE_RECOVERY_DRAFT") {
+        return {
+          action: optionId,
+          draft: this.workflow.createAvailabilityRecoveryDraft(requiredReviewId(decision)),
+          nextAction: "REVIEW_AND_APPROVE_AVAILABILITY_RECOVERY",
+        };
+      }
+      throw new Error(`Unsupported availability recovery option: ${optionId}`);
     }
     if (decision.decisionType === "SELECT_CONFIRMED_SCHEDULE_ROOM") {
       const choice = this.standardScheduleChoice(decision, optionId);

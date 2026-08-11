@@ -538,6 +538,41 @@ describe("interview arrangement skills", () => {
     });
   });
 
+  it("clears a recovery warning without sending a Slack message when the current state is confirmed", async () => {
+    db = new BridgeDatabase(":memory:");
+    const interviewCase = db.createInterviewCase({
+      candidateName: "Candidate",
+      proposalDates: ["2026-08-10"],
+    });
+    const reviewId = db.createReview({
+      caseId: interviewCase.id,
+      reviewType: "WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED",
+      reason: "Worker downtime requires an availability check.",
+    });
+    const calls: string[] = [];
+    const skills = createSkills({
+      createAvailabilityRecoveryDraft(id) {
+        calls.push(id);
+        return { id: "recovery-draft", status: "DRAFT" };
+      },
+    });
+
+    const decision = skills.createAvailabilityRecoveryDecision(reviewId);
+    const resolved = await skills.resolveDecision({
+      decisionId: decision.id,
+      optionId: "CONFIRM_NO_RECOVERY_NEEDED",
+    });
+
+    expect(calls).toEqual([]);
+    expect(resolved.outcome).toMatchObject({
+      nextAction: "WAIT_FOR_AVAILABILITY",
+    });
+    expect(db.getReview(reviewId)).toMatchObject({
+      status: "RESOLVED",
+      resolution: "AVAILABILITY_RECOVERY_NOT_NEEDED",
+    });
+  });
+
   it("returns one operations control payload for MCP and a future dashboard", async () => {
     db = new BridgeDatabase(":memory:");
     const skills = createSkills();
