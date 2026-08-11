@@ -2381,6 +2381,19 @@ export class WorkflowService {
     if (plan?.source === "CANDIDATE_OVERRIDE") {
       this.db.setRequiredInterviewers(caseId, plan.interviewerIds);
     }
+    const resolvedLookupReviews = this.db.resolveOpenCaseReviewsByType(
+      caseId,
+      "INTERVIEWER_LOOKUP_REQUIRED",
+      "AUTO_RESOLVED_INTERVIEWERS_SYNCED",
+    );
+    if (resolvedLookupReviews > 0) {
+      this.db.addEvent(
+        caseId,
+        "INTERVIEWER_LOOKUP_REVIEW_AUTO_RESOLVED",
+        "SYSTEM",
+        { resolvedLookupReviews },
+      );
+    }
     return {
       addedOrUpdated: upstream.interviewers.length,
       deactivated,

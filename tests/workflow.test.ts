@@ -1658,6 +1658,49 @@ describe("evaluation approval workflow", () => {
     expect(db.listOpenReviews()).toHaveLength(1);
   });
 
+  it("clears an interviewer lookup review after interviewers are found", async () => {
+    db = new BridgeDatabase(":memory:");
+    const ninehire: NinehireWorkflowAdapter = {
+      async lookupCompletedEvaluation() {
+        return { reason: "Not used in this test." };
+      },
+      async listInterviewers() {
+        return {
+          interviewers: [{
+            ninehireUserId: "N1",
+            displayName: "면접관",
+            required: true,
+          }],
+          unresolvedUserGroups: [],
+        };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    };
+    const workflow = new WorkflowService(db, config, ninehire);
+    const interviewCase = db.createInterviewCase({
+      candidateName: "오현서",
+      recruitmentName: "중견기업 영업",
+      proposalDates: ["2026-08-18"],
+    });
+    const reviewId = db.createReview({
+      caseId: interviewCase.id,
+      reviewType: "INTERVIEWER_LOOKUP_REQUIRED",
+      reason: "No interviewer was found previously.",
+    });
+
+    await workflow.syncCaseInterviewers(interviewCase.id);
+
+    expect(db.getReview(reviewId)).toMatchObject({
+      status: "RESOLVED",
+      resolution: "AUTO_RESOLVED_INTERVIEWERS_SYNCED",
+    });
+    expect(db.listCaseEvents(interviewCase.id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ eventType: "INTERVIEWER_LOOKUP_REVIEW_AUTO_RESOLVED" }),
+    ]));
+  });
+
   it("creates an internal schedule confirmation draft without sending Slack", () => {
     db = new BridgeDatabase(":memory:");
     const ninehire: NinehireWorkflowAdapter = {

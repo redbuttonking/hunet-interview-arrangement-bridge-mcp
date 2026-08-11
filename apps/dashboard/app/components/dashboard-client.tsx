@@ -208,6 +208,27 @@ function reviewCategory(review: Review) {
   return labels[review.reviewType] ?? "운영 확인";
 }
 
+function reviewActionLabel(review: Review) {
+  if (review.reviewType === "WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED") {
+    return "복구 확인";
+  }
+  if (review.reviewType === "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED") {
+    return "응답 조치 선택";
+  }
+  if (
+    [
+      "RECRUITMENT_TEMPLATE_UPDATE_REQUIRED",
+      "RECRUITMENT_TEMPLATE_CHECK_REQUIRED",
+    ].includes(review.reviewType)
+  ) {
+    return "규칙 확인";
+  }
+  if (review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED") {
+    return "조율 시작 검토";
+  }
+  return "검토하기";
+}
+
 function caseAction(interviewCase: CandidateCase): ActionItem | undefined {
   const base = {
     id: `case:${interviewCase.id}`,
@@ -313,7 +334,6 @@ function buildActionItems(data: DashboardSnapshot): ActionItem[] {
   const casesById = new Map(data.dashboard.cases.map((interviewCase) => [interviewCase.id, interviewCase]));
   const caseIdsWithDecision = new Set(data.decisions.map((decision) => decision.caseId).filter((caseId): caseId is string => Boolean(caseId)));
   const reviewIdsWithDecision = new Set(data.decisions.map((decision) => decision.reviewId).filter((reviewId): reviewId is string => Boolean(reviewId)));
-  const caseIdsWithReview = new Set(data.reviews.map((review) => review.caseId).filter((caseId): caseId is string => Boolean(caseId)));
 
   const decisionItems: ActionItem[] = data.decisions.map((decision) => ({
     id: `decision:${decision.id}`,
@@ -363,13 +383,9 @@ function buildActionItems(data: DashboardSnapshot): ActionItem[] {
           : review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED" ? "승인 전에는 나인하이어·Slack에 변경이 없습니다." : null,
         actionLabel: integrationRetryExhausted
           ? "연동 상태 확인"
-          : review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED"
-            ? "조율 시작 검토"
-            : review.reviewType === "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED"
-              ? "응답 조치 선택"
-              : supportedReviewDecisionTypes.has(review.reviewType)
-                ? "규칙 확인"
-                : review.caseId ? "상세 보기" : null,
+          : supportedReviewDecisionTypes.has(review.reviewType)
+            ? reviewActionLabel(review)
+            : review.caseId ? "상세 보기" : null,
         href: review.caseId ? `/cases/${review.caseId}` : integrationRetryExhausted ? "#integration-health" : null,
         review,
       };
@@ -396,7 +412,7 @@ function buildActionItems(data: DashboardSnapshot): ActionItem[] {
     }];
   });
   const caseItems = data.dashboard.cases
-    .filter((interviewCase) => !caseIdsWithDecision.has(interviewCase.id) && !caseIdsWithReview.has(interviewCase.id))
+    .filter((interviewCase) => !caseIdsWithDecision.has(interviewCase.id))
     .map(caseAction)
     .filter((item): item is ActionItem => Boolean(item));
 

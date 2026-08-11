@@ -2173,6 +2173,21 @@ export class BridgeDatabase {
     return row ? asString(row.id) : undefined;
   }
 
+  resolveOpenCaseReviewsByType(
+    caseId: string,
+    reviewType: string,
+    resolution: string,
+  ): number {
+    const result = this.connection
+      .prepare(`
+        UPDATE workflow_reviews
+        SET status = 'RESOLVED', resolution = ?, resolved_at = ?
+        WHERE case_id = ? AND review_type = ? AND status = 'OPEN'
+      `)
+      .run(resolution, new Date().toISOString(), caseId, reviewType);
+    return Number(result.changes);
+  }
+
   hasOpenReviewForSourceEvent(reviewType: string, eventId: string): boolean {
     const row = this.connection
       .prepare(`

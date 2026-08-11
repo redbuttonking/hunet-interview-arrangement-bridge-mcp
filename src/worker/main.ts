@@ -511,6 +511,7 @@ if (!workerStart.acquired) {
     "Another interview bridge worker already owns the active lease. This process will stop.\n",
   );
   db.close();
+  process.exit(1);
 } else {
 try {
   await app.start();

@@ -123,21 +123,26 @@ function evaluationSummary(value: unknown): DashboardEvaluationSummary | null {
   };
 }
 
-function reviewContext(review: ReviewRow) {
+function reviewContext(db: BridgeDatabase, review: ReviewRow) {
   const context = review.summary?.context;
   const summaryContext = context && typeof context === "object" && !Array.isArray(context)
     ? context as Record<string, unknown>
     : undefined;
   const evaluation = evaluationSummary(review.summary?.evaluation);
+  const interviewCase = review.caseId ? db.getCase(review.caseId) : undefined;
+  const plan = review.caseId ? db.getCaseInterviewPlan(review.caseId) : undefined;
   return {
-    candidateName: text(summaryContext?.candidateName),
-    recruitmentName: text(summaryContext?.recruitmentName),
-    currentStepName: evaluation?.currentStep?.name ?? null,
+    candidateName: text(summaryContext?.candidateName) ?? interviewCase?.candidateName ?? null,
+    recruitmentName: text(summaryContext?.recruitmentName) ?? interviewCase?.recruitmentName ?? null,
+    currentStepName: evaluation?.currentStep?.name ?? plan?.stepNames.join(
+      plan.mode === "SEQUENTIAL" ? " → " : " + ",
+    ) ?? null,
     evaluationSummary: evaluation,
   };
 }
 
-function decisionSummary(decision: InterviewSkillDecisionRow) {
+function decisionSummary(db: BridgeDatabase, decision: InterviewSkillDecisionRow) {
+  const interviewCase = decision.caseId ? db.getCase(decision.caseId) : undefined;
   return {
     id: decision.id,
     skillKey: decision.skillKey,
@@ -148,8 +153,8 @@ function decisionSummary(decision: InterviewSkillDecisionRow) {
     options: decision.options,
     reviewId: decision.reviewId ?? null,
     caseId: decision.caseId ?? null,
-    candidateName: text(decision.context.candidateName),
-    recruitmentName: text(decision.context.recruitmentName),
+    candidateName: text(decision.context.candidateName) ?? interviewCase?.candidateName ?? null,
+    recruitmentName: text(decision.context.recruitmentName) ?? interviewCase?.recruitmentName ?? null,
     createdAt: decision.createdAt,
   };
 }
@@ -211,16 +216,16 @@ export function getDashboardSnapshot(db: BridgeDatabase, limit = 100) {
     reviewType: review.reviewType,
     reason: review.reason,
     createdAt: review.createdAt,
-    ...reviewContext(review),
+    ...reviewContext(db, review),
   }));
   const decisions = db
     .listInterviewSkillDecisions({ status: "PENDING", limit })
-    .map(decisionSummary);
+    .map((decision) => decisionSummary(db, decision));
   const heldReviewWork = db
     .listHeldReviews(limit)
     .filter((review) => !review.caseId)
     .map((review) => {
-      const context = reviewContext(review);
+      const context = reviewContext(db, review);
       return {
         id: review.id,
         kind: "REVIEW" as const,

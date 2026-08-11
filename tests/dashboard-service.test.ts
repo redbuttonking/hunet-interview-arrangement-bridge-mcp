@@ -155,4 +155,36 @@ describe("dashboard service", () => {
       expect.objectContaining({ id: heldReviewId, kind: "REVIEW", candidateName: "Held review candidate" }),
     ]));
   });
+
+  it("uses the linked case when an operational review has no candidate summary", () => {
+    db = new BridgeDatabase(":memory:");
+    const interviewCase = db.createInterviewCase({
+      candidateName: "오현서",
+      recruitmentName: "중견기업 영업",
+      proposalDates: ["2026-08-18"],
+    });
+    db.upsertCaseInterviewPlan({
+      caseId: interviewCase.id,
+      source: "TEMPLATE",
+      mode: "COMBINED",
+      stepIds: ["S1"],
+      stepNames: ["실무자 + 임원 면접"],
+      durationMinutes: 60,
+    });
+    db.createReview({
+      caseId: interviewCase.id,
+      reviewType: "WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED",
+      reason: "Slack worker downtime may have missed availability.",
+    });
+
+    const snapshot = getDashboardSnapshot(db);
+
+    expect(snapshot.reviews).toEqual([
+      expect.objectContaining({
+        candidateName: "오현서",
+        recruitmentName: "중견기업 영업",
+        currentStepName: "실무자 + 임원 면접",
+      }),
+    ]);
+  });
 });
