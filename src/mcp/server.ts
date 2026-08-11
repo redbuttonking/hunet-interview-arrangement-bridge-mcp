@@ -1500,6 +1500,23 @@ export function createBridgeMcpServer(
   );
 
   server.registerTool(
+    "create_interviewer_availability_reminder_draft",
+    {
+      title: "면접관 일정 입력 재안내 초안 생성",
+      description:
+        "아직 가능 일정을 제출하지 않은 필수 면접관에게 보낼 재안내 Slack 초안을 생성합니다. 발송하지 않습니다.",
+      inputSchema: { caseId: z.string().uuid() },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    async ({ caseId }) => result(workflow.createAvailabilityReminderDraft(caseId)),
+  );
+
+  server.registerTool(
     "create_interviewer_request_draft",
     {
       title: "면접관 일정 요청 초안 생성",
@@ -1588,6 +1605,28 @@ export function createBridgeMcpServer(
       if (!slackClient) throw new Error("SLACK_BOT_TOKEN is not configured.");
       return result(
         await workflow.approveAndSendAvailabilityRecovery(draftId, slackClient),
+      );
+    },
+  );
+
+  server.registerTool(
+    "approve_and_send_interviewer_availability_reminder",
+    {
+      title: "면접관 일정 입력 재안내 승인 및 발송",
+      description:
+        "검토한 일정 입력 재안내 초안을 명시적으로 승인하고 Slack에 발송합니다.",
+      inputSchema: { draftId: z.string().uuid() },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ draftId }) => {
+      if (!slackClient) throw new Error("SLACK_BOT_TOKEN is not configured.");
+      return result(
+        await workflow.approveAndSendAvailabilityReminder(draftId, slackClient),
       );
     },
   );

@@ -217,6 +217,9 @@ function slackMetadataEventType(messageType: DraftRow["messageType"]): string {
   if (messageType === "INTERVIEWER_REQUEST") {
     return "interview_bridge_request";
   }
+  if (messageType === "AVAILABILITY_REMINDER") {
+    return "interview_bridge_availability_reminder";
+  }
   if (messageType === "SCHEDULE_CONFIRMATION") {
     return "interview_bridge_schedule_confirmation";
   }
@@ -1128,6 +1131,55 @@ export class WorkflowService {
     });
     this.db.addEvent(review.caseId, "AVAILABILITY_RECOVERY_DRAFT_CREATED", "USER", {
       reviewId: review.id,
+      draftId: draft.id,
+    });
+    return draft;
+  }
+
+  createAvailabilityReminderDraft(caseId: string): DraftRow {
+    const bundle = this.db.getCaseBundle(caseId);
+    if (!bundle || bundle.interviewCase.status !== "COLLECTING_AVAILABILITY") {
+      throw new Error(
+        "일정 입력 재안내는 면접관 일정 회신을 수집 중인 건에만 만들 수 있습니다.",
+      );
+    }
+    const pendingInterviewerIds = bundle.interviewers
+      .filter(
+        (interviewer) =>
+          interviewer.active &&
+          interviewer.required &&
+          interviewer.status === "PENDING",
+      )
+      .map((interviewer) => interviewer.id);
+    if (pendingInterviewerIds.length === 0) {
+      throw new Error("일정 제출을 기다리는 면접관이 없습니다.");
+    }
+    const missingSlackMappings = bundle.interviewers.filter(
+      (interviewer) =>
+        pendingInterviewerIds.includes(interviewer.id) && !interviewer.slackUserId,
+    );
+    if (missingSlackMappings.length > 0) {
+      throw new Error(
+        `Slack 사용자 매핑이 필요합니다: ${missingSlackMappings.map((item) => item.displayName).join(", ")}`,
+      );
+    }
+    const payload = buildRequestMessage(bundle, {
+      title: "인터뷰 가능 일정 입력 재안내",
+      requestText:
+        "앞서 안내드린 인터뷰 가능 일정 입력을 다시 요청드립니다. 아래 버튼에서 가능한 시간을 선택해 주세요.",
+      targetInterviewerIds: pendingInterviewerIds,
+      plan: this.db.getCaseInterviewPlan(caseId),
+    });
+    const draft = this.db.createDraft({
+      caseId,
+      channelId: this.requestChannelIdForCase(caseId),
+      previewText: payload.text,
+      blocksJson: JSON.stringify(payload.blocks),
+      payloadHash: hashPayload(payload.text, payload.blocks),
+      messageType: "AVAILABILITY_REMINDER",
+      allowResend: true,
+    });
+    this.db.addEvent(caseId, "AVAILABILITY_REMINDER_DRAFT_CREATED", "USER", {
       draftId: draft.id,
     });
     return draft;
@@ -2550,6 +2602,13 @@ export class WorkflowService {
     client: WebClient,
   ): Promise<DraftRow> {
     return this.approveAndSendDraft(draftId, "AVAILABILITY_RECOVERY", client);
+  }
+
+  async approveAndSendAvailabilityReminder(
+    draftId: string,
+    client: WebClient,
+  ): Promise<DraftRow> {
+    return this.approveAndSendDraft(draftId, "AVAILABILITY_REMINDER", client);
   }
 
   async approveAndSendScheduleConfirmation(

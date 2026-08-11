@@ -1594,6 +1594,20 @@ describe("evaluation approval workflow", () => {
       status: "RESOLVED",
       resolution: "AVAILABILITY_RECOVERY_SENT",
     });
+
+    const reminder = workflow.createAvailabilityReminderDraft(interviewCase.id);
+    expect(reminder).toMatchObject({
+      caseId: interviewCase.id,
+      messageType: "AVAILABILITY_REMINDER",
+      status: "DRAFT",
+    });
+    expect(reminder.blocksJson).toContain("<@U1>");
+    expect(reminder.blocksJson).not.toContain("<@U2>");
+    db.approveDraft(reminder.id);
+    db.markDraftSent(reminder.id, "31.0");
+
+    const repeatedReminder = workflow.createAvailabilityReminderDraft(interviewCase.id);
+    expect(repeatedReminder.id).not.toBe(reminder.id);
   });
 
   it("adds direct recruitment participants and flags unresolved user groups", async () => {

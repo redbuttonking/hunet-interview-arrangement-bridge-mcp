@@ -78,6 +78,7 @@ export interface DraftRow {
   payloadHash: string;
   messageType:
     | "INTERVIEWER_REQUEST"
+    | "AVAILABILITY_REMINDER"
     | "AVAILABILITY_RECOVERY"
     | "SCHEDULE_CONFIRMATION"
     | "SCHEDULE_CHANGE"
@@ -5012,13 +5013,17 @@ export class BridgeDatabase {
     blocksJson: string;
     payloadHash: string;
     messageType: DraftRow["messageType"];
+    allowResend?: boolean;
   }): DraftRow {
+    const activeDraftStatuses = input.allowResend
+      ? "'DRAFT', 'APPROVED', 'SENDING'"
+      : "'DRAFT', 'APPROVED', 'SENDING', 'SENT'";
     const existing = this.connection
       .prepare(`
         SELECT * FROM message_drafts
         WHERE case_id = ? AND payload_hash = ? AND message_type = ?
           AND workflow_review_id IS ?
-          AND status IN ('DRAFT', 'APPROVED', 'SENDING', 'SENT')
+          AND status IN (${activeDraftStatuses})
         ORDER BY created_at DESC LIMIT 1
       `)
       .get(
