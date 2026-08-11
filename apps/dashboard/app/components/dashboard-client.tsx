@@ -357,10 +357,11 @@ function buildActionItems(data: DashboardSnapshot): ActionItem[] {
     .filter((review) => !reviewIdsWithDecision.has(review.id))
     .map((review) => {
       const integrationRetryExhausted = review.reviewType === "INTEGRATION_RETRY_EXHAUSTED";
+      const workerDowntimeAvailabilityReview = review.reviewType === "WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED";
       return {
         id: `review:${review.id}`,
-        queue: review.reviewType === "WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED" || integrationRetryExhausted || !supportedReviewDecisionTypes.has(review.reviewType) ? "EXCEPTION" : "ACTION",
-        priority: supportedReviewDecisionTypes.has(review.reviewType) || integrationRetryExhausted ? "urgent" : "normal",
+        queue: workerDowntimeAvailabilityReview ? "WAITING" : integrationRetryExhausted || !supportedReviewDecisionTypes.has(review.reviewType) ? "EXCEPTION" : "ACTION",
+        priority: workerDowntimeAvailabilityReview ? "watch" : supportedReviewDecisionTypes.has(review.reviewType) || integrationRetryExhausted ? "urgent" : "normal",
         journeyIndex: review.caseId && casesById.get(review.caseId)
           ? journeyIndexForStatus(casesById.get(review.caseId)!.status)
           : journeyIndexForReview(review),
