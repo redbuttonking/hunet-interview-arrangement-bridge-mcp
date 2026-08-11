@@ -440,6 +440,42 @@ function groupActionItems(items: ActionItem[]) {
   return [...groups.values()];
 }
 
+function allQueueGroupKey(item: ActionItem) {
+  if (item.caseId) return `case:${item.caseId}`;
+  if (item.candidateName && item.recruitmentName) return `candidate:${item.candidateName}:${item.recruitmentName}`;
+  return item.id;
+}
+
+function allQueueItemPriority(item: ActionItem) {
+  if (item.id.startsWith("case:")) return 0;
+  if (item.decision) return 1;
+  if (item.review) return 2;
+  return 3;
+}
+
+function groupAllQueueItems(items: ActionItem[]) {
+  const groups = new Map<string, ActionItem>();
+  for (const item of items) {
+    const key = allQueueGroupKey(item);
+    const current = groups.get(key);
+    if (!current) {
+      groups.set(key, { ...item, relatedItems: item.relatedItems ? [...item.relatedItems] : undefined });
+      continue;
+    }
+
+    const itemIsPrimary = allQueueItemPriority(item) < allQueueItemPriority(current);
+    const primary = itemIsPrimary ? item : current;
+    const secondary = itemIsPrimary ? current : item;
+    const relatedItems = [
+      ...(primary.relatedItems ?? []),
+      secondary,
+      ...(secondary.relatedItems ?? []),
+    ].filter((related, index, entries) => entries.findIndex((entry) => entry.id === related.id) === index);
+    groups.set(key, { ...primary, relatedItems });
+  }
+  return [...groups.values()];
+}
+
 function priorityStyle(priority: ActionPriority) {
   if (priority === "urgent") return { dot: "bg-amber-500", badge: "warning" as const, label: "우선 처리" };
   if (priority === "watch") return { dot: "bg-slate-400", badge: "secondary" as const, label: "확인 필요" };
@@ -1348,17 +1384,17 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
   };
 
   const actionItems = useMemo(() => buildActionItems(data), [data]);
+  const allQueueItems = useMemo(() => groupAllQueueItems(actionItems), [actionItems]);
   const queueCounts = useMemo(() => ({
     ACTION: actionItems.filter((item) => item.queue === "ACTION").length,
     WAITING: actionItems.filter((item) => item.queue === "WAITING").length,
     EXCEPTION: actionItems.filter((item) => item.queue === "EXCEPTION").length,
-    ALL: actionItems.length,
-  }), [actionItems]);
+    ALL: allQueueItems.length,
+  }), [actionItems, allQueueItems]);
   const filteredActionItems = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase();
-    return actionItems.filter((item) => {
-      const matchesTab = queueTab === "ALL" || item.queue === queueTab;
-      if (!matchesTab) return false;
+    const source = queueTab === "ALL" ? allQueueItems : actionItems.filter((item) => item.queue === queueTab);
+    return source.filter((item) => {
       if (!normalizedQuery) return true;
       const haystack = [item.candidateName, item.recruitmentName, item.title, item.description, item.category, item.meta]
         .filter(Boolean)
@@ -1366,7 +1402,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
         .toLocaleLowerCase();
       return haystack.includes(normalizedQuery);
     });
-  }, [actionItems, query, queueTab]);
+  }, [actionItems, allQueueItems, query, queueTab]);
   const pageSize = 5;
   const pageCount = Math.max(1, Math.ceil(filteredActionItems.length / pageSize));
   const pageNumbers = useMemo(() => paginationPages(page, pageCount), [page, pageCount]);
