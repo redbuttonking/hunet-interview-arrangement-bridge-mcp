@@ -53,6 +53,21 @@ export function proposalDates(requestDate: string): string[] {
   return [monday, addDays(monday, 1), addDays(monday, 2), addDays(monday, 3)];
 }
 
+export function nextProposalWeekDates(
+  dates: string[],
+  notBefore?: string,
+): string[] {
+  if (dates.length === 0) {
+    throw new Error("At least one proposal date is required.");
+  }
+  if (notBefore) parseDateOnly(notBefore);
+  let next = [...new Set(dates.map((date) => addDays(date, 7)))].sort();
+  while (notBefore && next.some((date) => date < notBefore)) {
+    next = next.map((date) => addDays(date, 7));
+  }
+  return next;
+}
+
 export function defaultHourlySlots(): Array<{ start: string; end: string }> {
   return Array.from({ length: 9 }, (_, index) => {
     const startHour = index + 9;

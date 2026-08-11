@@ -15,7 +15,7 @@ import {
   type ScheduleTransitionResult,
   type WorkerDowntime,
 } from "../db/database.js";
-import { proposalDates } from "../domain/calendar.js";
+import { nextProposalWeekDates, proposalDates } from "../domain/calendar.js";
 import type {
   CandidateContext,
   EvaluationSummary,
@@ -2424,6 +2424,34 @@ export class WorkflowService {
       payloadHash: hashPayload(payload.text, payload.blocks),
       messageType: "INTERVIEWER_REQUEST",
     });
+  }
+
+  async createNextWeekAvailabilityRetryDraft(caseId: string): Promise<{
+    interviewCase: InterviewCaseRow;
+    draft: DraftRow;
+  }> {
+    const interviewCase = this.db.getCase(caseId);
+    if (!interviewCase || interviewCase.status !== "READY_TO_SCHEDULE") {
+      throw new Error(
+        "A new availability request can only be prepared after scheduling has no available common slot.",
+      );
+    }
+    const nextDates = nextProposalWeekDates(
+      interviewCase.proposalDates,
+      todayInKorea(),
+    );
+    const prepared = this.db.prepareAvailabilityRecollection({
+      caseId,
+      proposalDates: nextDates,
+      reason: "NO_COMMON_SCHEDULING_SLOT",
+    });
+    const draft = await this.createRequestDraft(caseId);
+    this.db.addEvent(caseId, "NEXT_WEEK_AVAILABILITY_RETRY_DRAFT_CREATED", "SYSTEM", {
+      draftId: draft.id,
+      proposalDates: nextDates,
+      scheduleRound: prepared.scheduleRound,
+    });
+    return { interviewCase: this.db.getCase(caseId)!, draft };
   }
 
   confirmInternalSchedule(caseId: string) {

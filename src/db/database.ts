@@ -4641,6 +4641,73 @@ export class BridgeDatabase {
     this.addEvent(id, "PROPOSAL_DATES_CHANGED", "USER", { dates });
   }
 
+  prepareAvailabilityRecollection(input: {
+    caseId: string;
+    proposalDates: string[];
+    reason: string;
+  }): InterviewCaseRow {
+    const interviewCase = this.getCase(input.caseId);
+    if (!interviewCase || interviewCase.status !== "READY_TO_SCHEDULE") {
+      throw new Error(
+        "Availability recollection can only start after all required interviewer responses are collected.",
+      );
+    }
+    if (
+      input.proposalDates.length === 0
+      || input.proposalDates.some((date) => !/^\d{4}-\d{2}-\d{2}$/.test(date))
+    ) {
+      throw new Error("At least one YYYY-MM-DD proposal date is required.");
+    }
+
+    const proposalDates = [...new Set(input.proposalDates)].sort();
+    this.transaction(() => {
+      const now = new Date().toISOString();
+      const clearedAvailabilityCount = Number(
+        (
+          this.connection
+            .prepare("SELECT COUNT(*) AS count FROM availability_slots WHERE case_id = ?")
+            .get(input.caseId) as SqlRow
+        ).count,
+      );
+      this.connection
+        .prepare("DELETE FROM availability_slots WHERE case_id = ?")
+        .run(input.caseId);
+      this.connection
+        .prepare(`
+          UPDATE case_interviewers
+          SET status = 'PENDING', responded_at = NULL, updated_at = ?
+          WHERE case_id = ? AND active = 1
+        `)
+        .run(now, input.caseId);
+      this.connection
+        .prepare("DELETE FROM reminders WHERE case_id = ? AND sent_at IS NULL")
+        .run(input.caseId);
+      this.discardPendingInterviewSkillDecisionsForCase(
+        input.caseId,
+        "INTERVIEW_SCHEDULING",
+      );
+      this.discardPendingInterviewSkillDecisionsForCase(
+        input.caseId,
+        "AVAILABILITY_COLLECTION",
+      );
+      this.connection
+        .prepare(`
+          UPDATE interview_cases
+          SET status = 'READY_FOR_DRAFT', schedule_round = schedule_round + 1,
+              proposal_dates_json = ?, updated_at = ?
+          WHERE id = ?
+        `)
+        .run(JSON.stringify(proposalDates), now, input.caseId);
+      this.addEvent(input.caseId, "AVAILABILITY_RECOLLECTION_PREPARED", "SYSTEM", {
+        reason: input.reason,
+        previousProposalDates: interviewCase.proposalDates,
+        proposalDates,
+        clearedAvailabilityCount,
+      });
+    });
+    return this.getCase(input.caseId)!;
+  }
+
   upsertIdentityMapping(input: {
     ninehireUserId?: string;
     slackUserId: string;

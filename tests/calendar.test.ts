@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   firstReminderAt,
+  nextProposalWeekDates,
   normalizeSlots,
   proposalDates,
   secondReminderAt,
@@ -24,6 +25,20 @@ describe("proposalDates", () => {
       "2026-07-29",
       "2026-07-30",
     ]);
+  });
+
+  it("keeps the proposed weekday pattern when moving to the next week", () => {
+    expect(nextProposalWeekDates(["2026-08-18", "2026-08-19", "2026-08-20"])).toEqual([
+      "2026-08-25",
+      "2026-08-26",
+      "2026-08-27",
+    ]);
+  });
+
+  it("skips past proposal weeks while preserving the weekday pattern", () => {
+    expect(
+      nextProposalWeekDates(["2026-08-18", "2026-08-19", "2026-08-20"], "2026-09-01"),
+    ).toEqual(["2026-09-01", "2026-09-02", "2026-09-03"]);
   });
 });
 

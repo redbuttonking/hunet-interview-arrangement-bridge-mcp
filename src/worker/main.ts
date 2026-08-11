@@ -412,7 +412,18 @@ async function prepareReadySchedulingDecisions(): Promise<void> {
   if (schedulingPreparationRunning) return;
   schedulingPreparationRunning = true;
   try {
-    await automaticScheduling.prepareReadyCases();
+    const prepared = await automaticScheduling.prepareReadyCases();
+    for (const result of prepared) {
+      if (result.decision.decisionType !== "NO_SCHEDULING_SLOT") continue;
+      try {
+        await workflow.createNextWeekAvailabilityRetryDraft(result.caseId);
+        skills.createAvailabilityCollectionDecision(result.caseId);
+      } catch (error) {
+        process.stderr.write(
+          `[Automatic availability retry] ${result.caseId}: ${errorMessage(error)}\n`,
+        );
+      }
+    }
   } catch (error) {
     process.stderr.write(`[Automatic scheduling preparation] ${errorMessage(error)}\n`);
   } finally {
