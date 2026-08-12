@@ -4504,6 +4504,68 @@ export class BridgeDatabase {
     };
   }
 
+  closeInterviewArrangement(input: {
+    caseId: string;
+    reason: string;
+  }): InterviewCaseRow {
+    const interviewCase = this.getCase(input.caseId);
+    if (!interviewCase) throw new Error(`Case not found: ${input.caseId}`);
+    if (interviewCase.status === "CLOSED") return interviewCase;
+    if (
+      ["AWAITING_CANDIDATE_CONFIRMATION", "CONFIRMED", "CANCELLED"].includes(
+        interviewCase.status,
+      )
+    ) {
+      throw new Error(
+        "A scheduled or cancelled case must use the cancellation workflow instead of being closed.",
+      );
+    }
+
+    this.transaction(() => {
+      const cancelledDraftIds = this.cancelUnsentDrafts(
+        input.caseId,
+        "The interview arrangement was closed before scheduling.",
+      );
+      const remindersRemoved = Number(
+        (this.connection
+          .prepare("DELETE FROM reminders WHERE case_id = ? AND sent_at IS NULL")
+          .run(input.caseId) as { changes?: number }).changes ?? 0,
+      );
+      const availabilityRemoved = Number(
+        (this.connection
+          .prepare("DELETE FROM availability_slots WHERE case_id = ?")
+          .run(input.caseId) as { changes?: number }).changes ?? 0,
+      );
+      const reviewsResolved = Number(
+        (this.connection
+          .prepare(`
+            UPDATE workflow_reviews
+            SET status = 'RESOLVED', resolution = 'UPSTREAM_REJECTED', resolved_at = ?
+            WHERE case_id = ? AND status = 'OPEN'
+          `)
+          .run(new Date().toISOString(), input.caseId) as { changes?: number }).changes ?? 0,
+      );
+      const decisionsDiscarded = Number(
+        (this.connection
+          .prepare(
+            "DELETE FROM interview_skill_decisions WHERE case_id = ? AND status = 'PENDING'",
+          )
+          .run(input.caseId) as { changes?: number }).changes ?? 0,
+      );
+      this.setCaseStatus(input.caseId, "CLOSED");
+      this.addEvent(input.caseId, "INTERVIEW_ARRANGEMENT_CLOSED", "USER", {
+        reason: input.reason,
+        cancelledDraftIds,
+        remindersRemoved,
+        availabilityRemoved,
+        reviewsResolved,
+        decisionsDiscarded,
+      });
+    });
+
+    return this.getCase(input.caseId)!;
+  }
+
   hasSentScheduleConfirmation(caseId: string): boolean {
     const row = this.connection
       .prepare(
@@ -5560,14 +5622,52 @@ export class BridgeDatabase {
     if (updated.changes === 0) return;
     if (Number(row.reminder_number) === 2) {
       const caseId = asString(row.case_id);
+      const interviewer = this.getInterviewer(asString(row.interviewer_id));
       this.createReview({
         caseId,
         reviewType: "INTERVIEWER_NO_RESPONSE",
-        reason:
-          "The interviewer has not responded after the configured two reminders.",
+        reason: `${interviewer?.displayName ?? "필수 면접관"} 면접관이 리마인드 2회 후에도 가능 일정을 제출하지 않았습니다.`,
       });
-      this.setCaseStatus(caseId, "REVIEW_REQUIRED");
     }
+  }
+
+  restoreAvailabilityCollectionAfterNoResponseReview(): number {
+    const rows = this.connection
+      .prepare(`
+        SELECT interview_case.id
+        FROM interview_cases AS interview_case
+        WHERE interview_case.status = 'REVIEW_REQUIRED'
+          AND EXISTS (
+            SELECT 1 FROM workflow_reviews AS review
+            WHERE review.case_id = interview_case.id
+              AND review.review_type = 'INTERVIEWER_NO_RESPONSE'
+              AND review.status = 'OPEN'
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM workflow_reviews AS other_review
+            WHERE other_review.case_id = interview_case.id
+              AND other_review.status = 'OPEN'
+              AND other_review.review_type <> 'INTERVIEWER_NO_RESPONSE'
+          )
+          AND EXISTS (
+            SELECT 1 FROM case_interviewers AS interviewer
+            WHERE interviewer.case_id = interview_case.id
+              AND interviewer.active = 1
+              AND interviewer.required = 1
+              AND interviewer.status = 'PENDING'
+          )
+      `)
+      .all() as SqlRow[];
+    if (rows.length === 0) return 0;
+
+    this.transaction(() => {
+      for (const row of rows) {
+        const caseId = asString(row.id);
+        this.setCaseStatus(caseId, "COLLECTING_AVAILABILITY");
+        this.addEvent(caseId, "INTERVIEWER_NO_RESPONSE_COLLECTION_RESTORED", "SYSTEM", {});
+      }
+    });
+    return rows.length;
   }
 
   getCursor(key: string): string | undefined {

@@ -543,6 +543,12 @@ try {
   db.close();
   throw error;
 }
+const restoredAvailabilityCases = db.restoreAvailabilityCollectionAfterNoResponseReview();
+if (restoredAvailabilityCases > 0) {
+  process.stdout.write(
+    `Restored availability collection for ${restoredAvailabilityCases} case(s) after reminder follow-up.\n`,
+  );
+}
 if (workerStart.downtime) {
   const recovery = workflow.createWorkerDowntimeReviews(workerStart.downtime);
   process.stdout.write(

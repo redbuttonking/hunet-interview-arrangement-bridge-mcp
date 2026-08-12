@@ -203,6 +203,7 @@ function reviewCategory(review: Review) {
     RECRUITMENT_TEMPLATE_CHECK_REQUIRED: "인터뷰 규칙 확인",
     CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED: "후보자 응답 확인",
     WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED: "가용시간 복구 확인",
+    INTERVIEWER_NO_RESPONSE: "면접관 일정 회신 대기",
     INTEGRATION_RETRY_EXHAUSTED: "연동 재시도 소진",
   };
   return labels[review.reviewType] ?? "운영 확인";
@@ -358,16 +359,19 @@ function buildActionItems(data: DashboardSnapshot): ActionItem[] {
     .map((review) => {
       const integrationRetryExhausted = review.reviewType === "INTEGRATION_RETRY_EXHAUSTED";
       const workerDowntimeAvailabilityReview = review.reviewType === "WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED";
+      const interviewerNoResponse = review.reviewType === "INTERVIEWER_NO_RESPONSE";
       return {
         id: `review:${review.id}`,
-        queue: workerDowntimeAvailabilityReview ? "WAITING" : integrationRetryExhausted || !supportedReviewDecisionTypes.has(review.reviewType) ? "EXCEPTION" : "ACTION",
-        priority: workerDowntimeAvailabilityReview ? "watch" : supportedReviewDecisionTypes.has(review.reviewType) || integrationRetryExhausted ? "urgent" : "normal",
+        queue: workerDowntimeAvailabilityReview || interviewerNoResponse ? "WAITING" : integrationRetryExhausted || !supportedReviewDecisionTypes.has(review.reviewType) ? "EXCEPTION" : "ACTION",
+        priority: workerDowntimeAvailabilityReview ? "watch" : interviewerNoResponse ? "normal" : supportedReviewDecisionTypes.has(review.reviewType) || integrationRetryExhausted ? "urgent" : "normal",
         journeyIndex: review.caseId && casesById.get(review.caseId)
           ? journeyIndexForStatus(casesById.get(review.caseId)!.status)
           : journeyIndexForReview(review),
         category: reviewCategory(review),
         title: integrationRetryExhausted
           ? "자동 재시도가 끝난 연동 오류를 확인해 주세요."
+          : interviewerNoResponse
+            ? "면접관 일정 회신을 기다리고 있습니다."
           : review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED"
             ? "인터뷰 조율을 시작할지 확인해 주세요."
             : review.reviewType === "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED"
@@ -375,6 +379,8 @@ function buildActionItems(data: DashboardSnapshot): ActionItem[] {
               : review.reason,
         description: integrationRetryExhausted
           ? integrationRetryReason(review.reason)
+          : interviewerNoResponse
+            ? review.reason
           : review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED"
             ? `${review.currentStepName ?? "평가 완료"} · ${review.reason}`
             : review.currentStepName ?? "상세 내용을 확인해 주세요.",
@@ -383,9 +389,13 @@ function buildActionItems(data: DashboardSnapshot): ActionItem[] {
         caseId: review.caseId ?? undefined,
         meta: integrationRetryExhausted
           ? "재동기화 전 워커와 연동 상태를 확인하세요. 이 화면에서는 외부 발송이나 자동 재시도를 실행하지 않습니다."
-          : review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED" ? "승인 전에는 나인하이어·Slack에 변경이 없습니다." : null,
+          : interviewerNoResponse
+            ? "추가 리마인드는 채용 담당자 요청 시에만 발송합니다."
+            : review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED" ? "승인 전에는 나인하이어·Slack에 변경이 없습니다." : null,
         actionLabel: integrationRetryExhausted
           ? "연동 상태 확인"
+          : interviewerNoResponse
+            ? "상세 보기"
           : supportedReviewDecisionTypes.has(review.reviewType)
             ? reviewActionLabel(review)
             : review.caseId ? "상세 보기" : null,

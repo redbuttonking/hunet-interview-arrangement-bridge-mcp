@@ -2527,6 +2527,13 @@ export class WorkflowService {
     return { ...transition, scheduleUpdateDraft, cancellationExternalFollowUps };
   }
 
+  closeInterviewArrangement(input: {
+    caseId: string;
+    reason: string;
+  }) {
+    return this.db.closeInterviewArrangement(input);
+  }
+
   resolveCandidateInterviewAbsenceReview(input: {
     reviewId: string;
     action:

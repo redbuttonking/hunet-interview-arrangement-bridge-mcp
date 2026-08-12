@@ -246,6 +246,85 @@ describe("BridgeDatabase", () => {
     expect(
       database.listOpenReviews().filter((review) => review.reviewType === "INTERVIEWER_NO_RESPONSE"),
     ).toHaveLength(1);
+    expect(database.getCase(interviewCase.id)).toMatchObject({
+      status: "COLLECTING_AVAILABILITY",
+    });
+    expect(
+      database.listOpenReviews().find((review) => review.reviewType === "INTERVIEWER_NO_RESPONSE")?.reason,
+    ).toBe("Interviewer 면접관이 리마인드 2회 후에도 가능 일정을 제출하지 않았습니다.");
+  });
+
+  it("restores historic no-response cases to availability collection without hiding other reviews", () => {
+    const database = (db = new BridgeDatabase(":memory:"));
+    const interviewCase = database.createInterviewCase({
+      candidateName: "Candidate",
+      proposalDates: ["2026-08-10"],
+    });
+    database.addOrUpdateInterviewer({
+      caseId: interviewCase.id,
+      displayName: "Interviewer",
+      slackUserId: "U1",
+      source: "MANUAL",
+    });
+    database.setCaseStatus(interviewCase.id, "REVIEW_REQUIRED");
+    database.createReview({
+      caseId: interviewCase.id,
+      reviewType: "INTERVIEWER_NO_RESPONSE",
+      reason: "Legacy reminder follow-up.",
+    });
+
+    expect(database.restoreAvailabilityCollectionAfterNoResponseReview()).toBe(1);
+    expect(database.getCase(interviewCase.id)).toMatchObject({
+      status: "COLLECTING_AVAILABILITY",
+    });
+
+    database.setCaseStatus(interviewCase.id, "REVIEW_REQUIRED");
+    database.createReview({
+      caseId: interviewCase.id,
+      reviewType: "INTERVIEWER_DECLINED",
+      reason: "Separate review.",
+    });
+    expect(database.restoreAvailabilityCollectionAfterNoResponseReview()).toBe(0);
+    expect(database.getCase(interviewCase.id)).toMatchObject({
+      status: "REVIEW_REQUIRED",
+    });
+  });
+
+  it("closes an unscheduled arrangement without creating an external cancellation follow-up", () => {
+    const database = (db = new BridgeDatabase(":memory:"));
+    const interviewCase = database.createInterviewCase({
+      candidateName: "Candidate",
+      proposalDates: ["2026-08-10"],
+    });
+    const interviewer = database.addOrUpdateInterviewer({
+      caseId: interviewCase.id,
+      displayName: "Interviewer",
+      slackUserId: "U1",
+      source: "MANUAL",
+    });
+    database.setCaseStatus(interviewCase.id, "COLLECTING_AVAILABILITY");
+    database.replaceAvailabilityForInterviewer(interviewCase.id, interviewer.id, [
+      { date: "2026-08-10", start: "09:00", end: "10:00" },
+    ]);
+    database.createReview({
+      caseId: interviewCase.id,
+      reviewType: "INTERVIEWER_NO_RESPONSE",
+      reason: "Reminder completed.",
+    });
+
+    const closed = database.closeInterviewArrangement({
+      caseId: interviewCase.id,
+      reason: "팀 TO 부재로 불합격 처리 요청.",
+    });
+
+    expect(closed.status).toBe("CLOSED");
+    expect(database.listOperationalCases()).toEqual([]);
+    expect(database.listCancellationExternalFollowUps({ caseId: interviewCase.id })).toEqual([]);
+    expect(database.getCaseBundle(interviewCase.id)?.availability).toEqual([]);
+    expect(database.listOpenReviews()).toEqual([]);
+    expect(database.listCaseEvents(interviewCase.id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ eventType: "INTERVIEW_ARRANGEMENT_CLOSED" }),
+    ]));
   });
 
   it("does not recreate a resolved case review as an active duplicate", () => {

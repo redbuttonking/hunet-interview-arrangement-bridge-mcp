@@ -465,6 +465,26 @@ export function createBridgeMcpServer(
   );
 
   server.registerTool(
+    "close_interview_arrangement",
+    {
+      title: "인터뷰 조율 종료",
+      description:
+        "일정 확정 전, 채용 판단으로 더 이상 진행하지 않을 인터뷰 조율 건을 로컬 운영에서 종료합니다. 미발송 초안, 미발송 리마인드, 수집된 가능 일정과 열린 검토를 정리하며 Slack이나 나인하이어에는 아무 메시지나 변경 요청도 보내지 않습니다.",
+      inputSchema: {
+        caseId: z.string().uuid(),
+        reason: z.string().min(1).max(500),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (input) => result(workflow.closeInterviewArrangement(input)),
+  );
+
+  server.registerTool(
     "backfill_cancellation_external_follow_ups",
     {
       title: "기존 취소 건 외부 확인 항목 생성",
