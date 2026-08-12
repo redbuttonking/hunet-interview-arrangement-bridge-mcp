@@ -13,6 +13,10 @@ import {
   WORKER_LEASE_DURATION_MS,
 } from "../domain/worker-health.js";
 import {
+  DAOU_ROOM_SYNC_WINDOW_DAYS,
+  upcomingKoreanDates,
+} from "../domain/daou-room-sync.js";
+import {
   NinehireRecruitmentWorkflowAdapter,
 } from "../ninehire/adapter.js";
 import { NinehireMcpGateway } from "../ninehire/gateway.js";
@@ -304,6 +308,13 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.stack ?? error.message : String(error);
 }
 
+function isDaouOfficeLoginUnavailable(error: unknown): boolean {
+  const message = errorMessage(error);
+  return /DaouOffice dedicated browser is not running|DaouOffice dedicated browser has no open page|DaouOffice login is required|DaouOffice request failed: (401|403)/.test(
+    message,
+  );
+}
+
 async function ensureDailyDatabaseBackup(): Promise<void> {
   try {
     const result = await databaseBackup.ensureDailyBackup();
@@ -353,6 +364,28 @@ async function reconcileNinehireConfirmedSchedules(): Promise<void> {
   }
 }
 
+async function reconcileDaouMeetingRoomBlocks(): Promise<void> {
+  const browserStatus = await daouOfficeBrowser.status();
+  if (!browserStatus.connected) return;
+
+  const dates = upcomingKoreanDates();
+  try {
+    const blocks = await daouOffice.listMeetingRoomBlocks(dates);
+    db.syncMeetingRoomBlocks(dates, blocks);
+    db.setCursor("sync:daou_rooms:last_success", new Date().toISOString());
+  } catch (error) {
+    if (isDaouOfficeLoginUnavailable(error)) {
+      process.stdout.write(
+        "DaouOffice meeting room sync skipped: dedicated Chrome sign-in is required.\n",
+      );
+      return;
+    }
+    throw new Error(
+      `DaouOffice meeting room reconciliation failed: ${errorMessage(error)}`,
+    );
+  }
+}
+
 async function reconcileDaouCalendarConfirmedSchedules(): Promise<void> {
   const browserStatus = await daouOfficeBrowser.status();
   if (!browserStatus.connected) return;
@@ -364,6 +397,12 @@ async function reconcileDaouCalendarConfirmedSchedules(): Promise<void> {
       daouCalendarReconciliationDedupeKey,
     );
   } catch (error) {
+    if (isDaouOfficeLoginUnavailable(error)) {
+      process.stdout.write(
+        "DaouOffice calendar sync skipped: dedicated Chrome sign-in is required.\n",
+      );
+      return;
+    }
     const message = errorMessage(error);
     db.enqueueIntegrationRetry({
       jobType: "DAOU_CALENDAR_RECONCILIATION",
@@ -474,6 +513,10 @@ async function runCycle(): Promise<void> {
     await runStep("Slack 동기화", reconcileSlackNotifications);
     await runStep("나인하이어 일정 동기화", reconcileNinehireConfirmedSchedules);
     await runStep("다우오피스 캘린더 동기화", reconcileDaouCalendarConfirmedSchedules);
+    await runStep(
+      `다우오피스 회의실 동기화 (${DAOU_ROOM_SYNC_WINDOW_DAYS}일)`,
+      reconcileDaouMeetingRoomBlocks,
+    );
     await runStep("Automatic scheduling preparation", prepareReadySchedulingDecisions);
     const dueBeforeRefresh = db.listDueReminders();
     const caseIds = [...new Set(dueBeforeRefresh.map((item) => item.caseId))];
