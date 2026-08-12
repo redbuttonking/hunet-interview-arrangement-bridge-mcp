@@ -18,8 +18,11 @@ export function AppHeader({ active, workerStatus }: AppHeaderProps) {
       <Link className="sr-only z-50 rounded-md bg-blue-600 px-3 py-2 text-sm font-semibold text-white focus:not-sr-only focus:fixed focus:left-4 focus:top-4" href="#main-content">본문으로 건너뛰기</Link>
       <div className="mx-auto flex h-16 max-w-[1440px] min-w-0 items-center gap-4 px-4 sm:gap-8 sm:px-8">
         <Link aria-label="HUNET OPS 운영 홈" className="flex min-w-0 shrink-0 items-center gap-2.5 rounded-lg font-semibold tracking-tight text-slate-950 focus-visible:outline-none" href="/">
-          <span className="grid size-9 place-items-center rounded-xl bg-slate-900 text-sm font-bold text-white shadow-sm shadow-slate-900/15">H</span>
-          <span className="hidden sm:inline">HUNET <b className="font-semibold text-blue-600">OPS</b></span>
+          <img
+            alt="HUNET OPS"
+            className="h-7 w-auto object-contain sm:h-8"
+            src="/hunet-logotype-red.png"
+          />
         </Link>
         <nav className="flex h-full items-center gap-1" aria-label="대시보드 메뉴">
           <Link aria-current={active === "operations" ? "page" : undefined} className={cn("flex h-full items-center gap-2 border-b-2 px-2 text-[0.9375rem] font-semibold transition-colors focus-visible:outline-none sm:px-3", active === "operations" ? "border-blue-600 text-slate-950" : "border-transparent text-slate-500 hover:text-slate-950")} href="/">
