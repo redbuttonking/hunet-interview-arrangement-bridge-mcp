@@ -3607,6 +3607,8 @@ export class BridgeDatabase {
     endTime: string;
     roomName: string;
     note?: string;
+    source?: "MANUAL" | "DAOU_OFFICE_CALENDAR";
+    sourceEventId?: string;
   }): ConfirmedInterviewScheduleRow {
     const interviewCase = this.getCase(input.caseId);
     if (!interviewCase) throw new Error(`Case not found: ${input.caseId}`);
@@ -3661,14 +3663,21 @@ export class BridgeDatabase {
           now,
           input.caseId,
         );
-      this.addEvent(input.caseId, "MANUAL_INTERVIEW_CONFIRMED", "USER", {
-        source: "MANUAL",
-        date: input.date,
-        startTime: input.startTime,
-        endTime: input.endTime,
-        roomName: input.roomName,
-        note: input.note ?? null,
-      });
+      const calendarConfirmed = input.source === "DAOU_OFFICE_CALENDAR";
+      this.addEvent(
+        input.caseId,
+        calendarConfirmed ? "CANDIDATE_SCHEDULE_CONFIRMED" : "MANUAL_INTERVIEW_CONFIRMED",
+        calendarConfirmed ? "DAOU_OFFICE_CALENDAR" : "USER",
+        {
+          source: input.source ?? "MANUAL",
+          sourceEventId: input.sourceEventId ?? null,
+          date: input.date,
+          startTime: input.startTime,
+          endTime: input.endTime,
+          roomName: input.roomName,
+          note: input.note ?? null,
+        },
+      );
     });
     return this.getConfirmedInterviewSchedule(input.caseId)!;
   }

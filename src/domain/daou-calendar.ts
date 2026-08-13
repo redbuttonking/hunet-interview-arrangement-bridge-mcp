@@ -27,6 +27,8 @@ const interviewRoomAliases = [
   { roomName: "[818호] 행복룸", aliases: ["[818호] 행복룸", "행복룸"] },
   { roomName: "게임체인저", aliases: ["게임체인저"] },
   { roomName: "[710호] 疑問堂(의문당)", aliases: ["[710호] 疑問堂(의문당)", "의문당", "疑問堂"] },
+  { roomName: "[801호] 혁신룸", aliases: ["[801호] 혁신룸", "혁신룸"] },
+  { roomName: "[815호] 상상룸", aliases: ["[815호] 상상룸", "상상룸"] },
 ] as const;
 
 function interviewRoomName(location: string | undefined): string | undefined {

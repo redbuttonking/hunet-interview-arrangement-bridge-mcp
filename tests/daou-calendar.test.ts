@@ -101,4 +101,24 @@ describe("DaouOffice interview calendar parser", () => {
     expect(after?.sourceEventId).toBe(before?.sourceEventId);
     expect(after).toMatchObject({ date: "2026-08-24", startTime: "16:00", endTime: "17:00" });
   });
+
+  it("recognizes the exceptional innovation and imagination interview rooms", () => {
+    expect(parseDaouInterviewCalendarEntries([
+      {
+        title: "[면접] 영업 인터뷰 (혁신룸 지원자)",
+        startDateTime: "2026-08-20T10:00:00.000+09:00",
+        endDateTime: "2026-08-20T11:00:00.000+09:00",
+        location: "혁신룸",
+      },
+      {
+        title: "[면접] 영업 인터뷰 (상상룸 지원자)",
+        startDateTime: "2026-08-20T11:00:00.000+09:00",
+        endDateTime: "2026-08-20T12:00:00.000+09:00",
+        location: "[815호] 상상룸",
+      },
+    ])).toMatchObject([
+      { roomName: "[801호] 혁신룸" },
+      { roomName: "[815호] 상상룸" },
+    ]);
+  });
 });

@@ -1683,13 +1683,13 @@ export class WorkflowService {
     const trackedCases = this.db
       .listCases(undefined, 500)
       .filter((interviewCase) => ["AWAITING_CANDIDATE_CONFIRMATION", "CONFIRMED"].includes(interviewCase.status));
+    const linkedCasesByCalendarEvent = new Map(
+      this.db
+        .listExternalConfirmedInterviews(1_000)
+        .filter((event) => Boolean(event.linkedCaseId))
+        .map((event) => [event.sourceEventId, event.linkedCaseId!] as const),
+    );
     const candidateKey = (value: string | null | undefined) => (value ?? "").replace(/\s+/g, "").toLocaleLowerCase("ko-KR");
-    const recruitmentMatches = (event: DaouInterviewCalendarEvent, interviewCase: InterviewCaseRow) => {
-      const eventName = event.recruitmentName.replace(/[\[\]()]/g, "").toLocaleLowerCase("ko-KR");
-      const caseName = (interviewCase.recruitmentName ?? "").replace(/[\[\]()]/g, "").toLocaleLowerCase("ko-KR");
-      return Boolean(eventName && caseName && (eventName.includes(caseName) || caseName.includes(eventName)));
-    };
-
     let matchedCases = 0;
     let confirmedCases = 0;
     let alreadyConfirmed = 0;
@@ -1697,11 +1697,47 @@ export class WorkflowService {
     let ambiguousEvents = 0;
     for (const event of events) {
       const candidateMatches = trackedCases.filter((interviewCase) => candidateKey(interviewCase.candidateName) === candidateKey(event.candidateName));
-      const matches = candidateMatches.length > 1
-        ? candidateMatches.filter((interviewCase) => recruitmentMatches(event, interviewCase))
-        : candidateMatches;
+      const exactScheduleMatches = candidateMatches.filter(
+        (interviewCase) =>
+          interviewCase.scheduledDate === event.date
+          && interviewCase.scheduledStartTime === event.startTime
+          && interviewCase.scheduledEndTime === event.endTime,
+      );
+      const sourceLinkedCaseId = linkedCasesByCalendarEvent.get(event.sourceEventId);
+      const sourceLinkedMatches = sourceLinkedCaseId
+        ? candidateMatches.filter((interviewCase) => interviewCase.id === sourceLinkedCaseId)
+        : [];
+      const matches = sourceLinkedMatches.length === 1
+        ? sourceLinkedMatches
+        : exactScheduleMatches;
       if (matches.length !== 1) {
-        if (matches.length > 1) ambiguousEvents += 1;
+        if (candidateMatches.length > 0) {
+          if (candidateMatches.length > 1) ambiguousEvents += 1;
+          continue;
+        }
+        const reviewMatches = this.db
+          .listOpenReviews(1_000)
+          .filter((review) => review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED")
+          .filter((review) => candidateKey(evaluationApprovalPayload(review.summary)?.context.candidateName) === candidateKey(event.candidateName));
+        if (reviewMatches.length !== 1 || !event.roomName) {
+          if (reviewMatches.length > 1) ambiguousEvents += 1;
+          continue;
+        }
+        const review = reviewMatches[0]!;
+        if (this.db.getReview(review.id)?.status !== "OPEN") continue;
+        const recorded = this.recordManualConfirmedInterview({
+          reviewId: review.id,
+          date: event.date,
+          startTime: event.startTime,
+          endTime: event.endTime,
+          roomName: event.roomName,
+          note: "다우오피스 캘린더의 확정 인터뷰 일정에서 자동 기록",
+          source: "DAOU_OFFICE_CALENDAR",
+          sourceEventId: event.sourceEventId,
+        });
+        this.db.linkExternalConfirmedInterviewToCase(event.sourceEventId, recorded.case.id);
+        matchedCases += 1;
+        confirmedCases += 1;
         continue;
       }
       const interviewCase = matches[0]!;
@@ -2424,6 +2460,8 @@ export class WorkflowService {
     endTime: string;
     roomName: string;
     note?: string;
+    source?: "DAOU_OFFICE_CALENDAR";
+    sourceEventId?: string;
   }): {
     case: InterviewCaseRow;
     schedule: ConfirmedInterviewScheduleRow;
@@ -2471,9 +2509,16 @@ export class WorkflowService {
       endTime: input.endTime,
       roomName,
       note: input.note,
+      source: input.source,
+      sourceEventId: input.sourceEventId,
     });
     this.db.updateNotificationStatus(review.notificationId, "PROCESSED");
-    this.db.resolveReview(review.id, "MANUAL_INTERVIEW_CONFIRMED");
+    this.db.resolveReview(
+      review.id,
+      input.source === "DAOU_OFFICE_CALENDAR"
+        ? "DAOU_OFFICE_CALENDAR_CONFIRMED"
+        : "MANUAL_INTERVIEW_CONFIRMED",
+    );
     return {
       case: this.db.getCase(interviewCase.id)!,
       schedule,
