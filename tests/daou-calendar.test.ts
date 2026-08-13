@@ -79,4 +79,26 @@ describe("DaouOffice interview calendar parser", () => {
       { roomName: "[710호] 疑問堂(의문당)" },
     ]);
   });
+
+  it("keeps the same source identifier when the DaouOffice event time is changed", () => {
+    const [before] = parseDaouInterviewCalendarEntries([
+      {
+        sourceEventKey: "calendar-1:event-42",
+        title: "[면접] B2B 교육영업 인터뷰 (김병진)",
+        startDateTime: "2026-08-20T15:00:00+09:00",
+        endDateTime: "2026-08-20T16:00:00+09:00",
+      },
+    ]);
+    const [after] = parseDaouInterviewCalendarEntries([
+      {
+        sourceEventKey: "calendar-1:event-42",
+        title: "[면접] B2B 교육영업 인터뷰 (김병진)",
+        startDateTime: "2026-08-24T16:00:00+09:00",
+        endDateTime: "2026-08-24T17:00:00+09:00",
+      },
+    ]);
+
+    expect(after?.sourceEventId).toBe(before?.sourceEventId);
+    expect(after).toMatchObject({ date: "2026-08-24", startTime: "16:00", endTime: "17:00" });
+  });
 });

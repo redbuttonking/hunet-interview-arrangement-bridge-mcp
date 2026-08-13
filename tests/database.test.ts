@@ -1286,4 +1286,97 @@ describe("BridgeDatabase", () => {
       },
     });
   });
+
+  it("keeps only the latest calendar schedule when an externally confirmed interview is rescheduled", () => {
+    db = new BridgeDatabase(":memory:");
+    db.syncExternalConfirmedInterviews([
+      {
+        sourceEventId: "NINEHIRE_SLACK:old-confirmation",
+        title: "NineHire confirmed interview",
+        rawText: "old confirmation",
+        candidateName: "김병진",
+        recruitmentName: "[휴넷] B2B 교육영업 담당 경력채용",
+        date: "2026-08-20",
+        startTime: "15:00",
+        endTime: "16:00",
+      },
+      {
+        sourceEventId: "DAOU_CALENDAR:old-calendar-event",
+        title: "[면접] B2B교육영업 1차 인터뷰 (김병진)",
+        rawText: "old calendar event",
+        candidateName: "김병진",
+        recruitmentName: "B2B교육영업 1차 인터뷰",
+        date: "2026-08-20",
+        startTime: "15:00",
+        endTime: "16:00",
+      },
+    ]);
+
+    db.syncExternalConfirmedInterviews([
+      {
+        sourceEventId: "DAOU_CALENDAR:new-calendar-event",
+        title: "[면접] B2B교육영업 1차 인터뷰 (김병진)",
+        rawText: "new calendar event",
+        candidateName: "김병진",
+        recruitmentName: "B2B교육영업 1차 인터뷰",
+        date: "2026-08-24",
+        startTime: "16:00",
+        endTime: "17:00",
+        roomName: "[818호] 열정룸",
+      },
+    ], { reconcileCalendarSnapshot: true });
+
+    expect(db.listExternalConfirmedInterviews()).toEqual([
+      expect.objectContaining({
+        candidateName: "김병진",
+        date: "2026-08-24",
+        startTime: "16:00",
+        endTime: "17:00",
+        roomName: "[818호] 열정룸",
+        sourceEventId: "DAOU_CALENDAR:new-calendar-event",
+      }),
+    ]);
+  });
+
+  it("updates an existing confirmed case when NineHire reports a changed schedule", () => {
+    db = new BridgeDatabase(":memory:");
+    const interviewCase = db.createInterviewCase({
+      candidateRef: "C1",
+      candidateName: "김병진",
+      recruitmentRef: "R1",
+      recruitmentName: "B2B 교육영업",
+      proposalDates: ["2026-08-20"],
+    });
+    db.setCaseStatus(interviewCase.id, "READY_TO_SCHEDULE");
+    db.recordExternallyConfirmedSchedule({
+      caseId: interviewCase.id,
+      sourceEventId: "ninehire-original",
+      source: "NINEHIRE_MCP",
+      date: "2026-08-20",
+      startTime: "15:00",
+      endTime: "16:00",
+    });
+
+    const updated = db.reconcileConfirmedScheduleFromExternal({
+      caseId: interviewCase.id,
+      sourceEventId: "ninehire-rescheduled",
+      source: "NINEHIRE_MCP",
+      date: "2026-08-24",
+      startTime: "16:00",
+      endTime: "17:00",
+    });
+
+    expect(updated).toMatchObject({
+      status: "CONFIRMED",
+      scheduledDate: "2026-08-24",
+      scheduledStartTime: "16:00",
+      scheduledEndTime: "17:00",
+      lastScheduledDate: "2026-08-20",
+      lastScheduledStartTime: "15:00",
+      lastScheduledEndTime: "16:00",
+    });
+    expect(db.listCaseEvents(interviewCase.id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ eventType: "EXTERNAL_CONFIRMED_SCHEDULE_UPDATED" }),
+    ]));
+  });
 });

@@ -237,10 +237,15 @@ export class BrowserDaouOfficeReservationAdapter
         const startDateTime = stringValue(event.startTime);
         const endDateTime = stringValue(event.endTime);
         if (!title || !startDateTime || !endDateTime) continue;
+        const eventIdentifier = [
+          stringValue(event.calendarId),
+          stringValue(event.eventId) ?? stringValue(event.id) ?? stringValue(event.scheduleId),
+        ].filter(Boolean).join(":");
         entries.push({
           title,
           startDateTime,
           endDateTime,
+          ...(eventIdentifier ? { sourceEventKey: eventIdentifier } : {}),
           ...(stringValue(event.location) ? { location: stringValue(event.location) } : {}),
         });
       }

@@ -14,6 +14,7 @@ export interface DaouInterviewCalendarEvent {
 }
 
 export interface DaouInterviewCalendarEntry {
+  sourceEventKey?: string;
   title: string;
   startDateTime: string;
   endDateTime: string;
@@ -78,8 +79,15 @@ function interviewTitle(value: string): { title: string; recruitmentName: string
   return { title: normalized, recruitmentName, candidateName };
 }
 
-function eventId(title: string, date: string, startTime: string, endTime: string): string {
-  return `DAOU_CALENDAR:${createHash("sha256").update(`${title}|${date}|${startTime}|${endTime}`).digest("hex")}`;
+function eventId(
+  title: string,
+  date: string,
+  startTime: string,
+  endTime: string,
+  sourceEventKey?: string,
+): string {
+  const source = sourceEventKey?.trim() || `${title}|${date}|${startTime}|${endTime}`;
+  return `DAOU_CALENDAR:${createHash("sha256").update(source).digest("hex")}`;
 }
 
 function parseIsoDateTime(value: string): { date: string; time: string } | undefined {
@@ -95,9 +103,10 @@ function toCalendarEvent(
   endTime: string,
   rawText: string,
   roomName?: string,
+  sourceEventKey?: string,
 ): DaouInterviewCalendarEvent {
   return {
-    sourceEventId: eventId(title.title, date, startTime, endTime),
+    sourceEventId: eventId(title.title, date, startTime, endTime, sourceEventKey),
     ...title,
     date,
     startTime,
@@ -126,6 +135,7 @@ export function parseDaouInterviewCalendarEntries(
       end.time,
       entry.rawText ?? `${entry.title} ${entry.startDateTime} ${entry.endDateTime}`,
       interviewRoomName(entry.location),
+      entry.sourceEventKey,
     );
     events.set(event.sourceEventId, event);
   }

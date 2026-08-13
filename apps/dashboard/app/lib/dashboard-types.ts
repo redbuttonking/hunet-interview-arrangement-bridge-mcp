@@ -84,6 +84,7 @@ export type EvaluationSummary = {
     title: string;
     evaluationMethod?: string;
     completedAt?: string;
+    participantCount: number;
     evaluators: Array<{
       name: string;
       submittedAt?: string;

@@ -32,6 +32,25 @@ type SqlRow = Record<string, unknown>;
 const DRAFT_SEND_LEASE_MS = 2 * 60 * 1000;
 const MEETING_ROOM_SYNC_FRESHNESS_MS = 10 * 60 * 1000;
 
+function normalizedRecruitmentName(value: string): string {
+  return value
+    .toLocaleLowerCase("ko-KR")
+    .replace(/[\[\]()]/gu, " ")
+    .replace(/(?:\d+차|최종)?\s*(?:인터뷰|면접)/gu, " ")
+    .replace(/\s+/gu, "")
+    .trim();
+}
+
+function isRelatedRecruitmentName(left: string, right: string): boolean {
+  const normalizedLeft = normalizedRecruitmentName(left);
+  const normalizedRight = normalizedRecruitmentName(right);
+  return Boolean(
+    normalizedLeft
+    && normalizedRight
+    && (normalizedLeft.includes(normalizedRight) || normalizedRight.includes(normalizedLeft)),
+  );
+}
+
 export interface InterviewCaseRow {
   id: string;
   notificationId: string | null;
@@ -3448,6 +3467,91 @@ export class BridgeDatabase {
     return this.getCase(input.caseId)!;
   }
 
+  reconcileConfirmedScheduleFromExternal(input: {
+    caseId: string;
+    sourceEventId: string;
+    source: "NINEHIRE_MCP" | "DAOU_OFFICE_CALENDAR";
+    date: string;
+    startTime: string;
+    endTime: string;
+    roomName?: string;
+    sourceLocation?: string;
+  }): InterviewCaseRow {
+    const interviewCase = this.getCase(input.caseId);
+    if (!interviewCase) throw new Error(`Case not found: ${input.caseId}`);
+    if (interviewCase.status !== "CONFIRMED") {
+      throw new Error("Only a confirmed interview can be reconciled from an external schedule.");
+    }
+    if (!input.sourceEventId.trim()) {
+      throw new Error("An external confirmation source event is required.");
+    }
+    if (
+      !isDate(input.date)
+      || timeMinutes(input.startTime) >= timeMinutes(input.endTime)
+      || timeMinutes(input.endTime) - timeMinutes(input.startTime) !== interviewCase.durationMinutes
+    ) {
+      throw new Error("The externally updated schedule does not match the interview duration.");
+    }
+    const isSameSchedule = interviewCase.scheduledDate === input.date
+      && interviewCase.scheduledStartTime === input.startTime
+      && interviewCase.scheduledEndTime === input.endTime
+      && (input.roomName === undefined || interviewCase.scheduledRoomName === input.roomName);
+    if (isSameSchedule) return interviewCase;
+
+    const now = new Date().toISOString();
+    this.transaction(() => {
+      if (interviewCase.scheduledRoomAllocationId) {
+        this.connection
+          .prepare("UPDATE room_allocations SET status = 'CANCELLED', updated_at = ? WHERE id = ? AND status = 'ACTIVE'")
+          .run(now, interviewCase.scheduledRoomAllocationId);
+      }
+      this.connection
+        .prepare(`
+          UPDATE interview_cases
+          SET last_scheduled_room_allocation_id = scheduled_room_allocation_id,
+              last_scheduled_room_name = scheduled_room_name,
+              last_scheduled_date = scheduled_date,
+              last_scheduled_start_time = scheduled_start_time,
+              last_scheduled_end_time = scheduled_end_time,
+              last_internal_schedule_confirmed_at = internal_schedule_confirmed_at,
+              scheduled_room_allocation_id = NULL,
+              scheduled_room_name = ?,
+              scheduled_date = ?,
+              scheduled_start_time = ?,
+              scheduled_end_time = ?,
+              internal_schedule_confirmed_at = ?,
+              updated_at = ?
+          WHERE id = ?
+        `)
+        .run(
+          input.roomName ?? null,
+          input.date,
+          input.startTime,
+          input.endTime,
+          now,
+          now,
+          input.caseId,
+        );
+      this.addEvent(input.caseId, "EXTERNAL_CONFIRMED_SCHEDULE_UPDATED", input.source, {
+        sourceEventId: input.sourceEventId,
+        previousSchedule: {
+          date: interviewCase.scheduledDate,
+          startTime: interviewCase.scheduledStartTime,
+          endTime: interviewCase.scheduledEndTime,
+          roomName: interviewCase.scheduledRoomName,
+        },
+        schedule: {
+          date: input.date,
+          startTime: input.startTime,
+          endTime: input.endTime,
+          roomName: input.roomName ?? null,
+        },
+        sourceLocation: input.sourceLocation ?? null,
+      });
+    });
+    return this.getCase(input.caseId)!;
+  }
+
   setConfirmedScheduleRoomAllocation(input: {
     caseId: string;
     roomAllocationId: string;
@@ -3751,6 +3855,7 @@ export class BridgeDatabase {
 
   syncExternalConfirmedInterviews(
     events: DaouInterviewCalendarEvent[],
+    options?: { reconcileCalendarSnapshot?: boolean },
   ): ExternalConfirmedInterviewRow[] {
     const seenAt = new Date().toISOString();
     for (const event of events) {
@@ -3794,6 +3899,14 @@ export class BridgeDatabase {
             last_seen_at = ?, updated_at = ?
         WHERE id = ?
       `);
+      const existingByCandidate = this.connection.prepare(`
+        SELECT id, source_event_id, recruitment_name
+        FROM external_confirmed_interviews
+        WHERE candidate_name = ?
+      `);
+      const removeById = this.connection.prepare(
+        "DELETE FROM external_confirmed_interviews WHERE id = ?",
+      );
       for (const event of events) {
         const current = existing.get(event.sourceEventId) as SqlRow | undefined;
         if (current) {
@@ -3845,6 +3958,34 @@ export class BridgeDatabase {
             seenAt,
             seenAt,
           );
+        }
+      }
+
+      if (options?.reconcileCalendarSnapshot) {
+        const eventsByCandidate = new Map<string, DaouInterviewCalendarEvent[]>();
+        for (const event of events) {
+          eventsByCandidate.set(event.candidateName, [
+            ...(eventsByCandidate.get(event.candidateName) ?? []),
+            event,
+          ]);
+        }
+        for (const [candidateName, candidateEvents] of eventsByCandidate) {
+          const currentSourceIds = new Set(candidateEvents.map((event) => event.sourceEventId));
+          const rows = existingByCandidate.all(candidateName) as SqlRow[];
+          for (const row of rows) {
+            const sourceEventId = asString(row.source_event_id);
+            if (currentSourceIds.has(sourceEventId)) continue;
+            const recruitmentName = asString(row.recruitment_name);
+            const isCalendarRecord = sourceEventId.startsWith("DAOU_CALENDAR:");
+            const isRelatedSlackRecord = sourceEventId.startsWith("NINEHIRE_SLACK:")
+              && candidateEvents.some((event) => isRelatedRecruitmentName(recruitmentName, event.recruitmentName));
+            if (
+              (isCalendarRecord && candidateEvents.length === 1)
+              || isRelatedSlackRecord
+            ) {
+              removeById.run(asString(row.id));
+            }
+          }
         }
       }
     });

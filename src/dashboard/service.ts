@@ -1,6 +1,14 @@
 // 로컬 운영 대시보드에 필요한 최소 정보를 조합한다.
-import { BridgeDatabase, type InterviewSkillDecisionRow, type ReviewRow } from "../db/database.js";
-import { buildCandidateJourney } from "./candidate-journey.js";
+import {
+  BridgeDatabase,
+  type InterviewCaseRow,
+  type InterviewSkillDecisionRow,
+  type ReviewRow,
+} from "../db/database.js";
+import {
+  buildCandidateJourney,
+  type CandidateJourneyEvaluationStatus,
+} from "./candidate-journey.js";
 
 const FRESHNESS_THRESHOLD_MS = 10 * 60 * 1000;
 
@@ -21,6 +29,7 @@ type DashboardEvaluationSummary = {
     title: string;
     evaluationMethod?: string;
     completedAt?: string;
+    participantCount: number;
     evaluators: Array<{
       name: string;
       submittedAt?: string;
@@ -93,6 +102,7 @@ function evaluationSummary(value: unknown): DashboardEvaluationSummary | null {
       title,
       ...(text(scoreSheet.evaluationMethod) ? { evaluationMethod: text(scoreSheet.evaluationMethod)! } : {}),
       ...(text(scoreSheet.completedAt) ? { completedAt: text(scoreSheet.completedAt)! } : {}),
+      participantCount: records(scoreSheet.participants).length,
       evaluators: records(scoreSheet.evaluators).map((evaluator) => ({
         name: text(evaluator.name) ?? "이름 미확인 평가자",
         ...(text(evaluator.submittedAt) ? { submittedAt: text(evaluator.submittedAt)! } : {}),
@@ -169,6 +179,75 @@ function currentCaseForJourney(
     .find(({ plan }) => plan?.stepIds.includes(input.currentStepId!));
 }
 
+function sameCandidateContext(
+  context: ReturnType<typeof reviewContext>,
+  interviewCase: InterviewCaseRow,
+): boolean {
+  if (context.candidateRef && interviewCase.candidateRef) {
+    return context.candidateRef === interviewCase.candidateRef
+      && context.recruitmentRef === interviewCase.recruitmentRef;
+  }
+  return context.candidateName === interviewCase.candidateName
+    && context.recruitmentName === interviewCase.recruitmentName;
+}
+
+function hasScheduledInterviewEnded(interviewCase: InterviewCaseRow): boolean {
+  if (!interviewCase.scheduledDate || !interviewCase.scheduledEndTime) return false;
+  const endAt = Date.parse(`${interviewCase.scheduledDate}T${interviewCase.scheduledEndTime}:00+09:00`);
+  return !Number.isNaN(endAt) && endAt <= Date.now();
+}
+
+function evaluationStatus(summary: DashboardEvaluationSummary | null): CandidateJourneyEvaluationStatus {
+  if (!summary || summary.scoreSheets.length === 0) return "PENDING";
+  const allCompleted = summary.scoreSheets.every((scoreSheet) =>
+    Boolean(scoreSheet.completedAt)
+    || (scoreSheet.participantCount > 0 && scoreSheet.evaluators.length >= scoreSheet.participantCount),
+  );
+  if (allCompleted) return "COMPLETED";
+  return summary.scoreSheets.some((scoreSheet) => scoreSheet.evaluators.length > 0)
+    ? "IN_PROGRESS"
+    : "PENDING";
+}
+
+function evaluationStatusForCase(
+  db: BridgeDatabase,
+  interviewCase: InterviewCaseRow,
+  plan: { stepIds: string[] } | undefined,
+): CandidateJourneyEvaluationStatus | undefined {
+  if (interviewCase.status !== "CONFIRMED" || !plan || !hasScheduledInterviewEnded(interviewCase)) {
+    return undefined;
+  }
+  const scheduledEndAt = Date.parse(
+    `${interviewCase.scheduledDate}T${interviewCase.scheduledEndTime}:00+09:00`,
+  );
+  const latestReview = db.listOpenReviews(1_000)
+    .map((review) => ({ review, context: reviewContext(db, review) }))
+    .filter(({ review, context }) =>
+      sameCandidateContext(context, interviewCase)
+      && Boolean(context.currentStepId && plan.stepIds.includes(context.currentStepId))
+      && Date.parse(review.createdAt) >= scheduledEndAt,
+    )
+    .sort((left, right) => right.review.createdAt.localeCompare(left.review.createdAt))
+    .at(0);
+  return evaluationStatus(latestReview?.context.evaluationSummary ?? null);
+}
+
+export function getCandidateJourneyForCase(
+  db: BridgeDatabase,
+  interviewCase: InterviewCaseRow,
+  plan = db.getCaseInterviewPlan(interviewCase.id),
+) {
+  const template = interviewCase.recruitmentRef
+    ? db.getRecruitmentInterviewTemplate(interviewCase.recruitmentRef)
+    : undefined;
+  return buildCandidateJourney({
+    template,
+    interviewCase,
+    plannedStepIds: plan?.stepIds,
+    evaluationStatus: evaluationStatusForCase(db, interviewCase, plan),
+  });
+}
+
 function decisionSummary(db: BridgeDatabase, decision: InterviewSkillDecisionRow) {
   const interviewCase = decision.caseId ? db.getCase(decision.caseId) : undefined;
   return {
@@ -242,20 +321,13 @@ export function getDashboardSnapshot(db: BridgeDatabase, limit = 100) {
     const caseId = text(caseSummary.id);
     const interviewCase = caseId ? db.getCase(caseId) : undefined;
     const plan = interviewCase ? db.getCaseInterviewPlan(interviewCase.id) : undefined;
-    const template = interviewCase?.recruitmentRef
-      ? db.getRecruitmentInterviewTemplate(interviewCase.recruitmentRef)
-      : undefined;
     return {
       ...caseSummary,
       ...(interviewCase
         ? {
             candidateRef: interviewCase.candidateRef,
             recruitmentRef: interviewCase.recruitmentRef,
-            candidateJourney: buildCandidateJourney({
-              template,
-              interviewCase,
-              plannedStepIds: plan?.stepIds,
-            }),
+            candidateJourney: getCandidateJourneyForCase(db, interviewCase, plan),
           }
         : {}),
     };
@@ -282,6 +354,9 @@ export function getDashboardSnapshot(db: BridgeDatabase, limit = 100) {
         currentStepId: context.currentStepId ?? undefined,
         interviewCase: matchedCase?.interviewCase,
         plannedStepIds: matchedCase?.plan?.stepIds,
+        evaluationStatus: matchedCase
+          ? evaluationStatusForCase(db, matchedCase.interviewCase, matchedCase.plan)
+          : undefined,
       }),
     };
   });

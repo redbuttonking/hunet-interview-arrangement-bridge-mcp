@@ -1426,7 +1426,7 @@ export class WorkflowService {
     const targets = new Map<string, {
       candidateRef: string;
       recruitmentRef: string;
-      kind: "CASE" | "CANDIDATE_CONFIRMATION" | "REVIEW";
+      kind: "CASE" | "CANDIDATE_CONFIRMATION" | "CONFIRMED" | "REVIEW";
       caseId?: string;
       reviewId?: string;
       candidateName: string;
@@ -1468,6 +1468,26 @@ export class WorkflowService {
         candidateRef: interviewCase.candidateRef,
         recruitmentRef: interviewCase.recruitmentRef,
         kind: "CANDIDATE_CONFIRMATION",
+        caseId: interviewCase.id,
+        candidateName: interviewCase.candidateName,
+        recruitmentName: interviewCase.recruitmentName,
+      });
+    }
+    for (const interviewCase of this.db.listCases("CONFIRMED")) {
+      if (
+        !interviewCase.candidateRef
+        || !interviewCase.recruitmentRef
+        || !interviewCase.candidateName
+        || !interviewCase.recruitmentName
+      ) {
+        continue;
+      }
+      const key = `${interviewCase.candidateRef}:${interviewCase.recruitmentRef}`;
+      if (targets.has(key)) continue;
+      targets.set(key, {
+        candidateRef: interviewCase.candidateRef,
+        recruitmentRef: interviewCase.recruitmentRef,
+        kind: "CONFIRMED",
         caseId: interviewCase.id,
         candidateName: interviewCase.candidateName,
         recruitmentName: interviewCase.recruitmentName,
@@ -1598,6 +1618,29 @@ export class WorkflowService {
         continue;
       }
 
+      if (target.kind === "CONFIRMED" && target.caseId) {
+        const currentCase = this.db.getCase(target.caseId);
+        if (
+          currentCase
+          && (
+            currentCase.scheduledDate !== schedule.date
+            || currentCase.scheduledStartTime !== schedule.startTime
+            || currentCase.scheduledEndTime !== schedule.endTime
+          )
+        ) {
+          this.db.reconcileConfirmedScheduleFromExternal({
+            caseId: target.caseId,
+            sourceEventId: schedule.eventId,
+            source: "NINEHIRE_MCP",
+            date: schedule.date,
+            startTime: schedule.startTime,
+            endTime: schedule.endTime,
+            sourceLocation: schedule.location,
+          });
+        }
+        continue;
+      }
+
       if (target.kind !== "REVIEW" || !target.reviewId) continue;
       const review = this.db.getReview(target.reviewId);
       if (!review || review.status !== "OPEN") continue;
@@ -1635,7 +1678,7 @@ export class WorkflowService {
     const events = calendarEvents.filter((event) => event.date >= today);
     const skippedPastEvents = calendarEvents.length - events.length;
     const removedPastRecords = this.db.deleteExternalConfirmedInterviewsBefore(today);
-    this.db.syncExternalConfirmedInterviews(events);
+    this.db.syncExternalConfirmedInterviews(events, { reconcileCalendarSnapshot: true });
     const recordedEvents = events.length;
     const trackedCases = this.db
       .listCases(undefined, 500)
@@ -1672,7 +1715,19 @@ export class WorkflowService {
           this.db.linkExternalConfirmedInterviewToCase(event.sourceEventId, interviewCase.id);
           alreadyConfirmed += 1;
         }
-        else skippedMismatches += 1;
+        else {
+          this.db.reconcileConfirmedScheduleFromExternal({
+            caseId: interviewCase.id,
+            sourceEventId: event.sourceEventId,
+            source: "DAOU_OFFICE_CALENDAR",
+            date: event.date,
+            startTime: event.startTime,
+            endTime: event.endTime,
+            roomName: event.roomName,
+          });
+          this.db.linkExternalConfirmedInterviewToCase(event.sourceEventId, interviewCase.id);
+          confirmedCases += 1;
+        }
         continue;
       }
       if (

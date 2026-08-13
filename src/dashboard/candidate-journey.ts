@@ -21,11 +21,14 @@ export interface CandidateJourney {
   currentStageDetail: string;
 }
 
+export type CandidateJourneyEvaluationStatus = "PENDING" | "IN_PROGRESS" | "COMPLETED";
+
 export interface CandidateJourneyInput {
   template?: RecruitmentInterviewTemplateRow;
   currentStepId?: string | null;
   interviewCase?: InterviewCaseRow;
   plannedStepIds?: string[];
+  evaluationStatus?: CandidateJourneyEvaluationStatus;
 }
 
 type JourneyRoute = RecruitmentInterviewRoute & {
@@ -66,25 +69,46 @@ function journeyRoutes(template?: RecruitmentInterviewTemplateRow): JourneyRoute
     .sort((left, right) => left.order - right.order);
 }
 
-function todayInKorea(): string {
+function nowInKorea(): { date: string; time: string } {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Seoul",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
   }).formatToParts(new Date());
   const value = (type: Intl.DateTimeFormatPartTypes) =>
     parts.find((part) => part.type === type)?.value ?? "";
-  return `${value("year")}-${value("month")}-${value("day")}`;
+  return {
+    date: `${value("year")}-${value("month")}-${value("day")}`,
+    time: `${value("hour")}:${value("minute")}`,
+  };
 }
 
-function scheduledDetail(interviewCase: InterviewCaseRow): string {
+function scheduledDetail(
+  interviewCase: InterviewCaseRow,
+  evaluationStatus?: CandidateJourneyEvaluationStatus,
+): string {
   if (!interviewCase.scheduledDate || !interviewCase.scheduledStartTime) return "일정 조율 중";
-  if (interviewCase.scheduledDate < todayInKorea()) return "평가 대기";
-  return `${interviewCase.scheduledDate} ${interviewCase.scheduledStartTime} 예정`;
+  const now = nowInKorea();
+  const scheduleStart = `${interviewCase.scheduledDate}T${interviewCase.scheduledStartTime}`;
+  const scheduleEnd = `${interviewCase.scheduledDate}T${interviewCase.scheduledEndTime ?? interviewCase.scheduledStartTime}`;
+  const current = `${now.date}T${now.time}`;
+  if (current < scheduleStart) {
+    return `${interviewCase.scheduledDate} ${interviewCase.scheduledStartTime} 인터뷰 예정`;
+  }
+  if (current < scheduleEnd) return "인터뷰 진행 중";
+  if (evaluationStatus === "COMPLETED") return "평가 완료";
+  if (evaluationStatus === "IN_PROGRESS") return "평가 진행 중";
+  return "평가 대기";
 }
 
-function currentStageDetail(interviewCase?: InterviewCaseRow): string {
+function currentStageDetail(
+  interviewCase?: InterviewCaseRow,
+  evaluationStatus?: CandidateJourneyEvaluationStatus,
+): string {
   if (!interviewCase) return "일정 조율 시작 대기";
   const labels: Partial<Record<InterviewCaseStatus, string>> = {
     READY_FOR_DRAFT: "일정 조율 중",
@@ -93,7 +117,7 @@ function currentStageDetail(interviewCase?: InterviewCaseRow): string {
     COLLECTING_AVAILABILITY: "면접관 일정 응답 대기",
     READY_TO_SCHEDULE: "시간·회의실 선택 대기",
     AWAITING_CANDIDATE_CONFIRMATION: "후보자 응답 대기",
-    CONFIRMED: scheduledDetail(interviewCase),
+    CONFIRMED: scheduledDetail(interviewCase, evaluationStatus),
     REVIEW_REQUIRED: "예외 상황 확인 필요",
     ON_HOLD: "조율 보류",
     CANCELLED: "인터뷰 취소",
@@ -120,7 +144,7 @@ export function buildCandidateJourney(input: CandidateJourneyInput): CandidateJo
 
   const interviewCaseState = stageStateForCase(input.interviewCase);
   const currentRoute = routes[currentRouteIndex]!;
-  const currentDetail = currentStageDetail(input.interviewCase);
+  const currentDetail = currentStageDetail(input.interviewCase, input.evaluationStatus);
   const stages: CandidateJourneyStage[] = [
     {
       id: "document-screening",

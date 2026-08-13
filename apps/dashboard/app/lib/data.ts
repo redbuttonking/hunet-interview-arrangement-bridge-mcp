@@ -1,8 +1,7 @@
 // 대시보드 서버 화면에서 로컬 운영 데이터를 안전하게 읽는다.
 import { getConfig } from "../../../../dist/src/config.js";
 import { BridgeDatabase } from "../../../../dist/src/db/database.js";
-import { buildCandidateJourney } from "../../../../dist/src/dashboard/candidate-journey.js";
-import { getDashboardSnapshot } from "../../../../dist/src/dashboard/service.js";
+import { getCandidateJourneyForCase, getDashboardSnapshot } from "../../../../dist/src/dashboard/service.js";
 import type { DashboardSnapshot } from "./dashboard-types";
 
 export function loadDashboardSnapshot(): DashboardSnapshot {
@@ -51,11 +50,7 @@ export function loadCaseDetail(caseId: string) {
       },
       plan,
       template,
-      candidateJourney: buildCandidateJourney({
-        template: template ?? undefined,
-        interviewCase: bundle.interviewCase,
-        plannedStepIds: plan?.stepIds,
-      }),
+      candidateJourney: getCandidateJourneyForCase(db, bundle.interviewCase, plan ?? undefined),
       scheduledSegments,
       events: db.listCaseEvents(caseId, 100),
     };
