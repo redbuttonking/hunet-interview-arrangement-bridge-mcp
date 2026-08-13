@@ -22,6 +22,7 @@ export interface AppConfig {
   };
   ninehire: {
     url: string;
+    appUrl?: string;
     apiKey?: string;
     authHeader: string;
     authScheme: string;
@@ -93,6 +94,7 @@ export function getConfig(): AppConfig {
       url:
         optional("NINEHIRE_MCP_URL") ??
         "https://api.ninehire.com/developer/mcp",
+      appUrl: optional("NINEHIRE_APP_URL") ?? "https://app.ninehire.com/kMvNxpDB",
       apiKey: optional("NINEHIRE_MCP_API_KEY"),
       authHeader: optional("NINEHIRE_MCP_AUTH_HEADER") ?? "Authorization",
       authScheme:

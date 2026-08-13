@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ArrowLeft, CalendarClock, CheckCircle2, CircleAlert, Clock3, MapPin, MessageSquareText, UsersRound } from "lucide-react";
+import { ArrowLeft, CalendarClock, CheckCircle2, CircleAlert, Clock3, ExternalLink, MapPin, MessageSquareText, UsersRound } from "lucide-react";
 import { AppHeader, PageHeader } from "../../components/app-shell";
 import { DraftApprovalCard } from "../../components/draft-approval-card";
 import { CasePlanOverrides } from "../../components/case-plan-overrides";
@@ -93,7 +93,7 @@ export default async function CaseDetailPage({ params }: { params: Promise<{ id:
   const { id } = await params;
   const data = loadCaseDetail(id);
   if (!data) notFound();
-  const { bundle, plan, template, scheduledSegments, events } = data;
+  const { bundle, plan, template, scheduledSegments, events, ninehireCandidateUrl } = data;
   const interviewCase = bundle.interviewCase;
   const plannedInterviewerIds = new Set(plan?.sessions.flatMap((session) => session.interviewerIds) ?? []);
   const activeInterviewers = bundle.interviewers.filter(
@@ -116,7 +116,7 @@ export default async function CaseDetailPage({ params }: { params: Promise<{ id:
       <main className="mx-auto max-w-[1440px] px-4 pb-12 sm:px-8" id="main-content">
         <div className="pt-7"><Link className="inline-flex items-center gap-2 text-sm font-semibold text-slate-600 transition-colors hover:text-blue-700" href="/"><ArrowLeft className="size-4" />운영 보드</Link></div>
         <PageHeader
-          actions={<Badge className="px-3 py-1 text-sm" variant={statusVariant(interviewCase.status)}>{statusLabel(interviewCase.status)}</Badge>}
+          actions={<><Badge className="px-3 py-1 text-sm" variant={statusVariant(interviewCase.status)}>{statusLabel(interviewCase.status)}</Badge>{ninehireCandidateUrl ? <a className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-3.5 text-sm font-semibold text-slate-800 shadow-sm transition-colors hover:border-slate-400 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600/40 focus-visible:ring-offset-2" href={ninehireCandidateUrl} rel="noopener noreferrer" target="_blank">나인하이어에서 열기<ExternalLink className="size-4" /></a> : null}</>}
           description={interviewCase.recruitmentName ?? "채용 정보 확인 필요"}
           eyebrow="CANDIDATE OVERVIEW"
           title={interviewCase.candidateName ?? "후보자 확인 필요"}

@@ -2,6 +2,7 @@
 import { getConfig } from "../../../../dist/src/config.js";
 import { BridgeDatabase } from "../../../../dist/src/db/database.js";
 import { getCandidateJourneyForCase, getDashboardSnapshot } from "../../../../dist/src/dashboard/service.js";
+import { buildNinehireCandidateUrl } from "../../../../dist/src/ninehire/app-link.js";
 import type { DashboardSnapshot } from "./dashboard-types";
 
 export function loadDashboardSnapshot(): DashboardSnapshot {
@@ -51,6 +52,11 @@ export function loadCaseDetail(caseId: string) {
       plan,
       template,
       candidateJourney: getCandidateJourneyForCase(db, bundle.interviewCase, plan ?? undefined),
+      ninehireCandidateUrl: buildNinehireCandidateUrl({
+        appUrl: config.ninehire.appUrl,
+        recruitmentRef: bundle.interviewCase.recruitmentRef,
+        candidateRef: bundle.interviewCase.candidateRef,
+      }),
       scheduledSegments,
       events: db.listCaseEvents(caseId, 100),
     };
