@@ -124,7 +124,8 @@ function evaluationSummary(value: unknown): DashboardEvaluationSummary | null {
 }
 
 function reviewContext(db: BridgeDatabase, review: ReviewRow) {
-  const context = review.summary?.context;
+  const summary = record(review.summary);
+  const context = summary?.context;
   const summaryContext = context && typeof context === "object" && !Array.isArray(context)
     ? context as Record<string, unknown>
     : undefined;
@@ -132,8 +133,14 @@ function reviewContext(db: BridgeDatabase, review: ReviewRow) {
   const interviewCase = review.caseId ? db.getCase(review.caseId) : undefined;
   const plan = review.caseId ? db.getCaseInterviewPlan(review.caseId) : undefined;
   return {
-    candidateName: text(summaryContext?.candidateName) ?? interviewCase?.candidateName ?? null,
-    recruitmentName: text(summaryContext?.recruitmentName) ?? interviewCase?.recruitmentName ?? null,
+    candidateName: text(summaryContext?.candidateName)
+      ?? text(summary?.candidateName)
+      ?? interviewCase?.candidateName
+      ?? null,
+    recruitmentName: text(summaryContext?.recruitmentName)
+      ?? text(summary?.recruitmentName)
+      ?? interviewCase?.recruitmentName
+      ?? null,
     currentStepName: evaluation?.currentStep?.name ?? plan?.stepNames.join(
       plan.mode === "SEQUENTIAL" ? " → " : " + ",
     ) ?? null,

@@ -187,4 +187,25 @@ describe("dashboard service", () => {
       }),
     ]);
   });
+
+  it("uses a direct review summary when no interview case exists yet", () => {
+    db = new BridgeDatabase(":memory:");
+    db.createReview({
+      reviewType: "NINEHIRE_CONFIRMED_SCHEDULE_ROOM_UNAVAILABLE",
+      reason: "No synchronized meeting room is available.",
+      summary: {
+        candidateName: "Direct schedule candidate",
+        recruitmentName: "Direct schedule recruitment",
+      },
+    });
+
+    const snapshot = getDashboardSnapshot(db);
+
+    expect(snapshot.reviews).toEqual([
+      expect.objectContaining({
+        candidateName: "Direct schedule candidate",
+        recruitmentName: "Direct schedule recruitment",
+      }),
+    ]);
+  });
 });
