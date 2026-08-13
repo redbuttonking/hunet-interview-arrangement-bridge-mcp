@@ -4,11 +4,12 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, useTransition } from "react";
-import { CalendarDays, ChevronLeft, ChevronRight, Clock3, Loader2, RefreshCw, UsersRound } from "lucide-react";
+import { CalendarDays, ChevronDown, ChevronLeft, ChevronRight, Clock3, Loader2, RefreshCw, UsersRound } from "lucide-react";
 import { AppHeader, PageHeader } from "./app-shell";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog";
 import type { DashboardSnapshot, DataFreshness } from "../lib/dashboard-types";
 
 const calendarStartHour = 9;
@@ -61,6 +62,32 @@ function todayInSeoul(value?: string) {
   const base = value ? new Date(value) : new Date();
   const shifted = new Date(base.getTime() + 9 * 60 * 60 * 1000);
   return `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, "0")}-${String(shifted.getUTCDate()).padStart(2, "0")}`;
+}
+
+function monthStart(date: string) {
+  const [year, month] = date.split("-").map(Number);
+  return `${year}-${String(month).padStart(2, "0")}-01`;
+}
+
+function shiftMonth(date: string, amount: number) {
+  const [year, month] = date.split("-").map(Number);
+  return new Date(Date.UTC(year, month - 1 + amount, 1)).toISOString().slice(0, 10);
+}
+
+function calendarMonthDays(month: string) {
+  const [year, monthNumber] = month.split("-").map(Number);
+  const firstDay = new Date(Date.UTC(year, monthNumber - 1, 1));
+  const start = new Date(Date.UTC(year, monthNumber - 1, 1 - firstDay.getUTCDay()));
+  return Array.from({ length: 42 }, (_, index) => {
+    const day = new Date(start);
+    day.setUTCDate(start.getUTCDate() + index);
+    return day.toISOString().slice(0, 10);
+  });
+}
+
+function formatCalendarMonth(date: string) {
+  const [year, month] = date.split("-").map(Number);
+  return `${year}년 ${month}월`;
 }
 
 function scheduleStatusLabel(item: ScheduledCalendarItem) {
@@ -217,9 +244,20 @@ export function RoomsClient({ data }: { data: DashboardSnapshot }) {
     return todayInSeoul();
   }, []);
   const [selectedDate, setSelectedDate] = useState(preferredDate);
+  const [isDatePickerOpen, setIsDatePickerOpen] = useState(false);
+  const [pickerMonth, setPickerMonth] = useState(() => monthStart(preferredDate));
   useEffect(() => {
     setSelectedDate((current) => dates.includes(current) ? current : preferredDate);
   }, [dates, preferredDate]);
+  const datePickerDays = useMemo(() => calendarMonthDays(pickerMonth), [pickerMonth]);
+  const openDatePicker = () => {
+    setPickerMonth(monthStart(selectedDate));
+    setIsDatePickerOpen(true);
+  };
+  const selectCalendarDate = (date: string) => {
+    setSelectedDate(date);
+    setIsDatePickerOpen(false);
+  };
 
   const discoveredRoomNames = useMemo(() => [...new Set([
     ...data.meetingRoomBlocks.map((block) => block.roomName),
@@ -326,7 +364,11 @@ export function RoomsClient({ data }: { data: DashboardSnapshot }) {
             </div>
             <div className="flex items-center justify-center gap-2 border-t border-slate-100 pt-4">
               <Button aria-label="이전 날짜" size="icon-sm" variant="ghost" onClick={() => setSelectedDate((date) => shiftDate(date, -1))}><ChevronLeft className="size-5" /></Button>
-              <CardTitle className="min-w-56 text-center text-xl sm:text-2xl">{formatCalendarDate(selectedDate)}</CardTitle>
+              <Button aria-expanded={isDatePickerOpen} aria-haspopup="dialog" aria-label="날짜 선택" className="min-w-56 px-3 text-center text-xl sm:text-2xl" onClick={openDatePicker} variant="ghost">
+                <CalendarDays className="size-5 text-blue-600" />
+                <span>{formatCalendarDate(selectedDate)}</span>
+                <ChevronDown className="size-4 text-slate-400" />
+              </Button>
               <Button aria-label="다음 날짜" size="icon-sm" variant="ghost" onClick={() => setSelectedDate((date) => shiftDate(date, 1))}><ChevronRight className="size-5" /></Button>
               <Button size="sm" variant="secondary" onClick={() => setSelectedDate(todayInSeoul())}>오늘</Button>
             </div>
@@ -361,6 +403,32 @@ export function RoomsClient({ data }: { data: DashboardSnapshot }) {
         <div className="mt-5 flex items-start gap-2 rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm leading-6 text-slate-600"><Clock3 className="mt-0.5 size-4 shrink-0 text-slate-400" /><span>예약 블록은 취소하지 않고 유지합니다. 인터뷰를 취소하거나 변경해도 다우오피스의 기존 회의실 예약에는 영향을 주지 않습니다.</span></div>
         {calendarInterviews.length > 0 ? <div className="mt-4 flex items-center gap-2 text-sm text-slate-600"><UsersRound className="size-4 text-blue-600" />선택한 날짜에 회의실이 확인된 인터뷰 {calendarInterviews.length}건이 표시되어 있습니다.</div> : null}
       </main>
+      <Dialog onOpenChange={setIsDatePickerOpen} open={isDatePickerOpen}>
+        <DialogContent className="max-w-md gap-5 p-5 sm:p-6">
+          <DialogHeader>
+            <DialogTitle>날짜 선택</DialogTitle>
+            <DialogDescription>확인하려는 날짜를 선택하면 해당 일자의 회의실 시간표를 보여줍니다.</DialogDescription>
+          </DialogHeader>
+          <div className="flex items-center justify-between gap-3">
+            <Button aria-label="이전 달" onClick={() => setPickerMonth((month) => shiftMonth(month, -1))} size="icon-sm" variant="outline"><ChevronLeft className="size-4" /></Button>
+            <p className="text-lg font-bold tracking-tight text-slate-950">{formatCalendarMonth(pickerMonth)}</p>
+            <Button aria-label="다음 달" onClick={() => setPickerMonth((month) => shiftMonth(month, 1))} size="icon-sm" variant="outline"><ChevronRight className="size-4" /></Button>
+          </div>
+          <div aria-label={`${formatCalendarMonth(pickerMonth)} 달력`} className="grid grid-cols-7 gap-1" role="grid">
+            {["일", "월", "화", "수", "목", "금", "토"].map((weekday, index) => <span className={`grid h-9 place-items-center text-sm font-semibold ${index === 0 ? "text-rose-500" : index === 6 ? "text-blue-600" : "text-slate-500"}`} key={weekday}>{weekday}</span>)}
+            {datePickerDays.map((date) => {
+              const currentMonth = date.slice(0, 7) === pickerMonth.slice(0, 7);
+              const isSelected = date === selectedDate;
+              const isToday = date === todayInSeoul();
+              const weekday = new Date(`${date}T00:00:00Z`).getUTCDay();
+              return <button aria-current={isSelected ? "date" : undefined} className={`grid h-10 place-items-center rounded-lg text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600/40 ${isSelected ? "bg-blue-600 text-white shadow-sm" : currentMonth ? "text-slate-800 hover:bg-slate-100" : "text-slate-300 hover:bg-slate-50"} ${!isSelected && isToday ? "ring-1 ring-blue-300" : ""} ${!isSelected && weekday === 0 && currentMonth ? "text-rose-600" : ""} ${!isSelected && weekday === 6 && currentMonth ? "text-blue-600" : ""}`} key={date} onClick={() => selectCalendarDate(date)} role="gridcell" type="button">{Number(date.slice(-2))}</button>;
+            })}
+          </div>
+          <DialogFooter>
+            <Button onClick={() => selectCalendarDate(todayInSeoul())} variant="secondary">오늘로 이동</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
