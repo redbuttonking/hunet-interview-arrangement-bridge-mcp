@@ -1736,6 +1736,7 @@ export class WorkflowService {
           sourceEventId: event.sourceEventId,
         });
         this.db.linkExternalConfirmedInterviewToCase(event.sourceEventId, recorded.case.id);
+        this.resolveSupersededNinehireRoomReviews(recorded.case.id, review.id);
         matchedCases += 1;
         confirmedCases += 1;
         continue;
@@ -1749,6 +1750,7 @@ export class WorkflowService {
           && interviewCase.scheduledEndTime === event.endTime
         ) {
           this.db.linkExternalConfirmedInterviewToCase(event.sourceEventId, interviewCase.id);
+          this.resolveSupersededNinehireRoomReviews(interviewCase.id);
           alreadyConfirmed += 1;
         }
         else {
@@ -1762,6 +1764,7 @@ export class WorkflowService {
             roomName: event.roomName,
           });
           this.db.linkExternalConfirmedInterviewToCase(event.sourceEventId, interviewCase.id);
+          this.resolveSupersededNinehireRoomReviews(interviewCase.id);
           confirmedCases += 1;
         }
         continue;
@@ -1796,6 +1799,62 @@ export class WorkflowService {
       skippedMismatches,
       ambiguousEvents,
     };
+  }
+
+  private resolveSupersededNinehireRoomReviews(
+    caseId: string,
+    originatingReviewId?: string,
+  ): void {
+    const interviewCase = this.db.getCase(caseId);
+    if (
+      !interviewCase
+      || interviewCase.status !== "CONFIRMED"
+      || !interviewCase.scheduledDate
+      || !interviewCase.scheduledStartTime
+      || !interviewCase.scheduledEndTime
+    ) {
+      return;
+    }
+
+    if (originatingReviewId) {
+      this.db.discardPendingInterviewSkillDecisionsForReview(originatingReviewId);
+    }
+
+    const candidateKey = (value: string | null | undefined) =>
+      (value ?? "").replace(/\s+/g, "").toLocaleLowerCase("ko-KR");
+    for (const review of this.db.listOpenReviews(1_000)) {
+      if (!review.reviewType.startsWith("NINEHIRE_CONFIRMED_SCHEDULE_")) {
+        continue;
+      }
+      const summary = review.summary ?? {};
+      const candidateRef = typeof summary.candidateRef === "string"
+        ? summary.candidateRef
+        : undefined;
+      const candidateName = typeof summary.candidateName === "string"
+        ? summary.candidateName
+        : undefined;
+      const date = typeof summary.date === "string" ? summary.date : undefined;
+      const startTime = typeof summary.startTime === "string"
+        ? summary.startTime
+        : undefined;
+      const endTime = typeof summary.endTime === "string" ? summary.endTime : undefined;
+      const sameCandidate = candidateRef && interviewCase.candidateRef
+        ? candidateRef === interviewCase.candidateRef
+        : candidateKey(candidateName) === candidateKey(interviewCase.candidateName);
+      const sameSchedule = date === interviewCase.scheduledDate
+        && startTime === interviewCase.scheduledStartTime
+        && endTime === interviewCase.scheduledEndTime;
+      if (!sameCandidate || !sameSchedule) continue;
+
+      const relatedReviewId = typeof summary.reviewId === "string"
+        ? summary.reviewId
+        : undefined;
+      this.db.discardPendingInterviewSkillDecisionsForReview(review.id);
+      if (relatedReviewId) {
+        this.db.discardPendingInterviewSkillDecisionsForReview(relatedReviewId);
+      }
+      this.db.resolveReview(review.id, "DAOU_OFFICE_CALENDAR_CONFIRMED");
+    }
   }
 
   private reconcileManualNinehireSchedule(

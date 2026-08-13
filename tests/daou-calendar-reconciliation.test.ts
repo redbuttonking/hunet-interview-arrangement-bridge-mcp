@@ -202,6 +202,31 @@ describe("DaouOffice calendar reconciliation", () => {
         },
       },
     });
+    const staleRoomReviewId = db.createReview({
+      reviewType: "NINEHIRE_CONFIRMED_SCHEDULE_ROOM_SYNC_REQUIRED",
+      reason: "회의실 동기화가 필요합니다.",
+      summary: {
+        reviewId,
+        eventId: "NINEHIRE:direct-review",
+        candidateRef: "A-calendar-direct",
+        candidateName: "캘린더 직접 확정 지원자",
+        recruitmentRef: "R-calendar-direct",
+        date: "2099-08-18",
+        startTime: "16:00",
+        endTime: "17:00",
+      },
+    });
+    const staleDecision = db.createOrGetPendingInterviewSkillDecision({
+      skillKey: "INTERVIEW_SCHEDULING",
+      decisionType: "SELECT_NINEHIRE_CONFIRMED_SCHEDULE_ROOM",
+      fingerprint: "calendar-direct-stale-room-selection",
+      reviewId,
+      title: "기존 회의실 선택",
+      prompt: "더 이상 선택할 필요가 없습니다.",
+      selectionMode: "SINGLE",
+      options: [{ id: "ROOM", label: "열정룸", description: "테스트" }],
+      context: {},
+    });
     const calendar: DaouOfficeCalendarAdapter = {
       async listInterviewCalendarEvents() {
         return [{
@@ -228,6 +253,8 @@ describe("DaouOffice calendar reconciliation", () => {
       confirmedCases: 1,
     });
     expect(db.getReview(reviewId)?.resolution).toBe("DAOU_OFFICE_CALENDAR_CONFIRMED");
+    expect(db.getReview(staleRoomReviewId)?.status).toBe("RESOLVED");
+    expect(db.getInterviewSkillDecision(staleDecision.id)).toBeUndefined();
     expect(db.listCases("CONFIRMED")).toMatchObject([{
       candidateName: "캘린더 직접 확정 지원자",
       scheduledDate: "2099-08-18",
