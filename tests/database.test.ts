@@ -834,6 +834,67 @@ describe("BridgeDatabase", () => {
     ).toMatchObject({ status: "ACTIVE", startTime: "16:00" });
   });
 
+  it("merges adjacent shared interview room blocks before suggesting and allocating a room", () => {
+    db = new BridgeDatabase(":memory:");
+    const firstCase = db.createInterviewCase({
+      candidateName: "첫 지원자",
+      durationMinutes: 120,
+      proposalDates: ["2026-08-12"],
+    });
+    const secondCase = db.createInterviewCase({
+      candidateName: "두 번째 지원자",
+      durationMinutes: 60,
+      proposalDates: ["2026-08-12"],
+    });
+    const blocks = db.syncMeetingRoomBlocks(["2026-08-12"], [
+      {
+        sourceKey: "DAOU:shared-room-1",
+        roomId: "happiness",
+        roomName: "[818호] 행복룸",
+        reservedBy: "박현수",
+        purpose: "면접",
+        date: "2026-08-12",
+        startTime: "09:00",
+        endTime: "10:00",
+        sourcePayloadHash: "shared-room-1",
+      },
+      {
+        sourceKey: "DAOU:shared-room-2",
+        roomId: "happiness",
+        roomName: "[818호] 행복룸",
+        reservedBy: "김성은",
+        purpose: "면접",
+        date: "2026-08-12",
+        startTime: "10:00",
+        endTime: "12:00",
+        sourcePayloadHash: "shared-room-2",
+      },
+    ]);
+
+    const available = db.findAvailableRoomBlocks("2026-08-12", "09:00", "11:00");
+    expect(available).toHaveLength(1);
+    expect(available[0]).toMatchObject({ id: blocks[0]!.id, roomName: "[818호] 행복룸" });
+
+    expect(
+      db.allocateRoomBlock({
+        caseId: firstCase.id,
+        roomBlockId: available[0]!.id,
+        startTime: "09:00",
+        endTime: "11:00",
+      }),
+    ).toMatchObject({ status: "ACTIVE", startTime: "09:00", endTime: "11:00" });
+
+    expect(db.findAvailableRoomBlocks("2026-08-12", "10:00", "11:00")).toEqual([]);
+    expect(() =>
+      db!.allocateRoomBlock({
+        caseId: secondCase.id,
+        roomBlockId: blocks[1]!.id,
+        startTime: "10:00",
+        endTime: "11:00",
+      }),
+    ).toThrow("already allocated");
+  });
+
   it("does not allocate a room over an already confirmed manual interview", () => {
     db = new BridgeDatabase(":memory:");
     const confirmedCase = db.createInterviewCase({

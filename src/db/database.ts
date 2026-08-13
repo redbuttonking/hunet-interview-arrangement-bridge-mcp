@@ -198,6 +198,14 @@ export interface MeetingRoomBlockRow extends MeetingRoomBlockInput {
   updatedAt: string;
 }
 
+interface MeetingRoomAvailabilityWindow {
+  roomId: string;
+  roomName: string;
+  startTime: string;
+  endTime: string;
+  blocks: MeetingRoomBlockRow[];
+}
+
 export interface ExternalConfirmedInterviewRow {
   id: string;
   sourceEventId: string;
@@ -3911,6 +3919,103 @@ export class BridgeDatabase {
     return rows.map(toRoomAllocation);
   }
 
+  private listMeetingRoomAvailabilityWindows(date: string): MeetingRoomAvailabilityWindow[] {
+    const grouped = new Map<string, MeetingRoomBlockRow[]>();
+    for (const block of this.listMeetingRoomBlocks([date])) {
+      const items = grouped.get(block.roomId) ?? [];
+      items.push(block);
+      grouped.set(block.roomId, items);
+    }
+
+    const windows: MeetingRoomAvailabilityWindow[] = [];
+    for (const [roomId, blocks] of grouped) {
+      const sorted = [...blocks].sort((left, right) =>
+        left.startTime.localeCompare(right.startTime) || left.endTime.localeCompare(right.endTime),
+      );
+      let current: MeetingRoomAvailabilityWindow | undefined;
+      for (const block of sorted) {
+        if (!current || timeMinutes(block.startTime) > timeMinutes(current.endTime)) {
+          current = {
+            roomId,
+            roomName: block.roomName,
+            startTime: block.startTime,
+            endTime: block.endTime,
+            blocks: [block],
+          };
+          windows.push(current);
+          continue;
+        }
+        current.endTime = timeMinutes(block.endTime) > timeMinutes(current.endTime)
+          ? block.endTime
+          : current.endTime;
+        current.blocks.push(block);
+      }
+    }
+    return windows;
+  }
+
+  private hasActiveRoomAllocationConflict(input: {
+    roomId: string;
+    date: string;
+    startTime: string;
+    endTime: string;
+  }): boolean {
+    const conflict = this.connection
+      .prepare(`
+        SELECT allocation.id
+        FROM room_allocations allocation
+        JOIN meeting_room_blocks allocated_block
+          ON allocated_block.id = allocation.room_block_id
+        WHERE allocated_block.room_id = ?
+          AND allocation.date = ?
+          AND allocation.status = 'ACTIVE'
+          AND allocation.start_time < ?
+          AND allocation.end_time > ?
+        LIMIT 1
+      `)
+      .get(input.roomId, input.date, input.endTime, input.startTime) as SqlRow | undefined;
+    return Boolean(conflict);
+  }
+
+  private hasConfirmedRoomScheduleConflict(input: {
+    date: string;
+    roomName: string;
+    startTime: string;
+    endTime: string;
+  }): boolean {
+    const conflict = this.connection
+      .prepare(`
+        SELECT confirmed_case.id
+        FROM interview_cases confirmed_case
+        LEFT JOIN room_allocations confirmed_allocation
+          ON confirmed_allocation.id = confirmed_case.scheduled_room_allocation_id
+        LEFT JOIN meeting_room_blocks confirmed_block
+          ON confirmed_block.id = confirmed_allocation.room_block_id
+        WHERE confirmed_case.status IN ('AWAITING_CANDIDATE_CONFIRMATION', 'CONFIRMED')
+          AND confirmed_case.scheduled_date = ?
+          AND COALESCE(confirmed_case.scheduled_room_name, confirmed_block.room_name) = ?
+          AND confirmed_case.scheduled_start_time < ?
+          AND confirmed_case.scheduled_end_time > ?
+        LIMIT 1
+      `)
+      .get(input.date, input.roomName, input.endTime, input.startTime) as SqlRow | undefined;
+    return Boolean(conflict);
+  }
+
+  private findMeetingRoomAvailabilityWindow(
+    date: string,
+    roomId: string,
+    startTime: string,
+    endTime: string,
+  ): MeetingRoomAvailabilityWindow | undefined {
+    return this.listMeetingRoomAvailabilityWindows(date).find(
+      (window) =>
+        window.roomId === roomId &&
+        timeMinutes(window.startTime) <= timeMinutes(startTime) &&
+        timeMinutes(window.endTime) >= timeMinutes(endTime),
+    );
+  }
+
   findAvailableRoomBlocks(
     date: string,
     startTime: string,
@@ -3919,36 +4024,38 @@ export class BridgeDatabase {
     if (!isDate(date) || timeMinutes(startTime) >= timeMinutes(endTime)) {
       throw new Error("A valid room slot is required.");
     }
-    const rows = this.connection
-      .prepare(`
-        SELECT block.* FROM meeting_room_blocks block
-        WHERE block.active = 1
-          AND block.date = ?
-          AND block.start_time <= ?
-          AND block.end_time >= ?
-          AND NOT EXISTS (
-            SELECT 1 FROM room_allocations allocation
-            WHERE allocation.room_block_id = block.id
-              AND allocation.status = 'ACTIVE'
-              AND allocation.start_time < ?
-              AND allocation.end_time > ?
-          )
-          AND NOT EXISTS (
-            SELECT 1 FROM interview_cases confirmed_case
-            LEFT JOIN room_allocations confirmed_allocation
-              ON confirmed_allocation.id = confirmed_case.scheduled_room_allocation_id
-            LEFT JOIN meeting_room_blocks confirmed_block
-              ON confirmed_block.id = confirmed_allocation.room_block_id
-            WHERE confirmed_case.status IN ('AWAITING_CANDIDATE_CONFIRMATION', 'CONFIRMED')
-              AND confirmed_case.scheduled_date = block.date
-              AND COALESCE(confirmed_case.scheduled_room_name, confirmed_block.room_name) = block.room_name
-              AND confirmed_case.scheduled_start_time < ?
-              AND confirmed_case.scheduled_end_time > ?
-          )
-        ORDER BY block.room_name ASC
-      `)
-      .all(date, startTime, endTime, endTime, startTime, endTime, startTime) as SqlRow[];
-    return rows.map(toMeetingRoomBlock);
+    return this.listMeetingRoomAvailabilityWindows(date)
+      .filter(
+        (window) =>
+          timeMinutes(window.startTime) <= timeMinutes(startTime) &&
+          timeMinutes(window.endTime) >= timeMinutes(endTime),
+      )
+      .filter(
+        (window) =>
+          !this.hasActiveRoomAllocationConflict({
+            roomId: window.roomId,
+            date,
+            startTime,
+            endTime,
+          }),
+      )
+      .filter(
+        (window) =>
+          !this.hasConfirmedRoomScheduleConflict({
+            date,
+            roomName: window.roomName,
+            startTime,
+            endTime,
+          }),
+      )
+      .map((window) =>
+        window.blocks.find(
+          (block) =>
+            timeMinutes(block.startTime) <= timeMinutes(startTime) &&
+            timeMinutes(block.endTime) > timeMinutes(startTime),
+        ) ?? window.blocks[0]!,
+      )
+      .sort((left, right) => left.roomName.localeCompare(right.roomName));
   }
 
   allocateRoomBlock(input: {
@@ -3966,11 +4073,13 @@ export class BridgeDatabase {
     const block = toMeetingRoomBlock(blockRow);
     validateTimeRange(input.startTime, input.endTime, "Room allocation");
     const duration = timeMinutes(input.endTime) - timeMinutes(input.startTime);
-    if (
-      duration !== interviewCase.durationMinutes ||
-      timeMinutes(input.startTime) < timeMinutes(block.startTime) ||
-      timeMinutes(input.endTime) > timeMinutes(block.endTime)
-    ) {
+    const availability = this.findMeetingRoomAvailabilityWindow(
+      block.date,
+      block.roomId,
+      input.startTime,
+      input.endTime,
+    );
+    if (duration !== interviewCase.durationMinutes || !availability) {
       throw new Error("Room allocation must fit the room block and case duration.");
     }
 
@@ -4001,17 +4110,16 @@ export class BridgeDatabase {
         roomName: block.roomName,
       });
 
-      const conflict = this.connection
-        .prepare(`
-          SELECT id FROM room_allocations
-          WHERE room_block_id = ?
-            AND status = 'ACTIVE'
-            AND start_time < ?
-            AND end_time > ?
-          LIMIT 1
-        `)
-        .get(input.roomBlockId, input.endTime, input.startTime) as SqlRow | undefined;
-      if (conflict) throw new Error("The selected room slot is already allocated.");
+      if (
+        this.hasActiveRoomAllocationConflict({
+          roomId: block.roomId,
+          date: block.date,
+          startTime: input.startTime,
+          endTime: input.endTime,
+        })
+      ) {
+        throw new Error("The selected room slot is already allocated.");
+      }
 
       const id = randomUUID();
       const now = new Date().toISOString();
@@ -4085,10 +4193,15 @@ export class BridgeDatabase {
           .get(session.roomBlockId) as SqlRow | undefined;
         if (!blockRow) throw new Error("Active meeting room block not found.");
         const block = toMeetingRoomBlock(blockRow);
+        const availability = this.findMeetingRoomAvailabilityWindow(
+          block.date,
+          block.roomId,
+          session.startTime,
+          session.endTime,
+        );
         if (
           (expectedDate && block.date !== expectedDate) ||
-          timeMinutes(session.startTime) < timeMinutes(block.startTime) ||
-          timeMinutes(session.endTime) > timeMinutes(block.endTime)
+          !availability
         ) {
           throw new Error("Each room slot must fit its meeting room block on the same date.");
         }
@@ -4099,10 +4212,16 @@ export class BridgeDatabase {
           endTime: session.endTime,
           roomName: block.roomName,
         });
-        const conflict = this.connection
-          .prepare("SELECT id FROM room_allocations WHERE room_block_id = ? AND status = 'ACTIVE' AND start_time < ? AND end_time > ? LIMIT 1")
-          .get(session.roomBlockId, session.endTime, session.startTime) as SqlRow | undefined;
-        if (conflict) throw new Error("A selected meeting room slot is already allocated.");
+        if (
+          this.hasActiveRoomAllocationConflict({
+            roomId: block.roomId,
+            date: block.date,
+            startTime: session.startTime,
+            endTime: session.endTime,
+          })
+        ) {
+          throw new Error("A selected meeting room slot is already allocated.");
+        }
         const id = randomUUID();
         const now = new Date().toISOString();
         this.connection
