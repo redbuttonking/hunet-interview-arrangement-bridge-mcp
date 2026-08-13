@@ -400,6 +400,21 @@ export class WorkflowService {
     );
   }
 
+  private findOpenInterviewArrangementReview(context: CandidateContext) {
+    return this.db.listOpenReviews(1_000).find((review) => {
+      if (review.reviewType !== "INTERVIEW_ARRANGEMENT_START_REQUIRED") return false;
+      const approval = evaluationApprovalPayload(review.summary);
+      if (!approval) return false;
+      if (context.candidateRef && approval.context.candidateRef) {
+        return context.candidateRef === approval.context.candidateRef;
+      }
+      return (
+        context.candidateName === approval.context.candidateName &&
+        context.recruitmentName === approval.context.recruitmentName
+      );
+    });
+  }
+
   async previewRecruitmentInterviewTemplate(recruitmentId: string) {
     if (!this.ninehire.getRecruitmentPipeline) {
       throw new Error("NineHire recruitment pipeline lookup is not available.");
@@ -950,6 +965,24 @@ export class WorkflowService {
       return { notificationId, result: "RECRUITMENT_TEMPLATE_CHECK_REQUIRED" };
     }
 
+    const existingReview = this.findOpenInterviewArrangementReview(evaluation.context);
+    if (existingReview) {
+      const previous = evaluationApprovalPayload(existingReview.summary);
+      const refreshedSummary = evaluation.summary;
+      this.db.transaction(() => {
+        this.db.updateOpenReviewSummary(existingReview.id, {
+          ...(existingReview.summary ?? {}),
+          context: evaluation.context,
+          evaluation: refreshedSummary,
+        });
+        if (previous?.evaluation.currentStep?.stepId !== refreshedSummary.currentStep?.stepId) {
+          this.db.discardPendingInterviewSkillDecisionsForReview(existingReview.id);
+        }
+        this.db.updateNotificationStatus(notificationId, "PROCESSED");
+      });
+      return { notificationId, result: "EVALUATION_MERGED_INTO_EXISTING_REVIEW" };
+    }
+
     this.db.updateNotificationStatus(notificationId, "AWAITING_START_APPROVAL");
     this.db.createReview({
       notificationId,
@@ -962,6 +995,80 @@ export class WorkflowService {
       },
     });
     return { notificationId, result: "EVALUATION_READY_FOR_APPROVAL" };
+  }
+
+  async refreshOpenInterviewArrangementReviewStages(): Promise<{
+    scanned: number;
+    updated: number;
+    unchanged: number;
+    unavailable: number;
+    discardedPendingDecisions: number;
+  }> {
+    const reviews = this.db
+      .listOpenReviews(1_000)
+      .filter((review) => review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED");
+    const result = {
+      scanned: reviews.length,
+      updated: 0,
+      unchanged: 0,
+      unavailable: 0,
+      discardedPendingDecisions: 0,
+    };
+
+    for (const review of reviews) {
+      const approval = evaluationApprovalPayload(review.summary);
+      if (!approval?.context.candidateName || !approval.context.recruitmentName) {
+        result.unavailable += 1;
+        continue;
+      }
+      const refreshed = await this.ninehire.lookupCompletedEvaluation(approval.context);
+      if (!refreshed.context || !refreshed.summary) {
+        result.unavailable += 1;
+        continue;
+      }
+      const summary = {
+        ...(review.summary ?? {}),
+        context: refreshed.context,
+        evaluation: refreshed.summary,
+      };
+      if (JSON.stringify(review.summary) === JSON.stringify(summary)) {
+        result.unchanged += 1;
+        continue;
+      }
+      const previousStepId = approval.evaluation.currentStep?.stepId;
+      const currentStepId = refreshed.summary.currentStep?.stepId;
+      this.db.transaction(() => {
+        this.db.updateOpenReviewSummary(review.id, summary);
+        if (previousStepId !== currentStepId) {
+          result.discardedPendingDecisions +=
+            this.db.discardPendingInterviewSkillDecisionsForReview(review.id);
+        }
+      });
+      result.updated += 1;
+    }
+    return result;
+  }
+
+  async syncCandidateCurrentInterviewStage(
+    context: CandidateContext,
+  ): Promise<{ notificationId: string; result: string }> {
+    if (!context.candidateName || !context.recruitmentName) {
+      throw new Error("Candidate name and recruitment name are required.");
+    }
+    const candidateKey = context.candidateRef ?? `${context.recruitmentName}:${context.candidateName}`;
+    return this.ingestSlackNotification({
+      channelId: "NINEHIRE_CURRENT_STAGE_RECONCILIATION",
+      messageTs: `current-stage:${candidateKey}`,
+      parsed: {
+        eventType: "EVALUATION_COMPLETED",
+        title: "나인하이어 현재 인터뷰 단계 확인",
+        text: "나인하이어의 현재 칸반 단계와 완료된 평가표를 확인했습니다.",
+        links: [],
+        payloadHash: `current-stage:${candidateKey}`,
+        payloadJson: JSON.stringify({ source: "NINEHIRE_CURRENT_STAGE_RECONCILIATION" }),
+        ...context,
+      },
+    });
   }
 
   reprocessInterviewArrangementEligibilityReviews(): {

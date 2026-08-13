@@ -182,6 +182,159 @@ describe("evaluation approval workflow", () => {
     );
   });
 
+  it("refreshes an open review when the candidate moves to the next interview stage", async () => {
+    db = new BridgeDatabase(":memory:");
+    const notification = db.insertNotification({
+      channelId: "C1",
+      messageTs: "current-stage-review",
+      eventType: "EVALUATION_COMPLETED",
+      title: "Evaluation completed",
+      payloadHash: "current-stage-review",
+      payloadJson: "{}",
+      candidateRef: "A1",
+      candidateName: "Candidate",
+      recruitmentRef: "R1",
+      recruitmentName: "Recruitment",
+    }, "AWAITING_START_APPROVAL");
+    const reviewId = db.createReview({
+      notificationId: notification.id,
+      reviewType: "INTERVIEW_ARRANGEMENT_START_REQUIRED",
+      reason: "Approval required.",
+      summary: {
+        context: {
+          candidateRef: "A1",
+          candidateName: "Candidate",
+          recruitmentRef: "R1",
+          recruitmentName: "Recruitment",
+        },
+        evaluation: {
+          applicantProgressId: "A1",
+          recruitmentId: "R1",
+          scoreSheets: [],
+          currentStep: { stepId: "S1", name: "Combined interview", order: 2 },
+        },
+      },
+    });
+    db.createOrGetPendingInterviewSkillDecision({
+      skillKey: "CANDIDATE_TRIAGE",
+      decisionType: "START_INTERVIEW_ARRANGEMENT",
+      fingerprint: `review:${reviewId}:start:S1`,
+      reviewId,
+      title: "Start interview arrangement",
+      prompt: "Start?",
+      selectionMode: "SINGLE",
+      options: [{ id: "START", label: "Start", description: "Start." }],
+      context: { routeTriggerStepId: "S1" },
+    });
+    const workflow = new WorkflowService(db, config, {
+      async lookupCompletedEvaluation() {
+        return {
+          context: {
+            candidateRef: "A1",
+            candidateName: "Candidate",
+            recruitmentRef: "R1",
+            recruitmentName: "Recruitment",
+          },
+          summary: {
+            applicantProgressId: "A1",
+            recruitmentId: "R1",
+            scoreSheets: [],
+            currentStep: { stepId: "S2", name: "CEO interview", order: 3 },
+          },
+        };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    });
+
+    await expect(workflow.refreshOpenInterviewArrangementReviewStages()).resolves.toEqual({
+      scanned: 1,
+      updated: 1,
+      unchanged: 0,
+      unavailable: 0,
+      discardedPendingDecisions: 1,
+    });
+    expect(db.getReview(reviewId)?.summary).toMatchObject({
+      evaluation: { currentStep: { stepId: "S2", name: "CEO interview" } },
+    });
+    expect(db.listInterviewSkillDecisions({ status: "PENDING" })).toEqual([]);
+  });
+
+  it("merges multiple score-sheet notifications for the same candidate into one open review", async () => {
+    db = new BridgeDatabase(":memory:");
+    const workflow = new WorkflowService(db, config, {
+      async lookupCompletedEvaluation() {
+        return {
+          context: {
+            candidateRef: "A1",
+            candidateName: "Candidate",
+            recruitmentRef: "R1",
+            recruitmentName: "Recruitment",
+          },
+          summary: {
+            applicantProgressId: "A1",
+            recruitmentId: "R1",
+            currentStep: { stepId: "S2", name: "CEO interview", order: 3 },
+            scoreSheets: [{
+              scoreSheetId: "S2",
+              title: "Interview score sheet",
+              participants: [],
+              evaluators: [{
+                name: "Evaluator",
+                items: [{
+                  title: "Final decision",
+                  finalEvaluation: true,
+                  selectedOptions: [{ title: "합격" }],
+                }],
+              }],
+            }],
+          },
+        };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    });
+    const parsed = (messageTs: string) => ({
+      channelId: "C1",
+      messageTs,
+      parsed: {
+        eventType: "EVALUATION_COMPLETED" as const,
+        title: "Evaluation completed",
+        text: "Evaluation completed",
+        links: [],
+        payloadHash: `hash:${messageTs}`,
+        payloadJson: "{}",
+        candidateRef: "A1",
+        candidateName: "Candidate",
+        recruitmentRef: "R1",
+        recruitmentName: "Recruitment",
+      },
+    });
+
+    await expect(workflow.ingestSlackNotification(parsed("1.0"))).resolves.toMatchObject({
+      result: "EVALUATION_READY_FOR_APPROVAL",
+    });
+    await expect(workflow.ingestSlackNotification(parsed("2.0"))).resolves.toMatchObject({
+      result: "EVALUATION_MERGED_INTO_EXISTING_REVIEW",
+    });
+    expect(db.listOpenReviews()).toHaveLength(1);
+    const notifications = db.connection
+      .prepare("SELECT processing_status FROM slack_notifications ORDER BY message_ts ASC")
+      .all() as Array<{ processing_status: string }>;
+    expect(notifications.map((item) => item.processing_status)).toEqual([
+      "AWAITING_START_APPROVAL",
+      "PROCESSED",
+    ]);
+  });
+
   it("ignores evaluation notifications outside the configured recruitment scope", async () => {
     db = new BridgeDatabase(":memory:");
     db.upsertRecruitmentSlackChannel({

@@ -140,8 +140,14 @@ function interviewRouteChoices(
   if (!recruitmentRef) return [];
   const template = db.getRecruitmentInterviewTemplate(recruitmentRef);
   if (!template) return [];
+  const evaluation = asRecord(review.summary?.evaluation);
+  const currentStepId = text(asRecord(evaluation?.currentStep)?.stepId);
+  const matchingRoutes = currentStepId
+    ? template.routes.filter((route) => route.triggerStepId === currentStepId)
+    : [];
+  const routes = matchingRoutes.length > 0 ? matchingRoutes : template.routes;
   const stepsById = new Map(template.steps.map((step) => [step.stepId, step]));
-  return template.routes.flatMap((route) => {
+  return routes.flatMap((route) => {
     const steps = route.stepIds.map((stepId) => stepsById.get(stepId));
     if (steps.some((step) => !step)) return [];
     const resolvedSteps = steps.filter((step): step is NonNullable<typeof step> => Boolean(step));

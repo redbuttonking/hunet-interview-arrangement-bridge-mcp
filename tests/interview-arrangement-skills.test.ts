@@ -125,6 +125,50 @@ describe("interview arrangement skills", () => {
     ]);
   });
 
+  it("uses only the route that matches the candidate's current interview stage", async () => {
+    db = new BridgeDatabase(":memory:");
+    db.upsertRecruitmentInterviewTemplate({
+      recruitmentId: "R1",
+      recruitmentName: "Recruitment",
+      pipelineHash: "pipeline-hash",
+      steps: [
+        { stepId: "S1", title: "Combined interview", name: "Combined interview", order: 2, mode: "COMBINED", durationMinutes: 60 },
+        { stepId: "S2", title: "CEO interview", name: "CEO interview", order: 3, mode: "STANDARD", durationMinutes: 60 },
+      ],
+      routes: [
+        { triggerStepId: "S1", mode: "COMBINED", stepIds: ["S1"] },
+        { triggerStepId: "S2", mode: "STANDARD", stepIds: ["S2"] },
+      ],
+    });
+    const reviewId = db.createReview({
+      reviewType: "INTERVIEW_ARRANGEMENT_START_REQUIRED",
+      reason: "Completed evaluation requires approval.",
+      summary: {
+        context: { candidateName: "Candidate", recruitmentRef: "R1", recruitmentName: "Recruitment" },
+        evaluation: {
+          applicantProgressId: "A1",
+          recruitmentId: "R1",
+          scoreSheets: [],
+          currentStep: { stepId: "S2", name: "CEO interview", order: 3 },
+        },
+      },
+    });
+    const calls: Array<{ reviewId: string; routeTriggerStepId: string }> = [];
+    const skills = createSkills({
+      async approveInterviewArrangement(input) {
+        calls.push(input);
+        return { caseId: "ceo-case" };
+      },
+    });
+
+    const decision = skills.createCandidateTriageDecision(reviewId);
+    expect(decision.decisionType).toBe("START_INTERVIEW_ARRANGEMENT");
+    expect(decision.options.map((option) => option.id)).toEqual(["START", "HOLD"]);
+
+    await skills.resolveDecision({ decisionId: decision.id, optionId: "START" });
+    expect(calls).toEqual([{ reviewId, routeTriggerStepId: "S2" }]);
+  });
+
   it("records a candidate triage hold without changing an external system", async () => {
     db = new BridgeDatabase(":memory:");
     db.upsertRecruitmentInterviewTemplate({

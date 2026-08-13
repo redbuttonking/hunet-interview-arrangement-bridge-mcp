@@ -1103,6 +1103,28 @@ export function createBridgeMcpServer(
   );
 
   server.registerTool(
+    "sync_candidate_current_interview_stage",
+    {
+      title: "후보자 현재 인터뷰 단계 동기화",
+      description:
+        "나인하이어에서 후보자의 현재 칸반 단계와 완료된 평가표를 다시 읽어, 다음 인터뷰 조율 검토를 로컬 운영 큐에 반영합니다. Slack 메시지, 나인하이어 칸반, 후보자 일정은 변경하지 않습니다.",
+      inputSchema: {
+        candidateName: z.string().min(1),
+        recruitmentName: z.string().min(1),
+        candidateRef: z.string().min(1).optional(),
+        recruitmentRef: z.string().min(1).optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async (input) => result(await workflow.syncCandidateCurrentInterviewStage(input)),
+  );
+
+  server.registerTool(
     "reprocess_schedule_confirmation_notifications",
     {
       title: "기존 일정 확정 알림 재처리",

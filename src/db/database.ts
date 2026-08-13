@@ -2171,6 +2171,17 @@ export class BridgeDatabase {
     return row ? toReview(row) : undefined;
   }
 
+  updateOpenReviewSummary(id: string, summary: Record<string, unknown>): boolean {
+    const result = this.connection
+      .prepare(`
+        UPDATE workflow_reviews
+        SET summary_json = ?
+        WHERE id = ? AND status = 'OPEN'
+      `)
+      .run(JSON.stringify(summary), id);
+    return Number(result.changes) === 1;
+  }
+
   hasCaseReview(caseId: string, reviewType: string): boolean {
     const row = this.connection
       .prepare(
@@ -2312,6 +2323,16 @@ export class BridgeDatabase {
         WHERE case_id = ? AND skill_key = ? AND status = 'PENDING'
       `)
       .run(caseId, skillKey);
+    return Number(result.changes);
+  }
+
+  discardPendingInterviewSkillDecisionsForReview(reviewId: string): number {
+    const result = this.connection
+      .prepare(`
+        DELETE FROM interview_skill_decisions
+        WHERE review_id = ? AND status = 'PENDING'
+      `)
+      .run(reviewId);
     return Number(result.changes);
   }
 
