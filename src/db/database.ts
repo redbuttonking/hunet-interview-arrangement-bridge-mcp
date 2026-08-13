@@ -2190,6 +2190,30 @@ export class BridgeDatabase {
     return row ? toReview(row) : undefined;
   }
 
+  listCandidateArrangementReviews(input: {
+    candidateRef: string | null;
+    recruitmentRef: string | null;
+    limit?: number;
+  }): ReviewRow[] {
+    if (!input.candidateRef || !input.recruitmentRef) return [];
+    return (
+      this.connection
+        .prepare(`
+          SELECT * FROM workflow_reviews
+          WHERE review_type = 'INTERVIEW_ARRANGEMENT_START_REQUIRED'
+            AND summary_json LIKE ?
+            AND summary_json LIKE ?
+          ORDER BY created_at DESC, rowid DESC
+          LIMIT ?
+        `)
+        .all(
+          `%\"candidateRef\":\"${input.candidateRef}\"%`,
+          `%\"recruitmentRef\":\"${input.recruitmentRef}\"%`,
+          input.limit ?? 20,
+        ) as SqlRow[]
+    ).map(toReview);
+  }
+
   updateOpenReviewSummary(id: string, summary: Record<string, unknown>): boolean {
     const result = this.connection
       .prepare(`

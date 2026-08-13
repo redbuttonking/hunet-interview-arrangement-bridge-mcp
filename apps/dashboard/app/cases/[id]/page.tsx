@@ -104,11 +104,11 @@ export default async function CaseDetailPage({ params }: { params: Promise<{ id:
     interviewCase.status,
     activeInterviewers.filter((interviewer) => interviewer.required && interviewer.status === "PENDING").length,
   );
+  const candidateJourney = data.candidateJourney;
   const interviewType = plan
     ? `${plan.mode === "COMBINED" ? "통합" : plan.mode === "SEQUENTIAL" ? "연속" : "단일"} · ${plan.stepNames.join(plan.mode === "SEQUENTIAL" ? " → " : " + ")}`
-    : "인터뷰 유형 확인 필요";
+    : candidateJourney?.currentStageLabel ?? "인터뷰 유형 확인 필요";
   const duration = plan?.durationMinutes ?? interviewCase.durationMinutes;
-  const candidateJourney = data.candidateJourney;
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -130,10 +130,11 @@ export default async function CaseDetailPage({ params }: { params: Promise<{ id:
             {candidateJourney ? <div className="overflow-x-auto pb-2"><ol aria-label="후보자 채용 여정" className="flex min-w-max items-start">
               {candidateJourney.stages.map((stage, index) => {
                 const completed = stage.state === "COMPLETED";
+                const scheduled = stage.state === "SCHEDULED";
                 const current = stage.state === "CURRENT";
                 const stopped = stage.state === "STOPPED";
                 return <li className="flex min-w-[9.25rem] flex-1 items-start last:min-w-0" key={stage.id}>
-                  <div className="grid min-w-[7.25rem] gap-2"><span aria-current={current ? "step" : undefined} className={`grid size-10 place-items-center rounded-full text-sm font-bold ${completed ? "bg-emerald-600 text-white" : current ? "bg-blue-600 text-white ring-4 ring-blue-100" : stopped ? "bg-rose-600 text-white" : "bg-slate-100 text-slate-500"}`}>{completed ? <CheckCircle2 className="size-5" /> : index + 1}</span><strong className={`text-base leading-6 ${current ? "text-slate-950" : completed ? "text-emerald-700" : stopped ? "text-rose-700" : "text-slate-500"}`}>{stage.label}</strong><span className={`text-sm leading-5 ${current ? "font-medium text-blue-700" : "text-slate-500"}`}>{stage.detail}</span></div>
+                  <div className="grid min-w-[7.25rem] gap-2"><span aria-current={current ? "step" : undefined} className={`grid size-10 place-items-center rounded-full text-sm font-bold ${completed || scheduled ? "bg-emerald-600 text-white" : current ? "bg-blue-600 text-white ring-4 ring-blue-100" : stopped ? "bg-rose-600 text-white" : "bg-slate-100 text-slate-500"}`}>{completed ? <CheckCircle2 className="size-5" /> : scheduled ? <CalendarClock className="size-5" /> : index + 1}</span><strong className={`text-base leading-6 ${current ? "text-slate-950" : completed || scheduled ? "text-emerald-700" : stopped ? "text-rose-700" : "text-slate-500"}`}>{stage.label}</strong><span className={`text-sm leading-5 ${current ? "font-medium text-blue-700" : scheduled ? "font-medium text-emerald-700" : "text-slate-500"}`}>{stage.detail}</span></div>
                   {index < candidateJourney.stages.length - 1 ? <span aria-hidden="true" className={`mt-5 h-px min-w-6 flex-1 ${completed ? "bg-emerald-400" : "bg-slate-200"}`} /> : null}
                 </li>;
               })}
@@ -162,7 +163,7 @@ export default async function CaseDetailPage({ params }: { params: Promise<{ id:
                 {scheduledSegments.length > 0 ? scheduledSegments.map((segment) => <span className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5" key={`${segment.date}-${segment.startTime}-${segment.roomName}-${segment.stepId ?? "single"}`}><span className="text-blue-700">{segment.date} {segment.startTime}–{segment.endTime}</span><span className="text-slate-400">·</span><span>{stepName(segment.stepId, plan)}</span><span className="text-slate-400">·</span><span>{segment.roomName}</span></span>) : interviewCase.scheduledDate ? `${interviewCase.scheduledDate} ${interviewCase.scheduledStartTime}–${interviewCase.scheduledEndTime}` : "아직 확정된 일정이 없습니다."}
               </dd></div>
               <div className="grid gap-1 sm:grid-cols-[120px_minmax(0,1fr)] sm:gap-5"><dt className="text-sm font-medium text-slate-500">회의실</dt><dd className="m-0 flex items-center gap-2 text-base font-bold leading-6 text-slate-900"><MapPin className="size-4 text-slate-400" />{scheduledSegments.length > 0 ? "세그먼트별 배정" : interviewCase.scheduledRoomName ?? "회의실 선택 또는 확인 필요"}</dd></div>
-              <div className="grid gap-1 sm:grid-cols-[120px_minmax(0,1fr)] sm:gap-5"><dt className="text-sm font-medium text-slate-500">후보자 응답</dt><dd className="m-0 text-base font-bold leading-6 text-slate-900">{interviewCase.candidateScheduleProposalSent ? <span className="text-emerald-700">나인하이어 일정 제안 발송 완료 · 응답 대기 또는 확정</span> : <span className="text-amber-700">나인하이어 일정 제안 미발송</span>}</dd></div>
+              <div className="grid gap-1 sm:grid-cols-[120px_minmax(0,1fr)] sm:gap-5"><dt className="text-sm font-medium text-slate-500">후보자 응답</dt><dd className="m-0 text-base font-bold leading-6 text-slate-900">{interviewCase.status === "CONFIRMED" ? <span className="text-emerald-700">인터뷰 일정 최종 확정됨</span> : interviewCase.candidateScheduleProposalSent ? <span className="text-emerald-700">나인하이어 일정 제안 발송 완료 · 응답 대기</span> : <span className="text-amber-700">나인하이어 일정 제안 발송 여부 확인 필요</span>}</dd></div>
             </dl></CardContent>
           </Card>
 

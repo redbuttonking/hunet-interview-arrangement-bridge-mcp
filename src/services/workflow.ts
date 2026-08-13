@@ -2512,6 +2512,33 @@ export class WorkflowService {
     return plan;
   }
 
+  private applyRecordedCurrentStepRoute(input: {
+    caseId: string;
+    recruitmentRef?: string;
+    currentStepId?: string;
+  }): void {
+    if (!input.recruitmentRef || !input.currentStepId) return;
+    const template = this.db.getRecruitmentInterviewTemplate(input.recruitmentRef);
+    if (!template) return;
+    const step = template.steps.find((item) => item.stepId === input.currentStepId);
+    if (!step) return;
+    const route = template.routes.find((item) => item.triggerStepId === step.stepId) ?? {
+      triggerStepId: step.stepId,
+      mode: step.mode,
+      stepIds: [step.stepId],
+    };
+    const steps = route.stepIds.map((stepId) =>
+      template.steps.find((item) => item.stepId === stepId),
+    );
+    if (steps.some((item) => !item)) return;
+    this.applyTemplateInterviewRoute({
+      caseId: input.caseId,
+      route,
+      steps: steps as RecruitmentInterviewTemplateStep[],
+      source: "SYSTEM",
+    });
+  }
+
   recordManualConfirmedInterview(input: {
     reviewId: string;
     date: string;
@@ -2560,6 +2587,11 @@ export class WorkflowService {
       recruitmentName: approval.context.recruitmentName,
       durationMinutes,
       proposalDates: [input.date],
+    });
+    this.applyRecordedCurrentStepRoute({
+      caseId: interviewCase.id,
+      recruitmentRef: approval.context.recruitmentRef,
+      currentStepId: approval.evaluation.currentStep?.stepId,
     });
     const schedule = this.db.recordManualConfirmedSchedule({
       caseId: interviewCase.id,

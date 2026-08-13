@@ -6,7 +6,7 @@ import type {
 } from "../db/database.js";
 import type { InterviewCaseStatus } from "../domain/types.js";
 
-export type CandidateJourneyStageState = "COMPLETED" | "CURRENT" | "UPCOMING" | "STOPPED";
+export type CandidateJourneyStageState = "COMPLETED" | "SCHEDULED" | "CURRENT" | "UPCOMING" | "STOPPED";
 
 export interface CandidateJourneyStage {
   id: string;
@@ -126,9 +126,18 @@ function currentStageDetail(
   return labels[interviewCase.status] ?? "상태 확인 필요";
 }
 
-function stageStateForCase(interviewCase?: InterviewCaseRow): CandidateJourneyStageState | undefined {
+function stageStateForCase(
+  interviewCase?: InterviewCaseRow,
+): CandidateJourneyStageState | undefined {
   if (!interviewCase) return undefined;
   if (["CANCELLED", "CLOSED"].includes(interviewCase.status)) return "STOPPED";
+  if (interviewCase.status === "CONFIRMED") {
+    const now = nowInKorea();
+    const scheduledEnd = interviewCase.scheduledDate && interviewCase.scheduledEndTime
+      ? `${interviewCase.scheduledDate}T${interviewCase.scheduledEndTime}`
+      : undefined;
+    if (!scheduledEnd || `${now.date}T${now.time}` < scheduledEnd) return "SCHEDULED";
+  }
   return "CURRENT";
 }
 
@@ -137,14 +146,23 @@ export function buildCandidateJourney(input: CandidateJourneyInput): CandidateJo
   if (routes.length === 0) return null;
 
   const plannedStepIds = new Set(input.plannedStepIds ?? []);
-  const currentRouteIndex = routes.findIndex((route) =>
-    route.triggerStepId === input.currentStepId || route.stepIds.some((stepId) => plannedStepIds.has(stepId)),
+  const observedRouteIndex = input.currentStepId
+    ? routes.findIndex((route) => route.triggerStepId === input.currentStepId)
+    : -1;
+  const plannedRouteIndex = routes.findIndex((route) =>
+    route.stepIds.some((stepId) => plannedStepIds.has(stepId)),
   );
+  const currentRouteIndex = observedRouteIndex >= 0 ? observedRouteIndex : plannedRouteIndex;
   if (currentRouteIndex < 0) return null;
 
-  const interviewCaseState = stageStateForCase(input.interviewCase);
   const currentRoute = routes[currentRouteIndex]!;
-  const currentDetail = currentStageDetail(input.interviewCase, input.evaluationStatus);
+  const caseMatchesCurrentRoute = !input.interviewCase
+    ? false
+    : plannedStepIds.size === 0
+      || currentRoute.stepIds.some((stepId) => plannedStepIds.has(stepId));
+  const currentInterviewCase = caseMatchesCurrentRoute ? input.interviewCase : undefined;
+  const interviewCaseState = stageStateForCase(currentInterviewCase);
+  const currentDetail = currentStageDetail(currentInterviewCase, input.evaluationStatus);
   const stages: CandidateJourneyStage[] = [
     {
       id: "document-screening",

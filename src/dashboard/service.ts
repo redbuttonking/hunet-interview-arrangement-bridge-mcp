@@ -240,9 +240,17 @@ export function getCandidateJourneyForCase(
   const template = interviewCase.recruitmentRef
     ? db.getRecruitmentInterviewTemplate(interviewCase.recruitmentRef)
     : undefined;
+  const currentStepId = db.listCandidateArrangementReviews({
+    candidateRef: interviewCase.candidateRef,
+    recruitmentRef: interviewCase.recruitmentRef,
+    limit: 10,
+  })
+    .map((review) => reviewContext(db, review).currentStepId)
+    .find((stepId): stepId is string => Boolean(stepId));
   return buildCandidateJourney({
     template,
     interviewCase,
+    currentStepId,
     plannedStepIds: plan?.stepIds,
     evaluationStatus: evaluationStatusForCase(db, interviewCase, plan),
   });

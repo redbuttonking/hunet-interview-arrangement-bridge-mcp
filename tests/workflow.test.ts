@@ -1203,6 +1203,20 @@ describe("evaluation approval workflow", () => {
 
   it("records a manually confirmed interview without external messages", () => {
     db = new BridgeDatabase(":memory:");
+    db.upsertRecruitmentInterviewTemplate({
+      recruitmentId: "R126",
+      recruitmentName: "수동 확정 채용",
+      pipelineHash: "manual-confirmed-pipeline",
+      steps: [{
+        stepId: "S126",
+        title: "CEO 인터뷰",
+        name: "CEO 인터뷰",
+        order: 3,
+        mode: "STANDARD",
+        durationMinutes: 60,
+      }],
+      routes: [{ triggerStepId: "S126", mode: "STANDARD", stepIds: ["S126"] }],
+    });
     const notification = db.insertNotification(
       {
         channelId: "C1",
@@ -1233,6 +1247,7 @@ describe("evaluation approval workflow", () => {
           applicantProgressId: "A126",
           recruitmentId: "R126",
           scoreSheets: [],
+          currentStep: { stepId: "S126", name: "CEO 인터뷰", order: 3 },
         },
       },
     });
@@ -1276,6 +1291,11 @@ describe("evaluation approval workflow", () => {
     expect(db.getReview(reviewId)).toMatchObject({
       status: "RESOLVED",
       resolution: "MANUAL_INTERVIEW_CONFIRMED",
+    });
+    expect(db.getCaseInterviewPlan(recorded.case.id)).toMatchObject({
+      source: "TEMPLATE",
+      stepIds: ["S126"],
+      stepNames: ["CEO 인터뷰"],
     });
     expect(db.getOperationsDashboard()).toMatchObject({
       cases: [

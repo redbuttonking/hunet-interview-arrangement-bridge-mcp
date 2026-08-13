@@ -32,6 +32,36 @@ describe("BridgeDatabase", () => {
     ]);
   });
 
+  it("finds the latest stored NineHire stage for a candidate", () => {
+    db = new BridgeDatabase(":memory:");
+    db.createReview({
+      reviewType: "INTERVIEW_ARRANGEMENT_START_REQUIRED",
+      reason: "평가 완료",
+      summary: {
+        context: { candidateRef: "C1", recruitmentRef: "R1" },
+        evaluation: { currentStep: { stepId: "S1", name: "1차 인터뷰" } },
+      },
+    });
+    db.createReview({
+      reviewType: "INTERVIEW_ARRANGEMENT_START_REQUIRED",
+      reason: "평가 완료",
+      summary: {
+        context: { candidateRef: "C1", recruitmentRef: "R1" },
+        evaluation: { currentStep: { stepId: "S2", name: "CEO 인터뷰" } },
+      },
+    });
+
+    const reviews = db.listCandidateArrangementReviews({
+      candidateRef: "C1",
+      recruitmentRef: "R1",
+    });
+
+    expect(reviews).toHaveLength(2);
+    expect(reviews[0]?.summary).toMatchObject({
+      evaluation: { currentStep: { stepId: "S2", name: "CEO 인터뷰" } },
+    });
+  });
+
   it("clears candidate and room operation data while retaining Slack read positions and setup", () => {
     db = new BridgeDatabase(":memory:");
     const notification = db.insertNotification({
