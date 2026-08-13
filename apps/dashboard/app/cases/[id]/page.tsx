@@ -15,8 +15,6 @@ export const dynamic = "force-dynamic";
 
 type CaseDetailData = NonNullable<ReturnType<typeof loadCaseDetail>>;
 
-const journeySteps = ["조율 시작", "면접관 일정", "시간·회의실", "후보자 응답", "최종 확정"];
-
 function formatDateTime(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
@@ -61,14 +59,6 @@ function statusVariant(status: string) {
   return "default" as const;
 }
 
-function journeyIndex(status: string) {
-  if (["READY_FOR_DRAFT", "DRAFT_CREATED"].includes(status)) return 0;
-  if (["REQUEST_SENT", "COLLECTING_AVAILABILITY"].includes(status)) return 1;
-  if (["READY_TO_SCHEDULE", "REVIEW_REQUIRED"].includes(status)) return 2;
-  if (status === "AWAITING_CANDIDATE_CONFIRMATION") return 3;
-  return 4;
-}
-
 function isExceptionStatus(status: string) {
   return ["CANCELLED", "ON_HOLD"].includes(status);
 }
@@ -109,7 +99,6 @@ export default async function CaseDetailPage({ params }: { params: Promise<{ id:
   const activeInterviewers = bundle.interviewers.filter(
     (interviewer) => interviewer.active && (plannedInterviewerIds.size === 0 || plannedInterviewerIds.has(interviewer.id)),
   );
-  const currentJourneyIndex = journeyIndex(interviewCase.status);
   const exceptionStatus = isExceptionStatus(interviewCase.status);
   const action = nextAction(
     interviewCase.status,
@@ -119,6 +108,7 @@ export default async function CaseDetailPage({ params }: { params: Promise<{ id:
     ? `${plan.mode === "COMBINED" ? "통합" : plan.mode === "SEQUENTIAL" ? "연속" : "단일"} · ${plan.stepNames.join(plan.mode === "SEQUENTIAL" ? " → " : " + ")}`
     : "인터뷰 유형 확인 필요";
   const duration = plan?.durationMinutes ?? interviewCase.durationMinutes;
+  const candidateJourney = data.candidateJourney;
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -134,25 +124,23 @@ export default async function CaseDetailPage({ params }: { params: Promise<{ id:
 
         <Card className="overflow-hidden">
           <CardHeader className="border-b border-slate-200 p-5 sm:p-7">
-            <div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">INTERVIEW JOURNEY</p><CardTitle className="mt-2 text-2xl sm:text-3xl">인터뷰 조율 진행 상태</CardTitle><CardDescription className="mt-2 text-base">{interviewType} · {duration}분 인터뷰입니다.</CardDescription></div><Badge variant={statusVariant(interviewCase.status)}>{statusLabel(interviewCase.status)}</Badge></div>
+            <div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">CANDIDATE JOURNEY</p><CardTitle className="mt-2 text-2xl sm:text-3xl">채용 진행 상태</CardTitle><CardDescription className="mt-2 text-base">{candidateJourney ? `현재 ${candidateJourney.currentStageLabel} · ${candidateJourney.currentStageDetail}` : "채용 진행 단계를 확인하고 있습니다."}</CardDescription></div><Badge variant={statusVariant(interviewCase.status)}>{statusLabel(interviewCase.status)}</Badge></div>
           </CardHeader>
           <CardContent className="p-5 sm:p-7">
-            <ol aria-label="인터뷰 조율 5단계" className="grid gap-4 sm:grid-cols-5 sm:gap-0">
-              {journeySteps.map((step, index) => {
-                const isCompleted = !exceptionStatus && index < currentJourneyIndex;
-                const isCurrent = !exceptionStatus && index === currentJourneyIndex;
-                return (
-                  <li aria-current={isCurrent ? "step" : undefined} className="relative flex items-center gap-3 sm:block" key={step}>
-                    {index < journeySteps.length - 1 ? <span aria-hidden="true" className="absolute left-5 top-10 hidden h-px w-[calc(100%-2.5rem)] bg-slate-200 sm:block" /> : null}
-                    <span className={`relative z-10 grid size-10 shrink-0 place-items-center rounded-full text-sm font-bold transition-colors ${isCompleted ? "bg-emerald-600 text-white" : isCurrent ? "bg-blue-600 text-white ring-4 ring-blue-100" : "bg-slate-100 text-slate-500"}`}>{isCompleted ? <CheckCircle2 className="size-5" /> : index + 1}</span>
-                    <span className="sm:mt-3 sm:block"><strong className={`text-base ${isCurrent ? "text-slate-950" : "text-slate-600"}`}>{step}</strong>{isCurrent ? <span className="mt-1 block text-xs font-medium text-blue-700">현재 단계</span> : null}</span>
-                  </li>
-                );
+            {candidateJourney ? <div className="overflow-x-auto pb-2"><ol aria-label="후보자 채용 여정" className="flex min-w-max items-start">
+              {candidateJourney.stages.map((stage, index) => {
+                const completed = stage.state === "COMPLETED";
+                const current = stage.state === "CURRENT";
+                const stopped = stage.state === "STOPPED";
+                return <li className="flex min-w-[9.25rem] flex-1 items-start last:min-w-0" key={stage.id}>
+                  <div className="grid min-w-[7.25rem] gap-2"><span aria-current={current ? "step" : undefined} className={`grid size-10 place-items-center rounded-full text-sm font-bold ${completed ? "bg-emerald-600 text-white" : current ? "bg-blue-600 text-white ring-4 ring-blue-100" : stopped ? "bg-rose-600 text-white" : "bg-slate-100 text-slate-500"}`}>{completed ? <CheckCircle2 className="size-5" /> : index + 1}</span><strong className={`text-base leading-6 ${current ? "text-slate-950" : completed ? "text-emerald-700" : stopped ? "text-rose-700" : "text-slate-500"}`}>{stage.label}</strong><span className={`text-sm leading-5 ${current ? "font-medium text-blue-700" : "text-slate-500"}`}>{stage.detail}</span></div>
+                  {index < candidateJourney.stages.length - 1 ? <span aria-hidden="true" className={`mt-5 h-px min-w-6 flex-1 ${completed ? "bg-emerald-400" : "bg-slate-200"}`} /> : null}
+                </li>;
               })}
-            </ol>
+            </ol></div> : <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-5 text-base text-slate-600">채용별 인터뷰 규칙을 확인하면 전체 진행 단계를 표시합니다.</div>}
             <div className={`mt-8 flex items-start gap-3 rounded-xl border p-5 ${action.tone === "blue" ? "border-blue-100 bg-blue-50/70" : action.tone === "amber" ? "border-amber-200 bg-amber-50/70" : "border-slate-200 bg-slate-50"}`}>
               {exceptionStatus ? <CircleAlert className="mt-0.5 size-5 shrink-0 text-amber-700" /> : <CheckCircle2 className="mt-0.5 size-5 shrink-0 text-blue-700" />}
-              <div><p className="text-xs font-bold uppercase tracking-[0.16em] text-slate-600">NEXT ACTION</p><h2 className="mt-2 text-lg font-bold tracking-tight text-slate-950">{action.title}</h2><p className="mt-2 text-base leading-7 text-slate-700">{action.description}</p></div>
+              <div><p className="text-xs font-bold uppercase tracking-[0.16em] text-slate-600">CURRENT SCHEDULING TASK</p><h2 className="mt-2 text-lg font-bold tracking-tight text-slate-950">{action.title}</h2><p className="mt-2 text-base leading-7 text-slate-700">{action.description}</p></div>
             </div>
           </CardContent>
         </Card>

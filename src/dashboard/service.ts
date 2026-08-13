@@ -1,5 +1,6 @@
 // 로컬 운영 대시보드에 필요한 최소 정보를 조합한다.
 import { BridgeDatabase, type InterviewSkillDecisionRow, type ReviewRow } from "../db/database.js";
+import { buildCandidateJourney } from "./candidate-journey.js";
 
 const FRESHNESS_THRESHOLD_MS = 10 * 60 * 1000;
 
@@ -130,9 +131,14 @@ function reviewContext(db: BridgeDatabase, review: ReviewRow) {
     ? context as Record<string, unknown>
     : undefined;
   const evaluation = evaluationSummary(review.summary?.evaluation);
+  const rawEvaluation = record(review.summary?.evaluation);
+  const currentStep = record(rawEvaluation?.currentStep);
   const interviewCase = review.caseId ? db.getCase(review.caseId) : undefined;
   const plan = review.caseId ? db.getCaseInterviewPlan(review.caseId) : undefined;
   return {
+    candidateRef: text(summaryContext?.candidateRef),
+    recruitmentRef: text(summaryContext?.recruitmentRef),
+    currentStepId: text(currentStep?.stepId),
     candidateName: text(summaryContext?.candidateName)
       ?? text(summary?.candidateName)
       ?? interviewCase?.candidateName
@@ -146,6 +152,21 @@ function reviewContext(db: BridgeDatabase, review: ReviewRow) {
     ) ?? null,
     evaluationSummary: evaluation,
   };
+}
+
+function currentCaseForJourney(
+  db: BridgeDatabase,
+  input: { candidateRef: string | null; recruitmentRef: string | null; currentStepId: string | undefined },
+) {
+  if (!input.currentStepId) return undefined;
+  return db.listCases(undefined, 1_000)
+    .filter((interviewCase) =>
+      interviewCase.candidateRef === input.candidateRef
+      && interviewCase.recruitmentRef === input.recruitmentRef
+      && !["CANCELLED", "CLOSED"].includes(interviewCase.status),
+    )
+    .map((interviewCase) => ({ interviewCase, plan: db.getCaseInterviewPlan(interviewCase.id) }))
+    .find(({ plan }) => plan?.stepIds.includes(input.currentStepId!));
 }
 
 function decisionSummary(db: BridgeDatabase, decision: InterviewSkillDecisionRow) {
@@ -217,14 +238,53 @@ export function getDashboardSnapshot(db: BridgeDatabase, limit = 100) {
     db,
     db.getOperationsDashboard(limit),
   );
-  const reviews = db.listOpenReviews(limit).map((review) => ({
-    id: review.id,
-    caseId: review.caseId,
-    reviewType: review.reviewType,
-    reason: review.reason,
-    createdAt: review.createdAt,
-    ...reviewContext(db, review),
-  }));
+  const dashboardCases = (dashboardWithFreshness.cases as Array<Record<string, unknown>>).map((caseSummary) => {
+    const caseId = text(caseSummary.id);
+    const interviewCase = caseId ? db.getCase(caseId) : undefined;
+    const plan = interviewCase ? db.getCaseInterviewPlan(interviewCase.id) : undefined;
+    const template = interviewCase?.recruitmentRef
+      ? db.getRecruitmentInterviewTemplate(interviewCase.recruitmentRef)
+      : undefined;
+    return {
+      ...caseSummary,
+      ...(interviewCase
+        ? {
+            candidateRef: interviewCase.candidateRef,
+            recruitmentRef: interviewCase.recruitmentRef,
+            candidateJourney: buildCandidateJourney({
+              template,
+              interviewCase,
+              plannedStepIds: plan?.stepIds,
+            }),
+          }
+        : {}),
+    };
+  });
+  const reviews = db.listOpenReviews(limit).map((review) => {
+    const context = reviewContext(db, review);
+    const template = context.recruitmentRef
+      ? db.getRecruitmentInterviewTemplate(context.recruitmentRef)
+      : undefined;
+    const matchedCase = currentCaseForJourney(db, {
+      candidateRef: context.candidateRef,
+      recruitmentRef: context.recruitmentRef,
+      currentStepId: context.currentStepId ?? undefined,
+    });
+    return {
+      id: review.id,
+      caseId: review.caseId,
+      reviewType: review.reviewType,
+      reason: review.reason,
+      createdAt: review.createdAt,
+      ...context,
+      candidateJourney: buildCandidateJourney({
+        template,
+        currentStepId: context.currentStepId ?? undefined,
+        interviewCase: matchedCase?.interviewCase,
+        plannedStepIds: matchedCase?.plan?.stepIds,
+      }),
+    };
+  });
   const decisions = db
     .listInterviewSkillDecisions({ status: "PENDING", limit })
     .map((decision) => decisionSummary(db, decision));
@@ -259,7 +319,10 @@ export function getDashboardSnapshot(db: BridgeDatabase, limit = 100) {
   });
 
   return {
-    dashboard: dashboardWithFreshness,
+    dashboard: {
+      ...dashboardWithFreshness,
+      cases: dashboardCases,
+    },
     reviews,
     decisions,
     heldWork: [...heldReviewWork, ...heldCaseWork]

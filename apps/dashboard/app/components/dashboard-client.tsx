@@ -9,7 +9,7 @@ import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog";
-import type { CandidateCase, DashboardSnapshot, Decision, EvaluationSummary, HeldWork, InterviewCaseStatus, Review } from "../lib/dashboard-types";
+import type { CandidateCase, CandidateJourney, DashboardSnapshot, Decision, EvaluationSummary, HeldWork, InterviewCaseStatus, Review } from "../lib/dashboard-types";
 
 type ActionPriority = "urgent" | "normal" | "watch";
 type ActionQueue = "ACTION" | "WAITING" | "EXCEPTION";
@@ -18,7 +18,7 @@ type ActionItem = {
   id: string;
   queue: ActionQueue;
   priority: ActionPriority;
-  journeyIndex: number;
+  candidateJourney?: CandidateJourney | null;
   category: string;
   title: string;
   description: string;
@@ -184,18 +184,6 @@ function stageLabel(interviewCase: CandidateCase) {
   return name;
 }
 
-function journeyIndexForStatus(status: InterviewCaseStatus) {
-  if (["READY_FOR_DRAFT", "DRAFT_CREATED"].includes(status)) return 0;
-  if (["REQUEST_SENT", "COLLECTING_AVAILABILITY"].includes(status)) return 1;
-  if (["READY_TO_SCHEDULE", "REVIEW_REQUIRED"].includes(status)) return 2;
-  if (status === "AWAITING_CANDIDATE_CONFIRMATION") return 3;
-  return 4;
-}
-
-function journeyIndexForReview(review: Review) {
-  return review.reviewType === "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED" ? 3 : 0;
-}
-
 function reviewCategory(review: Review) {
   const labels: Record<string, string> = {
     INTERVIEW_ARRANGEMENT_START_REQUIRED: "조율 시작 확인",
@@ -234,7 +222,7 @@ function caseAction(interviewCase: CandidateCase): ActionItem | undefined {
   const base = {
     id: `case:${interviewCase.id}`,
     caseId: interviewCase.id,
-    journeyIndex: journeyIndexForStatus(interviewCase.status),
+    candidateJourney: interviewCase.candidateJourney,
     candidateName: interviewCase.candidateName,
     recruitmentName: interviewCase.recruitmentName,
     href: `/cases/${interviewCase.id}`,
@@ -333,6 +321,7 @@ function caseAction(interviewCase: CandidateCase): ActionItem | undefined {
 
 function buildActionItems(data: DashboardSnapshot): ActionItem[] {
   const casesById = new Map(data.dashboard.cases.map((interviewCase) => [interviewCase.id, interviewCase]));
+  const reviewsById = new Map(data.reviews.map((review) => [review.id, review]));
   const caseIdsWithDecision = new Set(data.decisions.map((decision) => decision.caseId).filter((caseId): caseId is string => Boolean(caseId)));
   const reviewIdsWithDecision = new Set(data.decisions.map((decision) => decision.reviewId).filter((reviewId): reviewId is string => Boolean(reviewId)));
 
@@ -340,9 +329,9 @@ function buildActionItems(data: DashboardSnapshot): ActionItem[] {
     id: `decision:${decision.id}`,
     queue: "ACTION",
     priority: "urgent",
-    journeyIndex: decision.caseId && casesById.get(decision.caseId)
-      ? journeyIndexForStatus(casesById.get(decision.caseId)!.status)
-      : 0,
+    candidateJourney: decision.caseId
+      ? casesById.get(decision.caseId)?.candidateJourney
+      : decision.reviewId ? reviewsById.get(decision.reviewId)?.candidateJourney : undefined,
     category: "선택 대기",
     title: decision.title,
     description: decision.prompt,
@@ -364,9 +353,9 @@ function buildActionItems(data: DashboardSnapshot): ActionItem[] {
         id: `review:${review.id}`,
         queue: workerDowntimeAvailabilityReview || interviewerNoResponse ? "WAITING" : integrationRetryExhausted || !supportedReviewDecisionTypes.has(review.reviewType) ? "EXCEPTION" : "ACTION",
         priority: workerDowntimeAvailabilityReview ? "watch" : interviewerNoResponse ? "normal" : supportedReviewDecisionTypes.has(review.reviewType) || integrationRetryExhausted ? "urgent" : "normal",
-        journeyIndex: review.caseId && casesById.get(review.caseId)
-          ? journeyIndexForStatus(casesById.get(review.caseId)!.status)
-          : journeyIndexForReview(review),
+        candidateJourney: review.caseId
+          ? casesById.get(review.caseId)?.candidateJourney
+          : review.candidateJourney,
         category: reviewCategory(review),
         title: integrationRetryExhausted
           ? "자동 재시도가 끝난 연동 오류를 확인해 주세요."
@@ -417,7 +406,7 @@ function buildActionItems(data: DashboardSnapshot): ActionItem[] {
       id: `cancellation-follow-up:${interviewCase.id}`,
       queue: "EXCEPTION" as const,
       priority: "urgent" as const,
-      journeyIndex: journeyIndexForStatus(interviewCase.status),
+      candidateJourney: interviewCase.candidateJourney,
       category: "취소 반영 확인",
       title: "나인하이어의 후보자 일정 취소 반영을 확인해 주세요.",
       description: `${interviewCase.candidateName ?? "후보자 미확인"} · 기존 회의실 예약은 유지합니다.`,
@@ -700,8 +689,6 @@ function TemplatePreviewDialog({ preview, onClose, onSave, loading, error }: {
   );
 }
 
-const actionJourneySteps = ["조율 시작", "면접관 일정", "시간·회의실", "후보자 응답", "최종 확정"];
-
 type InterviewerSlackMappingRequest = {
   kind: "INTERVIEWER_SLACK_MAPPING";
   caseId: string;
@@ -829,50 +816,37 @@ function InterviewerSlackMappingDialog({
   );
 }
 
-function ActionJourney({ currentIndex, compact = false }: { currentIndex: number; compact?: boolean }) {
-  if (compact) {
-    return (
-      <div aria-label={`인터뷰 조율 진행 상태. ${currentIndex + 1}단계 ${actionJourneySteps[currentIndex] ?? "확인 필요"}`} className="grid gap-2">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <span className="text-xs font-semibold tracking-wide text-slate-500">인터뷰 조율 진행</span>
-          <span className="rounded-full bg-blue-50 px-2 py-1 text-xs font-semibold text-blue-700">{currentIndex + 1} / {actionJourneySteps.length} · {actionJourneySteps[currentIndex] ?? "확인 필요"}</span>
-        </div>
-        <ol className="flex items-center gap-1.5" aria-label="인터뷰 조율 5단계">
-          {actionJourneySteps.map((step, index) => {
-            const isComplete = index < currentIndex;
-            const isCurrent = index === currentIndex;
+function CandidateJourneyTimeline({ journey }: { journey: CandidateJourney | null | undefined }) {
+  if (!journey) {
+    return <p className="text-sm text-slate-500">채용 진행 단계를 확인하는 중입니다.</p>;
+  }
+  return (
+    <div aria-label={`채용 진행 상태. 현재 ${journey.currentStageLabel}, ${journey.currentStageDetail}`} className="grid gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="text-xs font-bold tracking-wide text-slate-500">채용 진행</span>
+        <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700">현재 · {journey.currentStageLabel} · {journey.currentStageDetail}</span>
+      </div>
+      <div className="overflow-x-auto pb-1">
+        <ol aria-label="후보자 채용 여정" className="flex min-w-max items-start">
+          {journey.stages.map((stage, index) => {
+            const completed = stage.state === "COMPLETED";
+            const current = stage.state === "CURRENT";
+            const stopped = stage.state === "STOPPED";
             return (
-              <li className="flex items-center gap-1.5" key={step}>
-                <span aria-current={isCurrent ? "step" : undefined} className={`grid size-7 place-items-center rounded-full text-xs font-bold ${isComplete ? "bg-emerald-600 text-white" : isCurrent ? "bg-blue-600 text-white ring-4 ring-blue-100" : "bg-slate-100 text-slate-500"}`}>
-                  {isComplete ? <CheckCircle2 className="size-4" /> : index + 1}
-                </span>
-                {index < actionJourneySteps.length - 1 ? <span className={`h-px w-5 ${isComplete ? "bg-emerald-400" : "bg-slate-200"}`} /> : null}
+              <li className="flex min-w-[7.5rem] flex-1 items-start last:min-w-0" key={stage.id}>
+                <div className="grid min-w-[5.5rem] gap-1.5">
+                  <span aria-current={current ? "step" : undefined} className={`grid size-7 place-items-center rounded-full text-xs font-bold ${completed ? "bg-emerald-600 text-white" : current ? "bg-blue-600 text-white ring-4 ring-blue-100" : stopped ? "bg-rose-600 text-white" : "bg-slate-100 text-slate-500"}`}>
+                    {completed ? <CheckCircle2 className="size-4" /> : index + 1}
+                  </span>
+                  <span className={`text-sm font-semibold leading-5 ${current ? "text-slate-950" : completed ? "text-emerald-700" : stopped ? "text-rose-700" : "text-slate-500"}`}>{stage.label}</span>
+                  <span className={`text-xs leading-4 ${current ? "font-medium text-blue-700" : "text-slate-500"}`}>{stage.detail}</span>
+                </div>
+                {index < journey.stages.length - 1 ? <span aria-hidden="true" className={`mt-3 h-px min-w-5 flex-1 ${completed ? "bg-emerald-400" : "bg-slate-200"}`} /> : null}
               </li>
             );
           })}
         </ol>
-        <p className="text-sm font-medium text-slate-600"><span className="font-semibold text-slate-900">현재 처리.</span> {actionJourneySteps[currentIndex] ?? "확인 필요"}</p>
       </div>
-    );
-  }
-
-  return (
-    <div className="overflow-x-auto pb-1">
-      <ol aria-label="인터뷰 조율 진행 상태" className="grid min-w-[34rem] grid-cols-5">
-        {actionJourneySteps.map((step, index) => {
-          const isComplete = index < currentIndex;
-          const isCurrent = index === currentIndex;
-          return (
-            <li className="relative grid justify-items-center gap-2 text-center" key={step}>
-              {index < actionJourneySteps.length - 1 ? <span className={`absolute left-[calc(50%+1.25rem)] top-5 h-px w-[calc(100%-2.5rem)] ${isComplete ? "bg-emerald-400" : "bg-slate-200"}`} /> : null}
-              <span aria-current={isCurrent ? "step" : undefined} className={`relative z-10 grid size-10 place-items-center rounded-full text-sm font-bold ${isComplete ? "bg-emerald-600 text-white" : isCurrent ? "bg-blue-600 text-white ring-4 ring-blue-100" : "bg-slate-100 text-slate-500"}`}>
-                {isComplete ? <CheckCircle2 className="size-5" /> : index + 1}
-              </span>
-              <span className={`whitespace-nowrap text-sm font-semibold ${isCurrent ? "text-slate-950" : isComplete ? "text-emerald-700" : "text-slate-500"}`}>{step}</span>
-            </li>
-          );
-        })}
-      </ol>
     </div>
   );
 }
@@ -1140,7 +1114,7 @@ function ActionRow({ item, onCreateReviewDecision, onCreateCaseDecision, onOpenD
         </div>
         <h3 className="mt-3 text-xl font-semibold tracking-[-0.025em] text-slate-950">{item.candidateName ?? "후보자 확인 필요"}</h3>
         <p className="mt-1 text-base text-slate-600">{item.recruitmentName ?? "채용 정보 확인 필요"}</p>
-        <div className="mt-4 border-y border-slate-100 py-4"><ActionJourney compact currentIndex={item.journeyIndex} /></div>
+        <div className="mt-4 border-y border-slate-100 py-4"><CandidateJourneyTimeline journey={item.candidateJourney} /></div>
         <p className="mt-4 text-base font-medium leading-6 text-slate-800">{item.title}</p>
         <p className="mt-1 text-sm leading-6 text-slate-600">{item.description}</p>
       </div>

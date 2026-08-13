@@ -208,4 +208,70 @@ describe("dashboard service", () => {
       }),
     ]);
   });
+
+  it("shows a recruitment-specific journey instead of a fixed scheduling sequence", () => {
+    db = new BridgeDatabase(":memory:");
+    db.upsertRecruitmentInterviewTemplate({
+      recruitmentId: "R-JOURNEY",
+      recruitmentName: "1day 및 CEO 인터뷰 채용",
+      pipelineHash: "journey-pipeline",
+      steps: [
+        {
+          stepId: "S-ONE-DAY",
+          title: "실무자 , 임원 면접",
+          name: "실무자 , 임원 면접",
+          order: 2,
+          mode: "COMBINED",
+          durationMinutes: 60,
+        },
+        {
+          stepId: "S-CEO",
+          title: "CEO 인터뷰",
+          name: "CEO 인터뷰",
+          order: 3,
+          mode: "STANDARD",
+          durationMinutes: 60,
+        },
+      ],
+      routes: [
+        { triggerStepId: "S-ONE-DAY", mode: "COMBINED", stepIds: ["S-ONE-DAY"] },
+        { triggerStepId: "S-CEO", mode: "STANDARD", stepIds: ["S-CEO"] },
+      ],
+    });
+    db.createReview({
+      reviewType: "INTERVIEW_ARRANGEMENT_START_REQUIRED",
+      reason: "CEO 인터뷰 조율 승인 필요",
+      summary: {
+        context: {
+          candidateRef: "C-JOURNEY",
+          candidateName: "여정 후보자",
+          recruitmentRef: "R-JOURNEY",
+          recruitmentName: "1day 및 CEO 인터뷰 채용",
+        },
+        evaluation: {
+          applicantProgressId: "C-JOURNEY",
+          recruitmentId: "R-JOURNEY",
+          currentStep: { stepId: "S-CEO", name: "CEO 인터뷰", order: 3 },
+          scoreSheets: [{
+            scoreSheetId: "CEO-READY",
+            title: "2차 인터뷰 전형 평가표",
+            evaluators: [],
+          }],
+        },
+      },
+    });
+
+    const snapshot = getDashboardSnapshot(db);
+
+    expect(snapshot.reviews[0]?.candidateJourney).toEqual({
+      currentStageLabel: "CEO 인터뷰",
+      currentStageDetail: "일정 조율 시작 대기",
+      stages: [
+        expect.objectContaining({ label: "서류 평가", state: "COMPLETED", detail: "완료" }),
+        expect.objectContaining({ label: "실무자·임원 1day 인터뷰", state: "COMPLETED", detail: "완료" }),
+        expect.objectContaining({ label: "CEO 인터뷰", state: "CURRENT", detail: "일정 조율 시작 대기" }),
+        expect.objectContaining({ label: "최종 결과", state: "UPCOMING", detail: "결과 대기" }),
+      ],
+    });
+  });
 });

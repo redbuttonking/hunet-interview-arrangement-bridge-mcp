@@ -1,6 +1,7 @@
 // 대시보드 서버 화면에서 로컬 운영 데이터를 안전하게 읽는다.
 import { getConfig } from "../../../../dist/src/config.js";
 import { BridgeDatabase } from "../../../../dist/src/db/database.js";
+import { buildCandidateJourney } from "../../../../dist/src/dashboard/candidate-journey.js";
 import { getDashboardSnapshot } from "../../../../dist/src/dashboard/service.js";
 import type { DashboardSnapshot } from "./dashboard-types";
 
@@ -36,6 +37,10 @@ export function loadCaseDetail(caseId: string) {
       })
       .filter((segment): segment is NonNullable<typeof segment> => Boolean(segment))
       .sort((left, right) => left.sequenceIndex - right.sequenceIndex || `${left.date}T${left.startTime}`.localeCompare(`${right.date}T${right.startTime}`));
+    const template = bundle.interviewCase.recruitmentRef
+      ? db.getRecruitmentInterviewTemplate(bundle.interviewCase.recruitmentRef) ?? null
+      : null;
+    const plan = db.getCaseInterviewPlan(caseId) ?? null;
     return {
       bundle: {
         ...bundle,
@@ -44,10 +49,13 @@ export function loadCaseDetail(caseId: string) {
           candidateScheduleProposalSent: db.hasCandidateScheduleProposalSent(caseId),
         },
       },
-      plan: db.getCaseInterviewPlan(caseId) ?? null,
-      template: bundle.interviewCase.recruitmentRef
-        ? db.getRecruitmentInterviewTemplate(bundle.interviewCase.recruitmentRef) ?? null
-        : null,
+      plan,
+      template,
+      candidateJourney: buildCandidateJourney({
+        template: template ?? undefined,
+        interviewCase: bundle.interviewCase,
+        plannedStepIds: plan?.stepIds,
+      }),
       scheduledSegments,
       events: db.listCaseEvents(caseId, 100),
     };

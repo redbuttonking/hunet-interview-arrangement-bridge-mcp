@@ -14,6 +14,8 @@ export type InterviewCaseStatus =
 
 export type CandidateCase = {
   id: string;
+  candidateRef?: string | null;
+  recruitmentRef?: string | null;
   candidateName: string | null;
   recruitmentName: string | null;
   status: InterviewCaseStatus;
@@ -50,6 +52,18 @@ export type CandidateCase = {
     stepNames: string[];
     durationMinutes: number;
   } | null;
+  candidateJourney?: CandidateJourney | null;
+};
+
+export type CandidateJourney = {
+  stages: Array<{
+    id: string;
+    label: string;
+    state: "COMPLETED" | "CURRENT" | "UPCOMING" | "STOPPED";
+    detail: string;
+  }>;
+  currentStageLabel: string;
+  currentStageDetail: string;
 };
 
 export type Review = {
@@ -61,6 +75,7 @@ export type Review = {
   recruitmentName: string | null;
   currentStepName: string | null;
   evaluationSummary: EvaluationSummary | null;
+  candidateJourney?: CandidateJourney | null;
   createdAt: string;
 };
 
