@@ -63,3 +63,14 @@ export function loadCaseDetail(caseId: string) {
     db.close();
   }
 }
+
+export function loadReviewDetail(reviewId: string) {
+  const snapshot = loadDashboardSnapshot();
+  const review = snapshot.reviews.find((item) => item.id === reviewId);
+  if (!review) return undefined;
+  return {
+    review,
+    decision: snapshot.decisions.find((item) => item.reviewId === reviewId) ?? null,
+    workerStatus: snapshot.dashboard.summary.worker.status,
+  };
+}

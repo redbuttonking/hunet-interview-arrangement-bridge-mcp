@@ -342,6 +342,7 @@ function buildActionItems(data: DashboardSnapshot): ActionItem[] {
     actionLabel: "결정 계속하기",
     href: decision.caseId ? `/cases/${decision.caseId}` : null,
     decision,
+    review: decision.reviewId ? reviewsById.get(decision.reviewId) : undefined,
   }));
   const reviewItems: ActionItem[] = data.reviews
     .filter((review) => !reviewIdsWithDecision.has(review.id))
@@ -1071,6 +1072,7 @@ function ActionRow({ item, onCreateReviewDecision, onCreateCaseDecision, onOpenD
 }) {
   const directDecision = item.decision;
   const review = item.review;
+  const detailHref = item.href ?? (review ? `/reviews/${review.id}` : null);
   const actionableReview = Boolean(review && supportedReviewDecisionTypes.has(review.reviewType));
   const priority = priorityStyle(item.priority);
   const actionKind = directDecision ? "결정 재개" : actionableReview ? "검토 필요" : item.caseSkillKey ? "다음 단계 선택" : "상세 확인";
@@ -1112,7 +1114,7 @@ function ActionRow({ item, onCreateReviewDecision, onCreateCaseDecision, onOpenD
             </details>
           ) : null}
         </div>
-        <h3 className="mt-3 text-xl font-semibold tracking-[-0.025em] text-slate-950">{item.candidateName ?? "후보자 확인 필요"}</h3>
+        {detailHref ? <Link className="mt-3 inline-block text-xl font-semibold tracking-[-0.025em] text-slate-950 underline decoration-slate-300 decoration-2 underline-offset-4 transition-colors hover:text-blue-700 hover:decoration-blue-300" href={detailHref}>{item.candidateName ?? "후보자 확인 필요"}</Link> : <h3 className="mt-3 text-xl font-semibold tracking-[-0.025em] text-slate-950">{item.candidateName ?? "후보자 확인 필요"}</h3>}
         <p className="mt-1 text-base text-slate-600">{item.recruitmentName ?? "채용 정보 확인 필요"}</p>
         <div className="mt-4 border-y border-slate-100 py-4"><CandidateJourneyTimeline journey={item.candidateJourney} /></div>
         <p className="mt-4 text-base font-medium leading-6 text-slate-800">{item.title}</p>
@@ -1128,6 +1130,7 @@ function ActionRow({ item, onCreateReviewDecision, onCreateCaseDecision, onOpenD
           <Button aria-label={`${item.candidateName ?? "후보자"} ${actionHint}`} disabled={loading} onClick={() => onCreateCaseDecision(item.caseId!, item.caseSkillKey!)} title={actionHint}>{loading ? <Loader2 className="size-4 animate-spin" /> : null}{item.actionLabel ?? "결정하기"}<ArrowRight className="size-4" /></Button>
         ) : null}
         {!directDecision && !actionableReview && !item.caseSkillKey && item.href && item.actionLabel ? <Button asChild aria-label={`${item.candidateName ?? "후보자"} ${actionHint}`} title={actionHint} variant="outline"><Link href={item.href}>{item.actionLabel}<ArrowRight className="size-4" /></Link></Button> : null}
+        {detailHref ? <Button asChild size="sm" variant="ghost"><Link href={detailHref}>상세 보기<ArrowRight className="size-3.5" /></Link></Button> : null}
       </div>
     </article>
   );
