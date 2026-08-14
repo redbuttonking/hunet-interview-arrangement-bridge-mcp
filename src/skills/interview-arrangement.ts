@@ -546,7 +546,10 @@ export class InterviewArrangementSkills {
     if (
       !review ||
       review.status !== "OPEN" ||
-      review.reviewType !== "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED" ||
+      ![
+        "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED",
+        "CANDIDATE_MESSAGE_REVIEW_REQUIRED",
+      ].includes(review.reviewType) ||
       !review.caseId
     ) {
       throw new Error(`Open candidate-attendance review not found: ${reviewId}`);

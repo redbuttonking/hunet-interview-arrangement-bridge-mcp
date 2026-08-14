@@ -95,7 +95,12 @@ function createOpenReviewDecision(
     ].includes(review.reviewType)
   ) {
     decision = runtime.skills.createCandidateTriageDecision(reviewId);
-  } else if (review.reviewType === "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED") {
+  } else if (
+    [
+      "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED",
+      "CANDIDATE_MESSAGE_REVIEW_REQUIRED",
+    ].includes(review.reviewType)
+  ) {
     decision = runtime.skills.createCandidateScheduleResponseDecision(reviewId);
   } else if (review.reviewType === "WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED") {
     decision = runtime.skills.createAvailabilityRecoveryDecision(reviewId);

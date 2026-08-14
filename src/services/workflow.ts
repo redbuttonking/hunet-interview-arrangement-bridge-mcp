@@ -667,7 +667,9 @@ export class WorkflowService {
           ? "SCHEDULE_CONFIRMATION_PENDING"
           : input.parsed.eventType === "CANDIDATE_INTERVIEW_ABSENCE"
             ? "CANDIDATE_ATTENDANCE_REVIEW_PENDING"
-          : "IGNORED",
+            : input.parsed.eventType === "CANDIDATE_MESSAGE"
+              ? "CANDIDATE_MESSAGE_REVIEW_PENDING"
+            : "IGNORED",
     );
     if (!stored.inserted) {
       const existing = this.db.getNotification(stored.id);
@@ -689,6 +691,9 @@ export class WorkflowService {
         }
         if (input.parsed.eventType === "CANDIDATE_INTERVIEW_ABSENCE") {
           return this.processCandidateInterviewAbsence(stored.id, input.parsed);
+        }
+        if (input.parsed.eventType === "CANDIDATE_MESSAGE") {
+          return this.processCandidateScheduleMessage(stored.id, input.parsed);
         }
         if (input.parsed.eventType === "EVALUATION_COMPLETED") {
           return await this.processEvaluationLookup(stored.id, input.parsed);
@@ -713,6 +718,15 @@ export class WorkflowService {
       if (input.parsed.eventType === "CANDIDATE_INTERVIEW_ABSENCE") {
         try {
           return this.processCandidateInterviewAbsence(stored.id, input.parsed);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.db.updateNotificationStatus(stored.id, "RETRY_PENDING", message);
+          throw error;
+        }
+      }
+      if (input.parsed.eventType === "CANDIDATE_MESSAGE") {
+        try {
+          return this.processCandidateScheduleMessage(stored.id, input.parsed);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           this.db.updateNotificationStatus(stored.id, "RETRY_PENDING", message);
@@ -2342,6 +2356,58 @@ export class WorkflowService {
     };
   }
 
+  private processCandidateScheduleMessage(
+    notificationId: string,
+    parsed: ParsedSlackNotification,
+  ): { notificationId: string; result: string; caseId?: string } {
+    if (isCandidateInterviewAbsenceText(parsed.text)) {
+      this.db.updateNotificationStatus(notificationId, "IGNORED");
+      return { notificationId, result: "CANDIDATE_ABSENCE_REPROCESS_REQUIRED" };
+    }
+    if (!parsed.candidateName || !parsed.recruitmentName) {
+      this.db.updateNotificationStatus(notificationId, "IGNORED");
+      return { notificationId, result: "CANDIDATE_MESSAGE_CONTEXT_MISSING" };
+    }
+
+    const matches = this.db.findScheduledCandidateCases(
+      parsed.candidateName,
+      parsed.recruitmentName,
+    );
+    if (matches.length !== 1) {
+      this.db.updateNotificationStatus(notificationId, "IGNORED");
+      return { notificationId, result: "CANDIDATE_MESSAGE_NOT_SCHEDULED" };
+    }
+
+    const interviewCase = matches[0]!;
+    this.db.transaction(() => {
+      this.db.setCaseStatus(interviewCase.id, "REVIEW_REQUIRED");
+      this.db.createReview({
+        notificationId,
+        caseId: interviewCase.id,
+        reviewType: "CANDIDATE_MESSAGE_REVIEW_REQUIRED",
+        reason: `The candidate sent a message after receiving an interview schedule proposal. Choose whether to reschedule, cancel, or hold the arrangement.\n\nCandidate message: ${parsed.text}`,
+        summary: {
+          candidateName: parsed.candidateName,
+          recruitmentName: parsed.recruitmentName,
+          messageText: parsed.text,
+          scheduledDate: interviewCase.scheduledDate,
+          scheduledStartTime: interviewCase.scheduledStartTime,
+          scheduledEndTime: interviewCase.scheduledEndTime,
+          scheduledRoomName: interviewCase.scheduledRoomName,
+        },
+      });
+      this.db.addEvent(interviewCase.id, "CANDIDATE_SCHEDULE_MESSAGE_RECEIVED", "NINEHIRE_SLACK", {
+        notificationId,
+      });
+      this.db.updateNotificationStatus(notificationId, "REVIEW_REQUIRED");
+    });
+    return {
+      notificationId,
+      result: "CANDIDATE_SCHEDULE_MESSAGE_REVIEW_REQUIRED",
+      caseId: interviewCase.id,
+    };
+  }
+
   async approveInterviewArrangement(
     input: {
       reviewId: string;
@@ -2846,7 +2912,10 @@ export class WorkflowService {
       !review ||
       review.status !== "OPEN" ||
       !review.caseId ||
-      review.reviewType !== "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED"
+      ![
+        "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED",
+        "CANDIDATE_MESSAGE_REVIEW_REQUIRED",
+      ].includes(review.reviewType)
     ) {
       throw new Error(`Open candidate-attendance review not found: ${input.reviewId}`);
     }

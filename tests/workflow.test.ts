@@ -2214,7 +2214,46 @@ describe("evaluation approval workflow", () => {
     expect(db.listRoomAllocations(caseId)[0]?.status).toBe("CANCELLED");
   });
 
-  it("auto-assigns one cached meeting room for an externally confirmed ready interview", async () => {
+    it("creates a reschedule review for a scheduled candidate message", async () => {
+      db = new BridgeDatabase(":memory:");
+      const ninehire: NinehireWorkflowAdapter = {
+        async lookupCompletedEvaluation() { return { reason: "Not used in this test." }; },
+        async listInterviewers() { return { interviewers: [], unresolvedUserGroups: [] }; },
+        async listInProgressRecruitments() { return { count: 0, limit: 100, offset: 0, recruitments: [] }; },
+      };
+      const workflow = new WorkflowService(db, config, ninehire);
+      const caseId = createAwaitingCandidateConfirmationCase(db, "Candidate message test");
+      const interviewCase = db.getCase(caseId)!;
+
+      await expect(workflow.ingestSlackNotification({
+        channelId: "C1",
+        messageTs: "candidate-message.1",
+        parsed: {
+          eventType: "CANDIDATE_MESSAGE",
+          title: "Candidate message",
+          text: "Candidate message: The proposed time is difficult. Please reschedule.",
+          links: [],
+          payloadHash: "candidate-message-review",
+          payloadJson: "{}",
+          candidateName: interviewCase.candidateName!,
+          recruitmentName: interviewCase.recruitmentName!,
+        },
+      })).resolves.toMatchObject({
+        result: "CANDIDATE_SCHEDULE_MESSAGE_REVIEW_REQUIRED",
+        caseId,
+      });
+      const review = db.listOpenReviews().find(
+        (item) => item.reviewType === "CANDIDATE_MESSAGE_REVIEW_REQUIRED",
+      );
+      expect(review?.reason).toContain("Candidate message:");
+      expect(db.getCase(caseId)?.status).toBe("REVIEW_REQUIRED");
+      expect(workflow.resolveCandidateInterviewAbsenceReview({
+        reviewId: review!.id,
+        action: "RESCHEDULE_USING_EXISTING_AVAILABILITY",
+      })).toMatchObject({ reviewOpen: false, caseId });
+    });
+
+    it("auto-assigns one cached meeting room for an externally confirmed ready interview", async () => {
     db = new BridgeDatabase(":memory:");
     const ninehire: NinehireWorkflowAdapter = {
       async lookupCompletedEvaluation() {
