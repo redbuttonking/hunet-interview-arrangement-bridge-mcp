@@ -14,6 +14,7 @@ data/*.sqlite-wal
 data/backups/
 data/daou-office-profile/
 data/daou-office-chrome-profile/
+data/ninehire-chrome-profile/
 *.log
 *.err
 *.out

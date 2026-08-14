@@ -7,6 +7,11 @@ import { BridgeDatabase, type InterviewSkillDecisionRow } from "../db/database.j
 import { NinehireRecruitmentWorkflowAdapter } from "../ninehire/adapter.js";
 import { NinehireBrowserController } from "../ninehire/browser.js";
 import { NinehireMcpGateway } from "../ninehire/gateway.js";
+import {
+  NinehireScheduleProposalBrowser,
+  NinehireScheduleProposalDispatchUncertainError,
+} from "../ninehire/schedule-proposal-browser.js";
+import { buildCandidateScheduleProposalDraft } from "../ninehire/schedule-proposal.js";
 import { OperationalReadinessService } from "../services/operational-readiness.js";
 import { ScheduleSelectionRevalidationService } from "../services/schedule-selection-revalidation.js";
 import { WorkflowService, type SlackIdentityResolver } from "../services/workflow.js";
@@ -58,6 +63,7 @@ function createRuntime() {
   const skills = new InterviewArrangementSkills(db, workflow, readiness);
   const daouOfficeBrowser = new DaouOfficeBrowserController(config.daouOffice);
   const ninehireBrowser = new NinehireBrowserController(config.ninehire);
+  const ninehireScheduleProposal = new NinehireScheduleProposalBrowser(config.ninehire);
   const daouOffice = new BrowserDaouOfficeReservationAdapter(config.daouOffice);
   const scheduleSelectionRevalidation = new ScheduleSelectionRevalidationService(
     db,
@@ -65,6 +71,7 @@ function createRuntime() {
     skills,
   );
   return {
+    config,
     db,
     skills,
     workflow,
@@ -72,6 +79,7 @@ function createRuntime() {
     slackClient,
     daouOfficeBrowser,
     ninehireBrowser,
+    ninehireScheduleProposal,
     daouOffice,
     scheduleSelectionRevalidation,
   };
@@ -107,6 +115,8 @@ function createOpenReviewDecision(
     decision = runtime.skills.createCandidateScheduleResponseDecision(reviewId);
   } else if (review.reviewType === "WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED") {
     decision = runtime.skills.createAvailabilityRecoveryDecision(reviewId);
+  } else if (review.reviewType === "NINEHIRE_SCHEDULE_PROPOSAL_CONFIRMATION_REQUIRED") {
+    decision = runtime.skills.createCandidateScheduleProposalReconciliationDecision(reviewId);
   } else {
     throw new Error(`Dashboard decision is not available for review type: ${review.reviewType}`);
   }
@@ -208,6 +218,8 @@ export async function resolveDashboardDecision(input: {
 }) {
   const runtime = createRuntime();
   let didResolve = false;
+  let candidateScheduleProposalSentExternally = false;
+  let resolvedCaseId: string | undefined;
   try {
     const optionIds = [...new Set(
       input.optionIds?.filter((optionId) => optionId.trim())
@@ -257,6 +269,7 @@ export async function resolveDashboardDecision(input: {
     });
     didResolve = true;
     const caseId = resolved.decision.caseId;
+    resolvedCaseId = caseId;
     const nextAction = resolved.outcome.nextAction;
     let followUp: unknown;
     if (
@@ -296,6 +309,27 @@ export async function resolveDashboardDecision(input: {
     if (caseId && nextAction === "CREATE_CANDIDATE_SCHEDULE_PROPOSAL_DECISION") {
       followUp = runtime.skills.createCandidateScheduleProposalDecision(caseId);
     }
+    if (caseId && nextAction === "SEND_NINEHIRE_CANDIDATE_SCHEDULE_PROPOSAL") {
+      const bundle = runtime.db.getCaseBundle(caseId);
+      if (!bundle) throw new Error("후보자 일정 제안에 필요한 조율 건을 찾지 못했습니다.");
+      const proposal = buildCandidateScheduleProposalDraft({
+        interviewCase: bundle.interviewCase,
+        plan: runtime.db.getCaseInterviewPlan(caseId),
+        proposalOptions: runtime.db.listCandidateScheduleOptions(caseId),
+        interviewers: bundle.interviewers,
+        appUrl: runtime.config.ninehire.appUrl,
+      });
+      const sent = await runtime.ninehireScheduleProposal.send(proposal);
+      candidateScheduleProposalSentExternally = true;
+      const interviewCase = runtime.db.recordCandidateScheduleProposalSent(caseId);
+      followUp = {
+        kind: "NINEHIRE_SCHEDULE_PROPOSAL_SENT",
+        candidateName: proposal.candidateName,
+        proposalOptions: proposal.proposalOptions,
+        emailTemplateName: sent.emailTemplateName,
+        interviewCase,
+      };
+    }
     if (caseId && nextAction === "SYNC_DAOU_MEETING_ROOM_BLOCKS") {
       const interviewCase = runtime.db.getCase(caseId);
       if (!interviewCase) throw new Error(`Case not found: ${caseId}`);
@@ -329,6 +363,24 @@ export async function resolveDashboardDecision(input: {
     return { ...resolved, followUp };
   } catch (error) {
     const decision = runtime.db.getInterviewSkillDecision(input.decisionId);
+    if (error instanceof NinehireScheduleProposalDispatchUncertainError) {
+      const caseId = resolvedCaseId ?? decision?.caseId;
+      if (caseId) {
+        runtime.db.createReview({
+          caseId,
+          reviewType: "NINEHIRE_SCHEDULE_PROPOSAL_CONFIRMATION_REQUIRED",
+          reason: "Candidate schedule proposal dispatch result could not be verified.",
+          summary: { decisionId: input.decisionId },
+        });
+      }
+      throw error;
+    }
+    if (candidateScheduleProposalSentExternally) {
+      throw new Error(
+        "나인하이어 메일 발송은 완료됐지만 로컬 기록을 마치지 못했습니다. 같은 발송 버튼을 다시 누르지 말고 나인하이어 발송 이력을 확인해 주세요.",
+        { cause: error },
+      );
+    }
     if (
       !didResolve
       && decision?.status === "RESOLVED"

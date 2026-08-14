@@ -263,6 +263,7 @@ export function getCandidateJourneyForCase(
 
 function decisionSummary(db: BridgeDatabase, decision: InterviewSkillDecisionRow) {
   const interviewCase = decision.caseId ? db.getCase(decision.caseId) : undefined;
+  const proposal = record(decision.context.candidateScheduleProposal);
   return {
     id: decision.id,
     skillKey: decision.skillKey,
@@ -280,6 +281,28 @@ function decisionSummary(db: BridgeDatabase, decision: InterviewSkillDecisionRow
     scheduledStartTime: text(decision.context.scheduledStartTime) ?? interviewCase?.scheduledStartTime ?? null,
     scheduledEndTime: text(decision.context.scheduledEndTime) ?? interviewCase?.scheduledEndTime ?? null,
     scheduledRoomName: text(decision.context.scheduledRoomName) ?? interviewCase?.scheduledRoomName ?? null,
+    candidateScheduleProposal: proposal ? {
+      title: text(proposal.title),
+      interviewRound: text(proposal.interviewRound),
+      notice: text(proposal.notice),
+      location: text(proposal.location),
+      durationMinutes: number(proposal.durationMinutes),
+      replyDeadlineDays: number(proposal.replyDeadlineDays),
+      emailTemplateName: text(proposal.emailTemplateName),
+      requiresEmailTemplateSelection: proposal.requiresEmailTemplateSelection === true,
+      internalAttendeeNames: Array.isArray(proposal.internalAttendeeNames)
+        ? proposal.internalAttendeeNames.filter((name): name is string => typeof name === "string")
+        : [],
+      proposalOptions: records(proposal.proposalOptions).flatMap((option) => {
+        const date = text(option.date);
+        const startTime = text(option.startTime);
+        const endTime = text(option.endTime);
+        const roomName = text(option.roomName);
+        return date && startTime && endTime && roomName
+          ? [{ date, startTime, endTime, roomName }]
+          : [];
+      }),
+    } : null,
     createdAt: decision.createdAt,
   };
 }

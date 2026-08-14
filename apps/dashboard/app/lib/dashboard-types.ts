@@ -122,6 +122,23 @@ export type Decision = {
   scheduledStartTime?: string | null;
   scheduledEndTime?: string | null;
   scheduledRoomName?: string | null;
+  candidateScheduleProposal?: {
+    title: string | null;
+    interviewRound: string | null;
+    notice: string | null;
+    location: string | null;
+    durationMinutes: number | undefined;
+    replyDeadlineDays: number | undefined;
+    emailTemplateName: string | null;
+    requiresEmailTemplateSelection: boolean;
+    internalAttendeeNames: string[];
+    proposalOptions: Array<{
+      date: string;
+      startTime: string;
+      endTime: string;
+      roomName: string;
+    }>;
+  } | null;
   createdAt: string;
 };
 

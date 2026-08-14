@@ -528,24 +528,85 @@ describe("interview arrangement skills", () => {
     expect(resolved.decision.selectedOptionId).toBe("CANCEL");
   });
 
-  it("records a candidate schedule proposal only after explicit user confirmation", async () => {
+  it("hands candidate schedule proposal to the external sender before recording it locally", async () => {
     db = new BridgeDatabase(":memory:");
     const interviewCase = db.createInterviewCase({
       candidateName: "Candidate",
+      recruitmentName: "Recruitment",
       proposalDates: ["2026-08-10"],
     });
-    db.setCaseStatus(interviewCase.id, "AWAITING_CANDIDATE_CONFIRMATION");
+    db.setCaseStatus(interviewCase.id, "READY_TO_SCHEDULE");
+    const [block] = db.syncMeetingRoomBlocks(
+      ["2026-08-10"],
+      [{
+        sourceKey: "DAOU:proposal",
+        roomId: "ROOM-1",
+        roomName: "Interview room",
+        reservedBy: "Recruiter",
+        purpose: "Interview",
+        date: "2026-08-10",
+        startTime: "10:00",
+        endTime: "12:00",
+        sourcePayloadHash: "proposal-hash",
+      }],
+    );
+    const allocation = db.allocateRoomBlock({
+      caseId: interviewCase.id,
+      roomBlockId: block!.id,
+      startTime: "10:00",
+      endTime: "11:00",
+    });
+    db.confirmInternalSchedule(interviewCase.id);
+    db.createCandidateScheduleOptions({
+      caseId: interviewCase.id,
+      allocationIds: [allocation.id],
+    });
     const skills = createSkills();
 
     const decision = skills.createCandidateScheduleProposalDecision(interviewCase.id);
     const resolved = await skills.resolveDecision({
       decisionId: decision.id,
-      optionId: "MARK_PROPOSAL_SENT",
+      optionId: "SEND_NINEHIRE_SCHEDULE_PROPOSAL",
     });
 
     expect(resolved).toMatchObject({
-      decision: { status: "RESOLVED", selectedOptionId: "MARK_PROPOSAL_SENT" },
+      decision: { status: "RESOLVED", selectedOptionId: "SEND_NINEHIRE_SCHEDULE_PROPOSAL" },
+      outcome: { nextAction: "SEND_NINEHIRE_CANDIDATE_SCHEDULE_PROPOSAL" },
+    });
+    expect(db.hasCandidateScheduleProposalSent(interviewCase.id)).toBe(false);
+
+    db.recordCandidateScheduleProposalSent(interviewCase.id);
+    expect(db.hasCandidateScheduleProposalSent(interviewCase.id)).toBe(true);
+  });
+
+  it("requires a manual result check when the external schedule proposal dispatch is uncertain", async () => {
+    db = new BridgeDatabase(":memory:");
+    const interviewCase = db.createInterviewCase({
+      candidateName: "Candidate",
+      recruitmentName: "Recruitment",
+      proposalDates: ["2026-08-10"],
+    });
+    db.setCaseStatus(interviewCase.id, "AWAITING_CANDIDATE_CONFIRMATION");
+    const reviewId = db.createReview({
+      caseId: interviewCase.id,
+      reviewType: "NINEHIRE_SCHEDULE_PROPOSAL_CONFIRMATION_REQUIRED",
+      reason: "External dispatch could not be verified.",
+    });
+    const skills = createSkills();
+
+    const decision = skills.createCandidateScheduleProposalReconciliationDecision(reviewId);
+    const resolved = await skills.resolveDecision({
+      decisionId: decision.id,
+      optionId: "MARK_SENT",
+    });
+
+    expect(resolved).toMatchObject({
+      decision: { status: "RESOLVED", selectedOptionId: "MARK_SENT" },
       outcome: { nextAction: "NONE" },
+    });
+    expect(db.getReview(reviewId)).toMatchObject({
+      status: "RESOLVED",
+      resolution: "NINEHIRE_SCHEDULE_PROPOSAL_SENT_CONFIRMED",
     });
     expect(db.hasCandidateScheduleProposalSent(interviewCase.id)).toBe(true);
   });

@@ -9,6 +9,7 @@ import { suggestInterviewSlotsWithRooms } from "../services/room-scheduling.js";
 import { suggestSequentialInterviewSlotsWithRooms } from "../services/sequential-scheduling.js";
 import type { OperationalReadinessService } from "../services/operational-readiness.js";
 import type { WorkflowService } from "../services/workflow.js";
+import { buildCandidateScheduleProposalDraft } from "../ninehire/schedule-proposal.js";
 
 type WorkflowActions = Pick<
   WorkflowService,
@@ -489,33 +490,84 @@ export class InterviewArrangementSkills {
     }
     const proposalOptions = this.db.listCandidateScheduleOptions(caseId)
       .filter((option) => option.status === "PROPOSED");
-    const proposalSummary = proposalOptions
-      .map((option) => `${option.date} ${option.startTime}~${option.endTime}`)
+    const bundle = this.db.getCaseBundle(caseId);
+    if (!bundle) throw new Error("인터뷰 조율 건을 찾지 못했습니다.");
+    const proposal = buildCandidateScheduleProposalDraft({
+      interviewCase,
+      plan: this.db.getCaseInterviewPlan(caseId),
+      proposalOptions,
+      interviewers: bundle.interviewers,
+    });
+    const proposalSummary = proposal.proposalOptions
+      .map((option) => `${option.date} ${option.startTime}~${option.endTime} · ${option.roomName}`)
       .join(" / ");
+    if (proposal.requiresEmailTemplateSelection) {
+      return pendingDecision(this.db, {
+        skillKey: "CANDIDATE_SCHEDULE_PROPOSAL",
+        decisionType: "CANDIDATE_SCHEDULE_EMAIL_TEMPLATE_REQUIRED",
+        fingerprint: `case:${caseId}:candidate-schedule-template`,
+        caseId,
+        title: "CEO 인터뷰 메일 템플릿 확인 필요",
+        prompt: `후보자에게 제안할 일정은 ${proposalSummary}입니다. CEO 인터뷰에 사용할 나인하이어 이메일 템플릿은 아직 정해지지 않았습니다. 템플릿을 지정한 뒤에만 발송할 수 있습니다.`,
+        selectionMode: "SINGLE",
+        options: decisionOptions([
+          ["HOLD_FOR_EMAIL_TEMPLATE", "템플릿 지정 전 보류", "나인하이어 이메일 템플릿을 지정할 때까지 후보자 일정 제안을 발송하지 않습니다."],
+        ]),
+        context: {
+          ...caseContext(this.db, caseId),
+          candidateScheduleProposal: proposal,
+        },
+      });
+    }
     return pendingDecision(this.db, {
       skillKey: "CANDIDATE_SCHEDULE_PROPOSAL",
       decisionType: "CANDIDATE_SCHEDULE_PROPOSAL_SENT",
       fingerprint: `case:${caseId}:candidate-schedule-proposal`,
       caseId,
-      title: "나인하이어 일정 제안 발송 확인",
+      title: "나인하이어 일정 제안 발송",
       prompt:
-        `후보자에게 제안할 일정은 ${proposalSummary || "확인 필요"}입니다. 나인하이어에서 실제 발송을 완료한 뒤에만 완료로 처리하세요. 나인하이어 MCP는 이 발송 이력을 직접 조회할 수 없습니다.`,
+        `후보자에게 제안할 일정은 ${proposalSummary || "확인 필요"}입니다. 제목·장소·면접관·메일 템플릿을 확인한 뒤 명시적으로 발송하세요.`,
       selectionMode: "SINGLE",
       options: decisionOptions([
-        ["MARK_PROPOSAL_SENT", "일정 제안 발송 완료", "후보자에게 보낼 나인하이어 일정 제안이 발송되었음을 로컬 운영 이력에 기록합니다."],
+        ["SEND_NINEHIRE_SCHEDULE_PROPOSAL", "나인하이어 메일 발송", "전용 나인하이어 Chrome에서 후보일을 입력하고 저장된 이메일 템플릿으로 실제 메일을 발송합니다."],
       ]),
       context: {
         ...caseContext(this.db, caseId),
-        scheduledDate: interviewCase.scheduledDate,
-        scheduledStartTime: interviewCase.scheduledStartTime,
-        scheduledEndTime: interviewCase.scheduledEndTime,
-        scheduledRoomName: interviewCase.scheduledRoomName,
-        proposalOptions: proposalOptions.map((option) => ({
-          date: option.date,
-          startTime: option.startTime,
-          endTime: option.endTime,
-          roomName: option.roomName,
-        })),
+        candidateScheduleProposal: proposal,
+      },
+    });
+  }
+
+  createCandidateScheduleProposalReconciliationDecision(reviewId: string): InterviewSkillDecisionRow {
+    const review = this.db.getReview(reviewId);
+    if (
+      !review
+      || review.status !== "OPEN"
+      || !review.caseId
+      || review.reviewType !== "NINEHIRE_SCHEDULE_PROPOSAL_CONFIRMATION_REQUIRED"
+    ) {
+      throw new Error(`Open NineHire schedule proposal reconciliation review not found: ${reviewId}`);
+    }
+    const interviewCase = this.db.getCase(review.caseId);
+    if (!interviewCase) throw new Error("인터뷰 조율 건을 찾지 못했습니다.");
+    return pendingDecision(this.db, {
+      skillKey: "CANDIDATE_SCHEDULE_PROPOSAL",
+      decisionType: "RECONCILE_NINEHIRE_SCHEDULE_PROPOSAL",
+      fingerprint: `review:${reviewId}:candidate-schedule-proposal-reconciliation`,
+      caseId: review.caseId,
+      reviewId: review.id,
+      title: "나인하이어 메일 발송 결과 확인",
+      prompt:
+        `${interviewCase.candidateName ?? "후보자"} 후보자의 일정 제안 메일 발송 완료 화면을 확인하지 못했습니다. 나인하이어 발송 이력을 확인한 뒤 결과를 선택해 주세요.`,
+      selectionMode: "SINGLE",
+      options: decisionOptions([
+        ["MARK_SENT", "발송됨으로 기록", "나인하이어 발송 이력에서 메일 발송을 확인했습니다. 로컬 상태를 후보자 응답 대기로 바꿉니다."],
+        ["RETRY", "발송되지 않음, 다시 시도", "나인하이어 발송 이력에서 미발송을 확인했습니다. 같은 내용의 새 발송 승인 화면으로 돌아갑니다."],
+        ["HOLD", "보류", "발송 여부를 나중에 확인합니다."],
+      ]),
+      context: {
+        ...caseContext(this.db, review.caseId),
+        reviewId: review.id,
       },
     });
   }
@@ -779,12 +831,45 @@ export class InterviewArrangementSkills {
       };
     }
     if (decision.decisionType === "CANDIDATE_SCHEDULE_PROPOSAL_SENT") {
-      if (optionId !== "MARK_PROPOSAL_SENT") {
+      if (optionId !== "SEND_NINEHIRE_SCHEDULE_PROPOSAL") {
         throw new Error(`Unsupported candidate proposal option: ${optionId}`);
       }
       return {
         action: optionId,
-        result: this.db.recordCandidateScheduleProposalSent(requiredCaseId(decision)),
+        nextAction: "SEND_NINEHIRE_CANDIDATE_SCHEDULE_PROPOSAL",
+      };
+    }
+    if (decision.decisionType === "RECONCILE_NINEHIRE_SCHEDULE_PROPOSAL") {
+      const caseId = requiredCaseId(decision);
+      const reviewId = requiredReviewId(decision);
+      if (optionId === "MARK_SENT") {
+        this.db.resolveReview(reviewId, "NINEHIRE_SCHEDULE_PROPOSAL_SENT_CONFIRMED");
+        return {
+          action: optionId,
+          result: this.db.recordCandidateScheduleProposalSent(caseId),
+          nextAction: "NONE",
+        };
+      }
+      if (optionId === "RETRY") {
+        this.db.resolveReview(reviewId, "NINEHIRE_SCHEDULE_PROPOSAL_NOT_SENT");
+        return {
+          action: optionId,
+          nextAction: "CREATE_CANDIDATE_SCHEDULE_PROPOSAL_DECISION",
+        };
+      }
+      throw new Error(`Unsupported candidate proposal reconciliation option: ${optionId}`);
+    }
+    if (decision.decisionType === "CANDIDATE_SCHEDULE_EMAIL_TEMPLATE_REQUIRED") {
+      if (optionId !== "HOLD_FOR_EMAIL_TEMPLATE") {
+        throw new Error(`Unsupported candidate proposal option: ${optionId}`);
+      }
+      return {
+        action: optionId,
+        result: this.db.holdInterviewCase({
+          caseId: requiredCaseId(decision),
+          decisionId: decision.id,
+          note: "CEO 인터뷰 이메일 템플릿 지정 대기",
+        }),
         nextAction: "NONE",
       };
     }
