@@ -469,7 +469,7 @@ export class InterviewArrangementSkills {
       caseId,
       title: "인터뷰 시간과 회의실 선택",
       prompt: "추천 시간과 회의실 중 하나를 내부 확정하세요. 이 단계에서는 Slack 메시지를 발송하지 않습니다.",
-      selectionMode: "SINGLE",
+      selectionMode: "MULTIPLE",
       options: choices.map((choice) => ({
         id: choice.optionId,
         label: `${choice.date} ${choice.startTime}~${choice.endTime} · ${choice.roomName}`,
@@ -487,6 +487,11 @@ export class InterviewArrangementSkills {
     if (this.db.hasCandidateScheduleProposalSent(caseId)) {
       throw new Error("The candidate schedule proposal is already recorded as sent.");
     }
+    const proposalOptions = this.db.listCandidateScheduleOptions(caseId)
+      .filter((option) => option.status === "PROPOSED");
+    const proposalSummary = proposalOptions
+      .map((option) => `${option.date} ${option.startTime}~${option.endTime}`)
+      .join(" / ");
     return pendingDecision(this.db, {
       skillKey: "CANDIDATE_SCHEDULE_PROPOSAL",
       decisionType: "CANDIDATE_SCHEDULE_PROPOSAL_SENT",
@@ -494,7 +499,7 @@ export class InterviewArrangementSkills {
       caseId,
       title: "나인하이어 일정 제안 발송 확인",
       prompt:
-        "나인하이어에서 후보자에게 일정 제안을 발송한 뒤에만 완료로 처리하세요. 현재 나인하이어 MCP는 이 발송 이력을 직접 조회할 수 없습니다.",
+        `후보자에게 제안할 일정은 ${proposalSummary || "확인 필요"}입니다. 나인하이어에서 실제 발송을 완료한 뒤에만 완료로 처리하세요. 나인하이어 MCP는 이 발송 이력을 직접 조회할 수 없습니다.`,
       selectionMode: "SINGLE",
       options: decisionOptions([
         ["MARK_PROPOSAL_SENT", "일정 제안 발송 완료", "후보자에게 보낼 나인하이어 일정 제안이 발송되었음을 로컬 운영 이력에 기록합니다."],
@@ -505,6 +510,12 @@ export class InterviewArrangementSkills {
         scheduledStartTime: interviewCase.scheduledStartTime,
         scheduledEndTime: interviewCase.scheduledEndTime,
         scheduledRoomName: interviewCase.scheduledRoomName,
+        proposalOptions: proposalOptions.map((option) => ({
+          date: option.date,
+          startTime: option.startTime,
+          endTime: option.endTime,
+          roomName: option.roomName,
+        })),
       },
     });
   }
@@ -554,6 +565,8 @@ export class InterviewArrangementSkills {
     ) {
       throw new Error(`Open candidate-attendance review not found: ${reviewId}`);
     }
+    const summary = review.summary ?? {};
+    const interviewCase = this.db.getCase(review.caseId)!;
     return pendingDecision(this.db, {
       skillKey: "CANDIDATE_SCHEDULE_RESPONSE",
       decisionType: "CANDIDATE_INTERVIEW_ABSENCE",
@@ -573,6 +586,11 @@ export class InterviewArrangementSkills {
         ...caseContext(this.db, review.caseId),
         reviewId: review.id,
         reason: review.reason,
+        candidateMessage: text(summary.messageText) ?? null,
+        scheduledDate: text(summary.scheduledDate) ?? interviewCase.scheduledDate,
+        scheduledStartTime: text(summary.scheduledStartTime) ?? interviewCase.scheduledStartTime,
+        scheduledEndTime: text(summary.scheduledEndTime) ?? interviewCase.scheduledEndTime,
+        scheduledRoomName: text(summary.scheduledRoomName) ?? interviewCase.scheduledRoomName,
       },
     });
   }
@@ -583,21 +601,33 @@ export class InterviewArrangementSkills {
 
   async resolveDecision(input: {
     decisionId: string;
-    optionId: string;
+    optionId?: string;
+    optionIds?: string[];
     note?: string;
   }) {
     const decision = this.db.getInterviewSkillDecision(input.decisionId);
     if (!decision || decision.status !== "PENDING") {
       throw new Error(`Pending interview skill decision not found: ${input.decisionId}`);
     }
-    if (!decision.options.some((option) => option.id === input.optionId)) {
-      throw new Error(`Invalid interview skill decision option: ${input.optionId}`);
+    const optionIds = [...new Set(
+      input.optionIds?.filter((optionId) => optionId.trim())
+      ?? (input.optionId ? [input.optionId] : []),
+    )];
+    if (optionIds.length === 0) {
+      throw new Error("Select at least one interview skill decision option.");
     }
-    const outcome = await this.executeDecision(decision, input.optionId, input.note);
+    if (decision.selectionMode === "SINGLE" && optionIds.length !== 1) {
+      throw new Error("This decision requires exactly one option.");
+    }
+    if (optionIds.some((optionId) => !decision.options.some((option) => option.id === optionId))) {
+      throw new Error("Invalid interview skill decision option.");
+    }
+    const primaryOptionId = optionIds[0]!;
+    const outcome = await this.executeDecision(decision, primaryOptionId, input.note, optionIds);
     const resolved = this.db.resolveInterviewSkillDecision({
       decisionId: decision.id,
-      optionId: input.optionId,
-      resolution: outcome,
+      optionId: primaryOptionId,
+      resolution: { ...outcome, selectedOptionIds: optionIds },
     });
     return { decision: resolved, outcome };
   }
@@ -606,6 +636,7 @@ export class InterviewArrangementSkills {
     decision: InterviewSkillDecisionRow,
     optionId: string,
     note?: string,
+    optionIds: string[] = [optionId],
   ): Promise<Record<string, unknown>> {
     if (optionId === "HOLD") {
       const heldCase = decision.caseId
@@ -715,17 +746,34 @@ export class InterviewArrangementSkills {
       };
     }
     if (decision.decisionType === "CONFIRM_STANDARD_SCHEDULE") {
-      const choice = this.standardScheduleChoice(decision, optionId);
-      const allocation = this.db.allocateRoomBlock({
-        caseId: requiredCaseId(decision),
+      const caseId = requiredCaseId(decision);
+      const choices = optionIds.map((selectedOptionId) =>
+        this.standardScheduleChoice(decision, selectedOptionId),
+      );
+      const proposedTimeKeys = new Set(
+        choices.map((choice) => `${choice.date}|${choice.startTime}|${choice.endTime}`),
+      );
+      if (proposedTimeKeys.size !== choices.length) {
+        throw new Error(
+          "후보자에게 제안할 일정은 같은 일시의 회의실 중 하나만 선택해야 합니다.",
+        );
+      }
+      const allocations = choices.map((choice, index) => this.db.allocateRoomBlock({
+        caseId,
         roomBlockId: choice.roomBlockId,
         startTime: choice.startTime,
         endTime: choice.endTime,
+        allowAdditionalForCase: index > 0,
+      }));
+      const schedule = this.db.confirmInternalSchedule(caseId);
+      const candidateScheduleOptions = this.db.createCandidateScheduleOptions({
+        caseId,
+        allocationIds: allocations.map((allocation) => allocation.id),
       });
-      const schedule = this.db.confirmInternalSchedule(requiredCaseId(decision));
       return {
         action: optionId,
-        allocation,
+        allocations,
+        candidateScheduleOptions,
         schedule,
         nextAction: "CREATE_CANDIDATE_SCHEDULE_PROPOSAL_DECISION",
       };
@@ -803,21 +851,46 @@ export class InterviewArrangementSkills {
       };
     }
     if (decision.decisionType === "CONFIRM_SEQUENTIAL_SCHEDULE") {
-      const choice = this.sequentialScheduleChoice(decision, optionId);
-      const allocations = this.db.allocateSequentialRoomBlocks({
-        caseId: requiredCaseId(decision),
-        sessions: choice.sessions.map((session) => ({
-          stepId: session.stepId,
-          roomBlockId: session.room.roomBlockId,
-          startTime: session.startTime,
-          endTime: session.endTime,
-        })),
+      const caseId = requiredCaseId(decision);
+      const choices = optionIds.map((selectedOptionId) =>
+        this.sequentialScheduleChoice(decision, selectedOptionId),
+      );
+      const proposedTimeKeys = new Set(
+        choices.map((choice) =>
+          `${choice.date}|${choice.sessions[0]?.startTime ?? ""}|${choice.sessions.at(-1)?.endTime ?? ""}`,
+        ),
+      );
+      if (proposedTimeKeys.size !== choices.length) {
+        throw new Error(
+          "후보자에게 제안할 일정은 같은 일시의 회의실 조합 중 하나만 선택해야 합니다.",
+        );
+      }
+      const allocationGroups = choices.map((choice, index) =>
+        this.db.allocateSequentialRoomBlocks({
+          caseId,
+          sessions: choice.sessions.map((session) => ({
+            stepId: session.stepId,
+            roomBlockId: session.room.roomBlockId,
+            startTime: session.startTime,
+            endTime: session.endTime,
+          })),
+          allowAdditionalForCase: index > 0,
+        }),
+      );
+      const schedule = this.db.confirmSequentialInternalSchedule(
+        caseId,
+        allocationGroups[0]!.map((allocation) => allocation.id),
+      );
+      const candidateScheduleOptions = this.db.createSequentialCandidateScheduleOptions({
+        caseId,
+        allocationGroups: allocationGroups.map((allocations) => allocations.map((allocation) => allocation.id)),
       });
-      const schedule = this.db.confirmSequentialInternalSchedule(requiredCaseId(decision));
       return {
         action: optionId,
-        order: choice.order,
-        allocations,
+        order: choices[0]!.order,
+        orders: choices.map((choice) => choice.order),
+        allocations: allocationGroups.flat(),
+        candidateScheduleOptions,
         schedule,
         nextAction: "CREATE_CANDIDATE_SCHEDULE_PROPOSAL_DECISION",
       };
@@ -893,8 +966,8 @@ export class InterviewArrangementSkills {
       ].join(":")).join("|")}`,
       caseId,
       title: "연속 인터뷰 시간과 회의실 선택",
-      prompt: "단계 순서와 회의실 조합을 확인한 뒤 하나를 내부 확정하세요.",
-      selectionMode: "SINGLE",
+      prompt: "후보자에게 제안할 날짜와 회의실 조합을 하나 이상 선택하세요. 같은 일시의 회의실 조합은 하나만 선택할 수 있습니다.",
+      selectionMode: "MULTIPLE",
       options: choices.map((choice) => ({
         id: choice.optionId,
         label: `${choice.date} ${choice.sessions[0]?.startTime ?? ""}~${choice.sessions.at(-1)?.endTime ?? ""}`,

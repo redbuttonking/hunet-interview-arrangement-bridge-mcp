@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { AppConfig } from "../config.js";
 import { BrowserDaouOfficeReservationAdapter } from "../daou-office/adapter.js";
 import { DaouOfficeBrowserController } from "../daou-office/browser.js";
+import { NinehireBrowserController } from "../ninehire/browser.js";
 import {
   BridgeDatabase,
   type InterviewCaseRow,
@@ -117,6 +118,7 @@ export function createBridgeMcpServer(
     identityResolver,
   );
   const daouOfficeBrowser = new DaouOfficeBrowserController(config.daouOffice);
+  const ninehireBrowser = new NinehireBrowserController(config.ninehire);
   const daouOffice =
     dependencies?.daouOffice ??
     new BrowserDaouOfficeReservationAdapter(config.daouOffice);
@@ -215,6 +217,38 @@ export function createBridgeMcpServer(
       },
     },
     async () => result(await daouOfficeBrowser.openLoginWindow()),
+  );
+
+  server.registerTool(
+    "ninehire_browser_status",
+    {
+      title: "나인하이어 자동화 브라우저 상태",
+      description:
+        "나인하이어 일정 제안 자동화에 사용할 전용 Chrome 프로필과 로컬 전용 디버그 연결 상태를 확인합니다. 나인하이어 데이터를 읽거나 변경하지 않습니다.",
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () => result(await ninehireBrowser.status()),
+  );
+
+  server.registerTool(
+    "open_ninehire_login",
+    {
+      title: "나인하이어 자동화 전용 로그인 브라우저 열기",
+      description:
+        "개인 브라우저와 분리된 로컬 Chrome 프로필로 나인하이어를 엽니다. 최초 로그인은 사용자가 직접 수행하며, 후보자 정보 조회나 일정 제안 발송은 하지 않습니다.",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async () => result(await ninehireBrowser.openLoginWindow()),
   );
 
   server.registerTool(
@@ -1268,9 +1302,9 @@ export function createBridgeMcpServer(
   server.registerTool(
     "resolve_candidate_interview_absence_review",
     {
-      title: "후보자 인터뷰 불참 검토 처리",
+      title: "후보자 인터뷰 일정 응답 검토 처리",
       description:
-        "후보자의 불참 메시지에 대해 기존 가능 시간으로 재조율, 면접관 일정 재수집 후 재조율, 인터뷰 취소, 보류 중 하나를 명시적으로 처리합니다. 재조율·취소 시에도 Slack 안내는 초안만 만들고 자동 발송하지 않습니다.",
+        "후보자의 일정 불가·불참·변경 요청 메시지에 대해 기존 가능 시간으로 재조율, 면접관 일정 재수집 후 재조율, 인터뷰 취소, 보류 중 하나를 명시적으로 처리합니다. 재조율·취소 시에도 Slack 안내는 초안만 만들고 자동 발송하지 않습니다.",
       inputSchema: {
         reviewId: z.string().uuid(),
         action: z.enum([

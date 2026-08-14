@@ -9,7 +9,7 @@ describe("BridgeDatabase", () => {
   it("applies every schema migration when the database opens", () => {
     db = new BridgeDatabase(":memory:");
 
-    expect(db.getLatestSchemaVersion()).toBe(22);
+    expect(db.getLatestSchemaVersion()).toBe(24);
   });
 
   it("stores a Slack request channel per recruitment and resolves it for a case", () => {
@@ -1058,6 +1058,179 @@ describe("BridgeDatabase", () => {
     expect(() =>
       db!.cancelRoomAllocation(interviewCase.id, allocation.id),
     ).toThrow("internally confirmed schedule");
+  });
+
+  it("keeps multiple candidate proposal options and releases the unselected room slot", () => {
+    db = new BridgeDatabase(":memory:");
+    const interviewCase = db.createInterviewCase({
+      candidateName: "Candidate",
+      recruitmentName: "Recruitment",
+      proposalDates: ["2026-08-10", "2026-08-11"],
+    });
+    db.setCaseStatus(interviewCase.id, "READY_TO_SCHEDULE");
+    const blocks = db.syncMeetingRoomBlocks(
+      ["2026-08-10", "2026-08-11"],
+      [
+        {
+          sourceKey: "DAOU:proposal-one",
+          roomId: "R1",
+          roomName: "Room one",
+          reservedBy: "Recruiter",
+          purpose: "Interview",
+          date: "2026-08-10",
+          startTime: "10:00",
+          endTime: "12:00",
+          sourcePayloadHash: "proposal-one",
+        },
+        {
+          sourceKey: "DAOU:proposal-two",
+          roomId: "R2",
+          roomName: "Room two",
+          reservedBy: "Recruiter",
+          purpose: "Interview",
+          date: "2026-08-11",
+          startTime: "14:00",
+          endTime: "16:00",
+          sourcePayloadHash: "proposal-two",
+        },
+      ],
+    );
+    const first = db.allocateRoomBlock({
+      caseId: interviewCase.id,
+      roomBlockId: blocks[0]!.id,
+      startTime: "10:00",
+      endTime: "11:00",
+    });
+    const second = db.allocateRoomBlock({
+      caseId: interviewCase.id,
+      roomBlockId: blocks[1]!.id,
+      startTime: "14:00",
+      endTime: "15:00",
+      allowAdditionalForCase: true,
+    });
+    db.confirmInternalSchedule(interviewCase.id);
+    expect(db.createCandidateScheduleOptions({
+      caseId: interviewCase.id,
+      allocationIds: [first.id, second.id],
+    })).toHaveLength(2);
+    db.recordCandidateScheduleProposalSent(interviewCase.id);
+
+    const confirmed = db.recordExternallyConfirmedCandidateSchedule({
+      caseId: interviewCase.id,
+      sourceEventId: "ninehire-confirmation-1",
+      date: "2026-08-11",
+      startTime: "14:00",
+      endTime: "15:00",
+    });
+
+    expect(confirmed).toMatchObject({
+      status: "CONFIRMED",
+      scheduledDate: "2026-08-11",
+      scheduledStartTime: "14:00",
+      scheduledEndTime: "15:00",
+    });
+    expect(db.listCandidateScheduleOptions(interviewCase.id)).toMatchObject([
+      { roomAllocationId: first.id, status: "RELEASED" },
+      { roomAllocationId: second.id, status: "SELECTED" },
+    ]);
+    expect(db.listRoomAllocations(interviewCase.id)).toMatchObject([
+      { id: first.id, status: "CANCELLED" },
+      { id: second.id, status: "ACTIVE" },
+    ]);
+  });
+
+  it("keeps sequential candidate proposal dates as room-allocation groups", () => {
+    db = new BridgeDatabase(":memory:");
+    const interviewCase = db.createInterviewCase({
+      candidateName: "Sequential candidate",
+      recruitmentName: "Recruitment",
+      durationMinutes: 120,
+      proposalDates: ["2026-08-10", "2026-08-11"],
+    });
+    db.upsertCaseInterviewPlan({
+      caseId: interviewCase.id,
+      source: "CANDIDATE_OVERRIDE",
+      mode: "SEQUENTIAL",
+      stepIds: ["S1", "S2"],
+      stepNames: ["First", "Second"],
+      sessions: [
+        { stepId: "S1", stepName: "First", interviewerIds: [] },
+        { stepId: "S2", stepName: "Second", interviewerIds: [] },
+      ],
+      durationMinutes: 120,
+    });
+    db.setCaseStatus(interviewCase.id, "READY_TO_SCHEDULE");
+    const blocks = db.syncMeetingRoomBlocks(
+      ["2026-08-10", "2026-08-11"],
+      [
+        { sourceKey: "one-a", date: "2026-08-10", roomName: "Room 1" },
+        { sourceKey: "one-b", date: "2026-08-10", roomName: "Room 2" },
+        { sourceKey: "two-a", date: "2026-08-11", roomName: "Room 3" },
+        { sourceKey: "two-b", date: "2026-08-11", roomName: "Room 4" },
+      ].map((block) => ({
+        sourceKey: `DAOU:${block.sourceKey}`,
+        roomId: block.sourceKey,
+        roomName: block.roomName,
+        reservedBy: "Recruiter",
+        purpose: "Interview",
+        date: block.date,
+        startTime: "09:00",
+        endTime: "12:00",
+        sourcePayloadHash: block.sourceKey,
+      })),
+    );
+    const first = db.allocateSequentialRoomBlocks({
+      caseId: interviewCase.id,
+      sessions: [
+        { stepId: "S1", roomBlockId: blocks[0]!.id, startTime: "09:00", endTime: "10:00" },
+        { stepId: "S2", roomBlockId: blocks[1]!.id, startTime: "10:00", endTime: "11:00" },
+      ],
+    });
+    const second = db.allocateSequentialRoomBlocks({
+      caseId: interviewCase.id,
+      sessions: [
+        { stepId: "S1", roomBlockId: blocks[2]!.id, startTime: "09:00", endTime: "10:00" },
+        { stepId: "S2", roomBlockId: blocks[3]!.id, startTime: "10:00", endTime: "11:00" },
+      ],
+      allowAdditionalForCase: true,
+    });
+    db.confirmSequentialInternalSchedule(interviewCase.id, first.map((allocation) => allocation.id));
+    const options = db.createSequentialCandidateScheduleOptions({
+      caseId: interviewCase.id,
+      allocationGroups: [
+        first.map((allocation) => allocation.id),
+        second.map((allocation) => allocation.id),
+      ],
+    });
+    expect(options).toHaveLength(2);
+    expect(db.listCandidateScheduleOptionSegments(options[0]!.id)).toHaveLength(2);
+    db.recordCandidateScheduleProposalSent(interviewCase.id);
+
+    const confirmed = db.recordExternallyConfirmedCandidateSchedule({
+      caseId: interviewCase.id,
+      sourceEventId: "confirmation-2",
+      date: "2026-08-11",
+      startTime: "09:00",
+      endTime: "11:00",
+    });
+
+    expect(confirmed).toMatchObject({
+      status: "CONFIRMED",
+      scheduledDate: "2026-08-11",
+      scheduledStartTime: "09:00",
+      scheduledEndTime: "11:00",
+      scheduledRoomName: "Room 3 → Room 4",
+    });
+    expect(db.listCandidateScheduleOptions(interviewCase.id)).toMatchObject([
+      { id: options[0]!.id, status: "RELEASED" },
+      { id: options[1]!.id, status: "SELECTED" },
+    ]);
+    expect(db.listRoomAllocations(interviewCase.id)).toMatchObject([
+      { id: first[0]!.id, status: "CANCELLED" },
+      { id: first[1]!.id, status: "CANCELLED" },
+      { id: second[0]!.id, status: "ACTIVE" },
+      { id: second[1]!.id, status: "ACTIVE" },
+    ]);
   });
 
   it("reopens a confirmed schedule without reusing stale availability", () => {

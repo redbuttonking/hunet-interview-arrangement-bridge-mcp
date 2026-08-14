@@ -80,6 +80,7 @@ const supportedReviewDecisionTypes = new Set([
   "RECRUITMENT_TEMPLATE_UPDATE_REQUIRED",
   "RECRUITMENT_TEMPLATE_CHECK_REQUIRED",
   "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED",
+  "CANDIDATE_MESSAGE_REVIEW_REQUIRED",
   "WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED",
 ]);
 
@@ -190,6 +191,7 @@ function reviewCategory(review: Review) {
     RECRUITMENT_TEMPLATE_UPDATE_REQUIRED: "인터뷰 규칙 확인",
     RECRUITMENT_TEMPLATE_CHECK_REQUIRED: "인터뷰 규칙 확인",
     CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED: "후보자 응답 확인",
+    CANDIDATE_MESSAGE_REVIEW_REQUIRED: "후보자 응답 확인",
     WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED: "가용시간 복구 확인",
     INTERVIEWER_NO_RESPONSE: "면접관 일정 회신 대기",
     INTEGRATION_RETRY_EXHAUSTED: "연동 재시도 소진",
@@ -201,7 +203,7 @@ function reviewActionLabel(review: Review) {
   if (review.reviewType === "WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED") {
     return "복구 확인";
   }
-  if (review.reviewType === "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED") {
+  if (["CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED", "CANDIDATE_MESSAGE_REVIEW_REQUIRED"].includes(review.reviewType)) {
     return "응답 조치 선택";
   }
   if (
@@ -531,15 +533,36 @@ function DecisionModal({ activeDecision, evaluationSummary, onClose, onResolve, 
   activeDecision: ActiveDecision;
   evaluationSummary?: EvaluationSummary | null;
   onClose: () => void;
-  onResolve: (optionId: string) => void;
+  onResolve: (optionIds: string[]) => void;
   loading: boolean;
 }) {
   const { decision, dismissOnClose } = activeDecision;
-  const [selectedOptionId, setSelectedOptionId] = useState("");
+  const [selectedOptionIds, setSelectedOptionIds] = useState<string[]>([]);
 
   useEffect(() => {
-    setSelectedOptionId("");
+    if (decision.selectionMode !== "MULTIPLE") {
+      setSelectedOptionIds([]);
+      return;
+    }
+    const dates = new Set<string>();
+    const recommended = decision.options.flatMap((option) => {
+      const date = option.label.split(" ")[0] ?? option.id;
+      if (dates.has(date) || dates.size >= 2) return [];
+      dates.add(date);
+      return [option.id];
+    });
+    setSelectedOptionIds(recommended.length > 0 ? recommended : decision.options.slice(0, 1).map((option) => option.id));
   }, [decision.id, decision.options]);
+
+  const toggleOption = (optionId: string) => {
+    if (decision.selectionMode === "SINGLE") {
+      setSelectedOptionIds([optionId]);
+      return;
+    }
+    setSelectedOptionIds((current) => current.includes(optionId)
+      ? current.filter((selected) => selected !== optionId)
+      : [...current, optionId]);
+  };
 
   return (
     <Dialog open onOpenChange={(open) => !open && !loading && onClose()}>
@@ -551,19 +574,20 @@ function DecisionModal({ activeDecision, evaluationSummary, onClose, onResolve, 
         </DialogHeader>
         <p className="text-base leading-7 text-slate-700">{decision.prompt}</p>
         {decision.decisionType === "START_INTERVIEW_ARRANGEMENT" || decision.decisionType === "SELECT_INTERVIEW_ROUTE" || decision.decisionType === "REVIEW_RECRUITMENT_TEMPLATE" ? <EvaluationSummaryPanel evaluation={evaluationSummary} /> : null}
+        {decision.candidateMessage ? <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-4 text-sm leading-6 text-amber-950"><p className="font-semibold">후보자 메시지</p><p className="mt-2 whitespace-pre-wrap">{decision.candidateMessage}</p>{decision.scheduledDate && decision.scheduledStartTime && decision.scheduledEndTime ? <p className="mt-3 border-t border-amber-200 pt-3 text-amber-900">기존 제안. {formatDate(decision.scheduledDate)} {decision.scheduledStartTime}~{decision.scheduledEndTime}{decision.scheduledRoomName ? ` · ${decision.scheduledRoomName}` : ""}</p> : null}</div> : null}
         <p className="rounded-lg bg-slate-50 px-3 py-2 text-sm leading-6 text-slate-600">`선택 적용`을 누르기 전에는 인터뷰 상태나 외부 시스템이 변경되지 않습니다.</p>
         <fieldset className="grid gap-3" aria-label="결정 선택지">
-          <legend className="text-sm font-semibold text-slate-900">처리 방법을 하나 선택해 주세요.</legend>
+          <legend className="text-sm font-semibold text-slate-900">{decision.selectionMode === "MULTIPLE" ? "후보자에게 제안할 일정을 1개 이상 선택해 주세요." : "처리 방법을 하나 선택해 주세요."}</legend>
           {decision.options.map((option) => (
-            <label key={option.id} className={`flex cursor-pointer gap-3 rounded-xl border p-4 transition-colors ${selectedOptionId === option.id ? "border-blue-500 bg-blue-50/70" : "border-slate-200 hover:border-slate-300"}`}>
-              <input className="mt-1 size-4 accent-blue-600" type="radio" name="decision" value={option.id} checked={selectedOptionId === option.id} onChange={() => setSelectedOptionId(option.id)} />
+            <label key={option.id} className={`flex cursor-pointer gap-3 rounded-xl border p-4 transition-colors ${selectedOptionIds.includes(option.id) ? "border-blue-500 bg-blue-50/70" : "border-slate-200 hover:border-slate-300"}`}>
+              <input className="mt-1 size-4 accent-blue-600" type={decision.selectionMode === "MULTIPLE" ? "checkbox" : "radio"} name="decision" value={option.id} checked={selectedOptionIds.includes(option.id)} onChange={() => toggleOption(option.id)} />
               <span><strong className="block text-base text-slate-950">{option.label}</strong><small className="mt-1 block text-sm leading-6 text-slate-600">{option.description}</small></span>
             </label>
           ))}
         </fieldset>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>{dismissOnClose ? "닫기" : "나중에 결정"}</Button>
-          <Button disabled={!selectedOptionId || loading} onClick={() => onResolve(selectedOptionId)}>
+          <Button disabled={selectedOptionIds.length === 0 || loading} onClick={() => onResolve(selectedOptionIds)}>
             {loading ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}선택 적용
           </Button>
         </DialogFooter>
@@ -995,6 +1019,23 @@ function OperationsReadinessCard() {
     }
   };
 
+  const openNinehireLogin = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/operations/ninehire-login", {
+        method: "POST",
+        signal: AbortSignal.timeout(READINESS_REQUEST_TIMEOUT_MS),
+      });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error ?? "나인하이어 로그인 창을 열지 못했습니다.");
+      setLoading(false);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "나인하이어 로그인 창을 열지 못했습니다.");
+      setLoading(false);
+    }
+  };
+
   const retryIntegrationJob = async (jobId: string) => {
     if (!window.confirm("자동 재시도에 실패한 작업을 다시 대기열에 넣을까요? 외부 메시지는 즉시 발송되지 않습니다.")) return;
     setRetryingId(jobId);
@@ -1056,7 +1097,7 @@ function OperationsReadinessCard() {
           })}</div> : <p className="mt-3 rounded-lg bg-emerald-50 px-3 py-2 text-sm leading-6 text-emerald-800">현재 자동으로 복구할 작업이 없습니다.</p>}
           {activeRetries.length > 5 ? <p className="mt-2 text-xs text-slate-500">최근 5건만 표시합니다. 전체 상태는 연결 진단 결과에서 확인하세요.</p> : null}
         </div>
-        <div className="flex flex-wrap gap-2 lg:justify-end"><Button disabled={loading} onClick={() => void load(true)} variant="outline">{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}연결 다시 진단</Button>{!daouConnected ? <Button disabled={loading} onClick={() => void openDaouLogin()} variant="outline">다우오피스 로그인</Button> : null}</div>
+        <div className="flex flex-wrap gap-2 lg:justify-end"><Button disabled={loading} onClick={() => void load(true)} variant="outline">{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}연결 다시 진단</Button>{!daouConnected ? <Button disabled={loading} onClick={() => void openDaouLogin()} variant="outline">다우오피스 로그인</Button> : null}<Button disabled={loading} onClick={() => void openNinehireLogin()} variant="outline">나인하이어 자동화 로그인</Button></div>
         {error ? <p aria-live="assertive" className="lg:col-span-4 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">{error}</p> : null}
       </CardContent>
     </Card>
@@ -1250,9 +1291,11 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
     }
   };
 
-  const resolveDecision = async (optionId: string) => {
+  const resolveDecision = async (optionIds: string[]) => {
     if (!activeDecision) return;
     const decision = activeDecision.decision;
+    const optionId = optionIds[0];
+    if (!optionId) return;
     if (loadingId === decision.id) return;
     setLoadingId(decision.id);
     setError(null);
@@ -1260,7 +1303,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
       const response = await fetch(`/api/decisions/${decision.id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ optionId }),
+        body: JSON.stringify({ optionId, optionIds }),
       });
       const result = await readApiJson<{ error?: string; followUp?: unknown }>(response, "결정문을 처리하지 못했습니다.");
       if (!response.ok) throw new Error(result.error ?? "결정문을 처리하지 못했습니다.");

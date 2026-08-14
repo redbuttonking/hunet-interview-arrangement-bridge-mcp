@@ -160,6 +160,11 @@ function reviewContext(db: BridgeDatabase, review: ReviewRow) {
     currentStepName: evaluation?.currentStep?.name ?? plan?.stepNames.join(
       plan.mode === "SEQUENTIAL" ? " → " : " + ",
     ) ?? null,
+    candidateMessage: text(summary?.messageText),
+    scheduledDate: text(summary?.scheduledDate) ?? interviewCase?.scheduledDate ?? null,
+    scheduledStartTime: text(summary?.scheduledStartTime) ?? interviewCase?.scheduledStartTime ?? null,
+    scheduledEndTime: text(summary?.scheduledEndTime) ?? interviewCase?.scheduledEndTime ?? null,
+    scheduledRoomName: text(summary?.scheduledRoomName) ?? interviewCase?.scheduledRoomName ?? null,
     evaluationSummary: evaluation,
   };
 }
@@ -270,6 +275,11 @@ function decisionSummary(db: BridgeDatabase, decision: InterviewSkillDecisionRow
     caseId: decision.caseId ?? null,
     candidateName: text(decision.context.candidateName) ?? interviewCase?.candidateName ?? null,
     recruitmentName: text(decision.context.recruitmentName) ?? interviewCase?.recruitmentName ?? null,
+    candidateMessage: text(decision.context.candidateMessage),
+    scheduledDate: text(decision.context.scheduledDate) ?? interviewCase?.scheduledDate ?? null,
+    scheduledStartTime: text(decision.context.scheduledStartTime) ?? interviewCase?.scheduledStartTime ?? null,
+    scheduledEndTime: text(decision.context.scheduledEndTime) ?? interviewCase?.scheduledEndTime ?? null,
+    scheduledRoomName: text(decision.context.scheduledRoomName) ?? interviewCase?.scheduledRoomName ?? null,
     createdAt: decision.createdAt,
   };
 }

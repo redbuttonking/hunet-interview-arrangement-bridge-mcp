@@ -74,6 +74,11 @@ export type Review = {
   candidateName: string | null;
   recruitmentName: string | null;
   currentStepName: string | null;
+  candidateMessage?: string | null;
+  scheduledDate?: string | null;
+  scheduledStartTime?: string | null;
+  scheduledEndTime?: string | null;
+  scheduledRoomName?: string | null;
   evaluationSummary: EvaluationSummary | null;
   candidateJourney?: CandidateJourney | null;
   createdAt: string;
@@ -112,6 +117,11 @@ export type Decision = {
   options: Array<{ id: string; label: string; description: string }>;
   candidateName: string | null;
   recruitmentName: string | null;
+  candidateMessage?: string | null;
+  scheduledDate?: string | null;
+  scheduledStartTime?: string | null;
+  scheduledEndTime?: string | null;
+  scheduledRoomName?: string | null;
   createdAt: string;
 };
 

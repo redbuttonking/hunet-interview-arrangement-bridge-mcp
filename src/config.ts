@@ -27,6 +27,9 @@ export interface AppConfig {
     authHeader: string;
     authScheme: string;
     timeoutMs: number;
+    browserProfileDir?: string;
+    remoteDebugPort?: number;
+    chromeExecutablePath?: string;
   };
 }
 
@@ -102,6 +105,13 @@ export function getConfig(): AppConfig {
           ? "Bearer"
           : process.env.NINEHIRE_MCP_AUTH_SCHEME.trim(),
       timeoutMs: positiveInteger("NINEHIRE_MCP_TIMEOUT_MS", 30_000),
+      browserProfileDir: resolve(
+        optional("NINEHIRE_CHROME_PROFILE_DIR") ?? "./data/ninehire-chrome-profile",
+      ),
+      remoteDebugPort: port("NINEHIRE_BROWSER_REMOTE_DEBUG_PORT", 9223),
+      chromeExecutablePath:
+        optional("NINEHIRE_CHROME_EXECUTABLE_PATH") ??
+        "C:/Program Files/Google/Chrome/Application/chrome.exe",
     },
   };
 }

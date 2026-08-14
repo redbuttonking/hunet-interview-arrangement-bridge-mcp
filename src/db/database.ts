@@ -262,6 +262,31 @@ export interface RoomAllocationRow {
   updatedAt: string;
 }
 
+export interface CandidateScheduleOptionRow {
+  id: string;
+  caseId: string;
+  roomAllocationId: string | null;
+  date: string;
+  startTime: string;
+  endTime: string;
+  roomName: string;
+  status: "PROPOSED" | "SELECTED" | "RELEASED";
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CandidateScheduleOptionSegmentRow {
+  id: string;
+  candidateScheduleOptionId: string;
+  roomAllocationId: string;
+  interviewStepId: string | null;
+  sequenceIndex: number;
+  date: string;
+  startTime: string;
+  endTime: string;
+  roomName: string;
+}
+
 export interface ConfirmedInterviewScheduleRow {
   caseId: string;
   roomAllocationId: string | null;
@@ -688,6 +713,35 @@ function toRoomAllocation(row: SqlRow): RoomAllocationRow {
     status: asString(row.status) as RoomAllocationRow["status"],
     createdAt: asString(row.created_at),
     updatedAt: asString(row.updated_at),
+  };
+}
+
+function toCandidateScheduleOption(row: SqlRow): CandidateScheduleOptionRow {
+  return {
+    id: asString(row.id),
+    caseId: asString(row.case_id),
+    roomAllocationId: nullableString(row.room_allocation_id),
+    date: asString(row.date),
+    startTime: asString(row.start_time),
+    endTime: asString(row.end_time),
+    roomName: asString(row.room_name),
+    status: asString(row.status) as CandidateScheduleOptionRow["status"],
+    createdAt: asString(row.created_at),
+    updatedAt: asString(row.updated_at),
+  };
+}
+
+function toCandidateScheduleOptionSegment(row: SqlRow): CandidateScheduleOptionSegmentRow {
+  return {
+    id: asString(row.id),
+    candidateScheduleOptionId: asString(row.candidate_schedule_option_id),
+    roomAllocationId: asString(row.room_allocation_id),
+    interviewStepId: nullableString(row.interview_step_id),
+    sequenceIndex: Number(row.sequence_index),
+    date: asString(row.date),
+    startTime: asString(row.start_time),
+    endTime: asString(row.end_time),
+    roomName: asString(row.room_name),
   };
 }
 
@@ -1518,6 +1572,61 @@ export class BridgeDatabase {
         )
         .run();
     }
+
+    const versionTwentyThree = this.connection
+      .prepare("SELECT version FROM schema_migrations WHERE version = 23")
+      .get() as SqlRow | undefined;
+    if (!versionTwentyThree) {
+      this.connection.exec(`
+        CREATE TABLE IF NOT EXISTS candidate_schedule_options (
+          id TEXT PRIMARY KEY,
+          case_id TEXT NOT NULL REFERENCES interview_cases(id),
+          room_allocation_id TEXT REFERENCES room_allocations(id),
+          date TEXT NOT NULL,
+          start_time TEXT NOT NULL,
+          end_time TEXT NOT NULL,
+          room_name TEXT NOT NULL,
+          status TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS candidate_schedule_options_case_status
+          ON candidate_schedule_options(case_id, status, date, start_time);
+      `);
+      this.connection
+        .prepare(
+          "INSERT INTO schema_migrations(version, applied_at) VALUES (23, datetime('now'))",
+        )
+        .run();
+    }
+
+    const versionTwentyFour = this.connection
+      .prepare("SELECT 1 FROM schema_migrations WHERE version = 24")
+      .get();
+    if (!versionTwentyFour) {
+      this.connection.exec(`
+        CREATE TABLE IF NOT EXISTS candidate_schedule_option_segments (
+          id TEXT PRIMARY KEY,
+          candidate_schedule_option_id TEXT NOT NULL REFERENCES candidate_schedule_options(id),
+          room_allocation_id TEXT NOT NULL REFERENCES room_allocations(id),
+          interview_step_id TEXT,
+          sequence_index INTEGER NOT NULL,
+          date TEXT NOT NULL,
+          start_time TEXT NOT NULL,
+          end_time TEXT NOT NULL,
+          room_name TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS candidate_schedule_option_segments_option
+          ON candidate_schedule_option_segments(candidate_schedule_option_id, sequence_index);
+        CREATE INDEX IF NOT EXISTS candidate_schedule_option_segments_allocation
+          ON candidate_schedule_option_segments(room_allocation_id);
+      `);
+      this.connection
+        .prepare(
+          "INSERT INTO schema_migrations(version, applied_at) VALUES (24, datetime('now'))",
+        )
+        .run();
+    }
   }
 
   transaction<T>(operation: () => T): T {
@@ -1576,6 +1685,8 @@ export class BridgeDatabase {
   clearOperationalData(): OperationalDataResetResult {
     return this.transaction(() => {
       const tables = [
+        ["후보자 제안 일정 세부 구간", "candidate_schedule_option_segments"],
+        ["후보자 제안 일정", "candidate_schedule_options"],
         ["외부 확정 인터뷰", "external_confirmed_interviews"],
         ["인터뷰 결정", "interview_skill_decisions"],
         ["회의실 배정", "room_allocations"],
@@ -3332,6 +3443,250 @@ export class BridgeDatabase {
     return Boolean(row);
   }
 
+  listCandidateScheduleOptions(caseId: string): CandidateScheduleOptionRow[] {
+    const rows = this.connection
+      .prepare(`
+        SELECT * FROM candidate_schedule_options
+        WHERE case_id = ?
+        ORDER BY date ASC, start_time ASC, created_at ASC
+      `)
+      .all(caseId) as SqlRow[];
+    return rows.map(toCandidateScheduleOption);
+  }
+
+  listCandidateScheduleOptionSegments(
+    candidateScheduleOptionId: string,
+  ): CandidateScheduleOptionSegmentRow[] {
+    const rows = this.connection
+      .prepare(`
+        SELECT * FROM candidate_schedule_option_segments
+        WHERE candidate_schedule_option_id = ?
+        ORDER BY sequence_index ASC, start_time ASC
+      `)
+      .all(candidateScheduleOptionId) as SqlRow[];
+    return rows.map(toCandidateScheduleOptionSegment);
+  }
+
+  private candidateScheduleOptionAllocationIds(option: CandidateScheduleOptionRow): string[] {
+    const segmentIds = this.listCandidateScheduleOptionSegments(option.id)
+      .map((segment) => segment.roomAllocationId);
+    return segmentIds.length > 0
+      ? segmentIds
+      : option.roomAllocationId
+        ? [option.roomAllocationId]
+        : [];
+  }
+
+  ensureCandidateScheduleOption(caseId: string): CandidateScheduleOptionRow {
+    const existing = this.listCandidateScheduleOptions(caseId)
+      .find((option) => option.status !== "RELEASED");
+    if (existing) return existing;
+    const schedule = this.getConfirmedInterviewSchedule(caseId);
+    if (!schedule) throw new Error("An internally confirmed interview schedule is required.");
+    const now = new Date().toISOString();
+    const id = randomUUID();
+    this.connection
+      .prepare(`
+        INSERT INTO candidate_schedule_options(
+          id, case_id, room_allocation_id, date, start_time, end_time,
+          room_name, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'PROPOSED', ?, ?)
+      `)
+      .run(
+        id,
+        caseId,
+        schedule.roomAllocationId,
+        schedule.date,
+        schedule.startTime,
+        schedule.endTime,
+        schedule.roomName,
+        now,
+        now,
+      );
+    if (schedule.roomAllocationId) {
+      this.connection
+        .prepare(`
+          INSERT INTO candidate_schedule_option_segments(
+            id, candidate_schedule_option_id, room_allocation_id, interview_step_id,
+            sequence_index, date, start_time, end_time, room_name
+          ) VALUES (?, ?, ?, NULL, 0, ?, ?, ?, ?)
+        `)
+        .run(
+          randomUUID(),
+          id,
+          schedule.roomAllocationId,
+          schedule.date,
+          schedule.startTime,
+          schedule.endTime,
+          schedule.roomName,
+        );
+    }
+    return this.listCandidateScheduleOptions(caseId).find((option) => option.id === id)!;
+  }
+
+  createCandidateScheduleOptions(input: {
+    caseId: string;
+    allocationIds: string[];
+  }): CandidateScheduleOptionRow[] {
+    const interviewCase = this.getCase(input.caseId);
+    if (!interviewCase || interviewCase.status !== "AWAITING_CANDIDATE_CONFIRMATION") {
+      throw new Error("An internally confirmed interview is required before creating candidate schedule options.");
+    }
+    const allocationIds = [...new Set(input.allocationIds)];
+    if (allocationIds.length === 0) {
+      throw new Error("Select at least one schedule option for the candidate.");
+    }
+    const now = new Date().toISOString();
+    this.transaction(() => {
+      for (const allocationId of allocationIds) {
+        const row = this.connection
+          .prepare(`
+            SELECT allocation.*, block.room_name
+            FROM room_allocations allocation
+            JOIN meeting_room_blocks block ON block.id = allocation.room_block_id
+            WHERE allocation.id = ? AND allocation.case_id = ? AND allocation.status = 'ACTIVE'
+          `)
+          .get(allocationId, input.caseId) as SqlRow | undefined;
+        if (!row) throw new Error("An active room allocation is required for each candidate schedule option.");
+        const optionId = randomUUID();
+        this.connection
+          .prepare(`
+            INSERT INTO candidate_schedule_options(
+              id, case_id, room_allocation_id, date, start_time, end_time,
+              room_name, status, created_at, updated_at
+            )
+            SELECT ?, ?, ?, ?, ?, ?, ?, 'PROPOSED', ?, ?
+            WHERE NOT EXISTS (
+              SELECT 1 FROM candidate_schedule_options WHERE room_allocation_id = ?
+            )
+          `)
+          .run(
+            optionId,
+            input.caseId,
+            allocationId,
+            asString(row.date),
+            asString(row.start_time),
+            asString(row.end_time),
+            asString(row.room_name),
+            now,
+            now,
+            allocationId,
+          );
+        const inserted = this.connection
+          .prepare(`
+            SELECT 1 FROM candidate_schedule_options WHERE id = ?
+          `)
+          .get(optionId);
+        if (inserted) {
+          this.connection
+            .prepare(`
+              INSERT INTO candidate_schedule_option_segments(
+                id, candidate_schedule_option_id, room_allocation_id, interview_step_id,
+                sequence_index, date, start_time, end_time, room_name
+              ) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)
+            `)
+            .run(
+              randomUUID(),
+              optionId,
+              allocationId,
+              nullableString(row.interview_step_id),
+              asString(row.date),
+              asString(row.start_time),
+              asString(row.end_time),
+              asString(row.room_name),
+            );
+        }
+      }
+    });
+    return this.listCandidateScheduleOptions(input.caseId)
+      .filter((option) => allocationIds.includes(option.roomAllocationId ?? ""));
+  }
+
+  createSequentialCandidateScheduleOptions(input: {
+    caseId: string;
+    allocationGroups: string[][];
+  }): CandidateScheduleOptionRow[] {
+    const interviewCase = this.getCase(input.caseId);
+    const plan = this.getCaseInterviewPlan(input.caseId);
+    if (!interviewCase || interviewCase.status !== "AWAITING_CANDIDATE_CONFIRMATION" || plan?.mode !== "SEQUENTIAL") {
+      throw new Error("An internally confirmed sequential interview is required before creating candidate schedule options.");
+    }
+    if (input.allocationGroups.length === 0 || input.allocationGroups.some((group) => group.length !== plan.sessions.length)) {
+      throw new Error("Every candidate schedule option must include every sequential interview stage.");
+    }
+    const now = new Date().toISOString();
+    const createdIds: string[] = [];
+    this.transaction(() => {
+      for (const allocationIds of input.allocationGroups) {
+        const allocations = allocationIds.map((allocationId) => {
+          const row = this.connection
+            .prepare(`
+              SELECT allocation.*, block.room_name
+              FROM room_allocations allocation
+              JOIN meeting_room_blocks block ON block.id = allocation.room_block_id
+              WHERE allocation.id = ? AND allocation.case_id = ? AND allocation.status = 'ACTIVE'
+            `)
+            .get(allocationId, input.caseId) as SqlRow | undefined;
+          if (!row) throw new Error("An active room allocation is required for every sequential candidate option.");
+          return row;
+        }).sort((left, right) => Number(left.sequence_index) - Number(right.sequence_index));
+        const first = allocations[0]!;
+        const last = allocations.at(-1)!;
+        if (
+          allocations.some((row, index) =>
+            asString(row.date) !== asString(first.date)
+            || (index > 0 && asString(row.start_time) !== asString(allocations[index - 1]!.end_time)),
+          )
+        ) {
+          throw new Error("Sequential candidate schedule options must be on one date and contiguous.");
+        }
+        const optionId = randomUUID();
+        this.connection
+          .prepare(`
+            INSERT INTO candidate_schedule_options(
+              id, case_id, room_allocation_id, date, start_time, end_time,
+              room_name, status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'PROPOSED', ?, ?)
+          `)
+          .run(
+            optionId,
+            input.caseId,
+            asString(first.id),
+            asString(first.date),
+            asString(first.start_time),
+            asString(last.end_time),
+            allocations.map((row) => asString(row.room_name)).join(" → "),
+            now,
+            now,
+          );
+        for (const row of allocations) {
+          this.connection
+            .prepare(`
+              INSERT INTO candidate_schedule_option_segments(
+                id, candidate_schedule_option_id, room_allocation_id, interview_step_id,
+                sequence_index, date, start_time, end_time, room_name
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `)
+            .run(
+              randomUUID(),
+              optionId,
+              asString(row.id),
+              nullableString(row.interview_step_id),
+              Number(row.sequence_index),
+              asString(row.date),
+              asString(row.start_time),
+              asString(row.end_time),
+              asString(row.room_name),
+            );
+        }
+        createdIds.push(optionId);
+      }
+    });
+    const created = new Set(createdIds);
+    return this.listCandidateScheduleOptions(input.caseId)
+      .filter((option) => created.has(option.id));
+  }
+
   recordCandidateScheduleProposalSent(caseId: string): InterviewCaseRow {
     const interviewCase = this.getCase(caseId);
     if (!interviewCase) throw new Error(`Case not found: ${caseId}`);
@@ -3340,11 +3695,29 @@ export class BridgeDatabase {
       throw new Error("Only an internally confirmed interview can be marked as proposed to the candidate.");
     }
     if (this.hasCandidateScheduleProposalSent(caseId)) return interviewCase;
+    const options = this.listCandidateScheduleOptions(caseId);
+    const schedule = this.getConfirmedInterviewSchedule(caseId);
+    const plan = this.getCaseInterviewPlan(caseId);
+    const proposalOptions = options.length > 0
+      ? options
+      : schedule && plan?.mode === "SEQUENTIAL"
+        ? this.createSequentialCandidateScheduleOptions({
+          caseId,
+          allocationGroups: [this.listRoomAllocations(caseId)
+            .filter((allocation) => allocation.status === "ACTIVE")
+            .sort((left, right) => left.sequenceIndex - right.sequenceIndex)
+            .map((allocation) => allocation.id)],
+        })
+        : schedule
+          ? [this.ensureCandidateScheduleOption(caseId)]
+          : [];
     this.addEvent(caseId, "CANDIDATE_SCHEDULE_PROPOSAL_SENT", "USER", {
-      date: interviewCase.scheduledDate,
-      startTime: interviewCase.scheduledStartTime,
-      endTime: interviewCase.scheduledEndTime,
-      roomName: interviewCase.scheduledRoomName,
+      options: proposalOptions.map((option) => ({
+        date: option.date,
+        startTime: option.startTime,
+        endTime: option.endTime,
+        roomName: option.roomName,
+      })),
     });
     return this.getCase(caseId)!;
   }
@@ -3352,7 +3725,7 @@ export class BridgeDatabase {
   recordExternallyConfirmedCandidateSchedule(input: {
     caseId: string;
     sourceEventId: string;
-    source?: "NINEHIRE_MCP" | "DAOU_OFFICE_CALENDAR";
+    source?: "NINEHIRE_MCP" | "NINEHIRE_SLACK" | "DAOU_OFFICE_CALENDAR";
     date: string;
     startTime: string;
     endTime: string;
@@ -3380,15 +3753,70 @@ export class BridgeDatabase {
     if (!input.sourceEventId.trim()) {
       throw new Error("An external confirmation source event is required.");
     }
-    if (
+    const matchingOption = this.listCandidateScheduleOptions(input.caseId).find(
+      (option) =>
+        option.status !== "RELEASED"
+        && option.date === input.date
+        && option.startTime === input.startTime
+        && option.endTime === input.endTime,
+    );
+    if (!matchingOption && (
       interviewCase.scheduledDate !== input.date ||
       interviewCase.scheduledStartTime !== input.startTime ||
       interviewCase.scheduledEndTime !== input.endTime
-    ) {
+    )) {
       throw new Error("The externally confirmed schedule does not match the proposed candidate schedule.");
     }
 
     this.transaction(() => {
+      if (matchingOption) {
+        const now = new Date().toISOString();
+        const pendingOptions = this.listCandidateScheduleOptions(input.caseId)
+          .filter((option) => option.status === "PROPOSED" && option.id !== matchingOption.id);
+        for (const option of pendingOptions) {
+          this.connection
+            .prepare(`
+              UPDATE candidate_schedule_options
+              SET status = 'RELEASED', updated_at = ?
+              WHERE id = ?
+            `)
+            .run(now, option.id);
+          for (const allocationId of this.candidateScheduleOptionAllocationIds(option)) {
+            this.connection
+              .prepare(`
+                UPDATE room_allocations
+                SET status = 'CANCELLED', updated_at = ?
+                WHERE id = ? AND status = 'ACTIVE'
+              `)
+              .run(now, allocationId);
+          }
+        }
+        const matchingSegments = this.listCandidateScheduleOptionSegments(matchingOption.id);
+        this.connection
+          .prepare(`
+            UPDATE candidate_schedule_options
+            SET status = 'SELECTED', updated_at = ?
+            WHERE id = ?
+          `)
+          .run(now, matchingOption.id);
+        this.connection
+          .prepare(`
+            UPDATE interview_cases
+            SET scheduled_room_allocation_id = ?, scheduled_room_name = ?,
+                scheduled_date = ?, scheduled_start_time = ?, scheduled_end_time = ?,
+                updated_at = ?
+            WHERE id = ?
+          `)
+          .run(
+            matchingOption.roomAllocationId,
+            matchingSegments.length > 1 ? matchingOption.roomName : null,
+            matchingOption.date,
+            matchingOption.startTime,
+            matchingOption.endTime,
+            now,
+            input.caseId,
+          );
+      }
       this.setCaseStatus(input.caseId, "CONFIRMED");
       this.addEvent(input.caseId, "CANDIDATE_SCHEDULE_CONFIRMED", input.source ?? "NINEHIRE_MCP", {
         sourceEventId: input.sourceEventId,
@@ -3396,6 +3824,7 @@ export class BridgeDatabase {
         startTime: input.startTime,
         endTime: input.endTime,
         sourceLocation: input.sourceLocation ?? null,
+        candidateScheduleOptionId: matchingOption?.id ?? null,
         externalSchedule: true,
       });
     });
@@ -3413,17 +3842,25 @@ export class BridgeDatabase {
     if (interviewCase.status !== "AWAITING_CANDIDATE_CONFIRMATION") {
       throw new Error("The case is not waiting for candidate confirmation.");
     }
-    this.transaction(() => {
-      this.setCaseStatus(input.caseId, "CONFIRMED");
-      this.addEvent(input.caseId, "CANDIDATE_SCHEDULE_CONFIRMED", "NINEHIRE_SLACK", {
-        notificationId: input.notificationId,
-        date: interviewCase.scheduledDate,
-        startTime: interviewCase.scheduledStartTime,
-        endTime: interviewCase.scheduledEndTime,
-        sourceLocation: input.sourceLocation ?? null,
-      });
+    if (
+      !interviewCase.scheduledDate
+      || !interviewCase.scheduledStartTime
+      || !interviewCase.scheduledEndTime
+    ) {
+      throw new Error("The internally confirmed candidate schedule is incomplete.");
+    }
+    if (!this.hasCandidateScheduleProposalSent(input.caseId)) {
+      this.recordCandidateScheduleProposalSent(input.caseId);
+    }
+    return this.recordExternallyConfirmedCandidateSchedule({
+      caseId: input.caseId,
+      sourceEventId: input.notificationId,
+      source: "NINEHIRE_SLACK",
+      date: interviewCase.scheduledDate,
+      startTime: interviewCase.scheduledStartTime,
+      endTime: interviewCase.scheduledEndTime,
+      sourceLocation: input.sourceLocation,
     });
-    return this.getCase(input.caseId)!;
   }
 
   recordExternallyConfirmedSchedule(input: {
@@ -4258,6 +4695,7 @@ export class BridgeDatabase {
     roomBlockId: string;
     startTime: string;
     endTime: string;
+    allowAdditionalForCase?: boolean;
   }): RoomAllocationRow {
     const interviewCase = this.getCase(input.caseId);
     if (!interviewCase) throw new Error(`Case not found: ${input.caseId}`);
@@ -4284,17 +4722,21 @@ export class BridgeDatabase {
           SELECT * FROM room_allocations
           WHERE case_id = ? AND status = 'ACTIVE'
         `)
-        .get(input.caseId) as SqlRow | undefined;
-      if (existingForCase) {
-        const existing = toRoomAllocation(existingForCase);
-        if (
-          existing.roomBlockId === input.roomBlockId &&
-          existing.startTime === input.startTime &&
-          existing.endTime === input.endTime
-        ) {
+        .all(input.caseId) as SqlRow[];
+      if (existingForCase.length > 0) {
+        const existing = existingForCase
+          .map(toRoomAllocation)
+          .find((item) =>
+            item.roomBlockId === input.roomBlockId
+            && item.startTime === input.startTime
+            && item.endTime === input.endTime,
+          );
+        if (existing) {
           return existing;
         }
-        throw new Error("This case already has an active room allocation.");
+        if (!input.allowAdditionalForCase) {
+          throw new Error("This case already has an active room allocation.");
+        }
       }
 
       this.assertNoScheduledRoomConflict({
@@ -4349,6 +4791,7 @@ export class BridgeDatabase {
   allocateSequentialRoomBlocks(input: {
     caseId: string;
     sessions: Array<{ stepId: string; roomBlockId: string; startTime: string; endTime: string }>;
+    allowAdditionalForCase?: boolean;
   }): RoomAllocationRow[] {
     const interviewCase = this.getCase(input.caseId);
     const plan = this.getCaseInterviewPlan(input.caseId);
@@ -4368,7 +4811,10 @@ export class BridgeDatabase {
     ) {
       throw new Error("Allocated stages do not match the sequential interview plan.");
     }
-    if (this.listRoomAllocations(input.caseId).some((allocation) => allocation.status === "ACTIVE")) {
+    if (
+      !input.allowAdditionalForCase
+      && this.listRoomAllocations(input.caseId).some((allocation) => allocation.status === "ACTIVE")
+    ) {
       throw new Error("This case already has active room allocations.");
     }
     const allocations: RoomAllocationRow[] = [];
@@ -4438,7 +4884,10 @@ export class BridgeDatabase {
     return allocations;
   }
 
-  confirmSequentialInternalSchedule(caseId: string): ConfirmedInterviewScheduleRow {
+  confirmSequentialInternalSchedule(
+    caseId: string,
+    allocationIds?: string[],
+  ): ConfirmedInterviewScheduleRow {
     const interviewCase = this.getCase(caseId);
     const plan = this.getCaseInterviewPlan(caseId);
     if (!interviewCase || !plan || plan.mode !== "SEQUENTIAL") {
@@ -4447,10 +4896,14 @@ export class BridgeDatabase {
     if (interviewCase.status !== "READY_TO_SCHEDULE") {
       throw new Error("Only a ready sequential interview can be internally confirmed.");
     }
+    const selectedIds = allocationIds ? new Set(allocationIds) : undefined;
     const allocations = this.listRoomAllocations(caseId)
-      .filter((allocation) => allocation.status === "ACTIVE")
+      .filter((allocation) => allocation.status === "ACTIVE" && (!selectedIds || selectedIds.has(allocation.id)))
       .sort((left, right) => left.sequenceIndex - right.sequenceIndex);
-    if (allocations.length !== plan.sessions.length) {
+    if (
+      allocations.length !== plan.sessions.length
+      || (selectedIds && selectedIds.size !== allocations.length)
+    ) {
       throw new Error("Allocate every sequential interview room slot before confirming.");
     }
     const first = allocations[0]!;

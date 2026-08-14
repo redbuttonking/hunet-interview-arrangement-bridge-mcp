@@ -5,6 +5,7 @@ import { BrowserDaouOfficeReservationAdapter } from "../daou-office/adapter.js";
 import { DaouOfficeBrowserController } from "../daou-office/browser.js";
 import { BridgeDatabase, type InterviewSkillDecisionRow } from "../db/database.js";
 import { NinehireRecruitmentWorkflowAdapter } from "../ninehire/adapter.js";
+import { NinehireBrowserController } from "../ninehire/browser.js";
 import { NinehireMcpGateway } from "../ninehire/gateway.js";
 import { OperationalReadinessService } from "../services/operational-readiness.js";
 import { ScheduleSelectionRevalidationService } from "../services/schedule-selection-revalidation.js";
@@ -56,6 +57,7 @@ function createRuntime() {
   );
   const skills = new InterviewArrangementSkills(db, workflow, readiness);
   const daouOfficeBrowser = new DaouOfficeBrowserController(config.daouOffice);
+  const ninehireBrowser = new NinehireBrowserController(config.ninehire);
   const daouOffice = new BrowserDaouOfficeReservationAdapter(config.daouOffice);
   const scheduleSelectionRevalidation = new ScheduleSelectionRevalidationService(
     db,
@@ -69,6 +71,7 @@ function createRuntime() {
     readiness,
     slackClient,
     daouOfficeBrowser,
+    ninehireBrowser,
     daouOffice,
     scheduleSelectionRevalidation,
   };
@@ -185,6 +188,7 @@ export async function resumeDashboardHeldCase(caseId: string) {
         "RECRUITMENT_TEMPLATE_UPDATE_REQUIRED",
         "RECRUITMENT_TEMPLATE_CHECK_REQUIRED",
         "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED",
+        "CANDIDATE_MESSAGE_REVIEW_REQUIRED",
       ].includes(heldReview.reviewType)
     ) {
       runtime.db.reopenHeldReview(heldReview.id);
@@ -198,22 +202,31 @@ export async function resumeDashboardHeldCase(caseId: string) {
 
 export async function resolveDashboardDecision(input: {
   decisionId: string;
-  optionId: string;
+  optionId?: string;
+  optionIds?: string[];
   note?: string;
 }) {
   const runtime = createRuntime();
   let didResolve = false;
   try {
+    const optionIds = [...new Set(
+      input.optionIds?.filter((optionId) => optionId.trim())
+      ?? (input.optionId ? [input.optionId] : []),
+    )];
+    const primaryOptionId = optionIds[0];
+    if (!primaryOptionId) {
+      throw new Error("Select at least one interview skill decision option.");
+    }
     const existing = runtime.db.getInterviewSkillDecision(input.decisionId);
     if (existing?.status === "RESOLVED") {
-      if (existing.selectedOptionId !== input.optionId) {
+      if (existing.selectedOptionId !== primaryOptionId) {
         throw new Error(
           `Interview skill decision was already resolved with option: ${existing.selectedOptionId ?? "unknown"}`,
         );
       }
       return {
         decision: existing,
-        outcome: existing.resolution ?? { action: input.optionId, nextAction: "NONE" },
+        outcome: existing.resolution ?? { action: primaryOptionId, nextAction: "NONE" },
         followUp: undefined,
       };
     }
@@ -237,7 +250,11 @@ export async function resolveDashboardDecision(input: {
         };
       }
     }
-    const resolved = await runtime.skills.resolveDecision(input);
+    const resolved = await runtime.skills.resolveDecision({
+      ...input,
+      optionId: primaryOptionId,
+      optionIds,
+    });
     didResolve = true;
     const caseId = resolved.decision.caseId;
     const nextAction = resolved.outcome.nextAction;
@@ -245,7 +262,7 @@ export async function resolveDashboardDecision(input: {
     if (
       caseId
       && resolved.decision.decisionType === "SYNC_INTERVIEWERS"
-      && input.optionId === "SYNC_INTERVIEWERS"
+      && primaryOptionId === "SYNC_INTERVIEWERS"
     ) {
       followUp = runtime.skills.createAvailabilityCollectionDecision(caseId);
     }
@@ -315,11 +332,11 @@ export async function resolveDashboardDecision(input: {
     if (
       !didResolve
       && decision?.status === "RESOLVED"
-      && decision.selectedOptionId === input.optionId
+      && decision.selectedOptionId === (input.optionIds?.[0] ?? input.optionId)
     ) {
       return {
         decision,
-        outcome: decision.resolution ?? { action: input.optionId, nextAction: "NONE" },
+        outcome: decision.resolution ?? { action: input.optionIds?.[0] ?? input.optionId ?? "UNKNOWN", nextAction: "NONE" },
         followUp: undefined,
       };
     }
@@ -385,6 +402,15 @@ export async function openDashboardDaouOfficeLogin() {
   const runtime = createRuntime();
   try {
     return runtime.daouOfficeBrowser.openLoginWindow();
+  } finally {
+    runtime.db.close();
+  }
+}
+
+export async function openDashboardNinehireLogin() {
+  const runtime = createRuntime();
+  try {
+    return runtime.ninehireBrowser.openLoginWindow();
   } finally {
     runtime.db.close();
   }

@@ -4,8 +4,11 @@ import { z } from "zod";
 import { resolveDashboardDecision } from "../../../../../../dist/src/dashboard/runtime.js";
 
 const bodySchema = z.object({
-  optionId: z.string().min(1),
+  optionId: z.string().min(1).optional(),
+  optionIds: z.array(z.string().min(1)).min(1).optional(),
   note: z.string().trim().max(500).optional(),
+}).refine((body) => Boolean(body.optionId || body.optionIds?.length), {
+  message: "Select at least one option.",
 });
 
 export const runtime = "nodejs";
@@ -19,7 +22,8 @@ export async function POST(
     const body = bodySchema.parse(await request.json());
     const outcome = await resolveDashboardDecision({
       decisionId: id,
-      optionId: body.optionId,
+      ...(body.optionId ? { optionId: body.optionId } : {}),
+      ...(body.optionIds ? { optionIds: body.optionIds } : {}),
       ...(body.note ? { note: body.note } : {}),
     });
     return NextResponse.json(outcome);
