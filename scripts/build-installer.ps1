@@ -42,6 +42,8 @@ $payloadArchive = Join-Path $stagingRoot "hunet-interview-ops-payload.zip"
 $installerScript = Join-Path $stagingRoot "install.ps1"
 $sedPath = Join-Path $stagingRoot "hunet-interview-ops.sed"
 $installerPath = Join-Path $outputRoot "HunetInterviewOps-Setup.exe"
+$candidateInstallerPath = Join-Path $outputRoot "HunetInterviewOps-Setup.new.exe"
+$previousInstallerPath = Join-Path $outputRoot "HunetInterviewOps-Setup.previous.exe"
 
 if (Test-Path -LiteralPath $stagingRoot) {
     Remove-Item -LiteralPath $stagingRoot -Recurse -Force
@@ -106,7 +108,7 @@ SourceFiles=SourceFiles
 InstallPrompt=
 DisplayLicense=
 FinishMessage=
-TargetName=$installerPath
+TargetName=$candidateInstallerPath
 FriendlyName=Hunet Interview Ops
 AppLaunched=powershell.exe -NoProfile -ExecutionPolicy Bypass -File install.ps1
 PostInstallCmd=<None>
@@ -122,21 +124,51 @@ SourceFiles0=$stagingRoot\
 "@
 Set-Content -LiteralPath $sedPath -Value $sed -Encoding ASCII
 
-if (Test-Path -LiteralPath $installerPath) {
-    Remove-Item -LiteralPath $installerPath -Force
+if (Test-Path -LiteralPath $candidateInstallerPath) {
+    Remove-Item -LiteralPath $candidateInstallerPath -Force
 }
 
 $iexpressProcess = Start-Process -FilePath $iexpressPath -ArgumentList @("/N", "/Q", "/M", $sedPath) -PassThru
-$deadline = (Get-Date).AddMinutes(10)
-while (-not (Test-Path -LiteralPath $installerPath -PathType Leaf) -and (Get-Date) -lt $deadline) {
-    Start-Sleep -Seconds 1
+try {
+    Wait-Process -Id $iexpressProcess.Id -Timeout 600 -ErrorAction Stop
+} catch {
+    Stop-Process -Id $iexpressProcess.Id -Force -ErrorAction SilentlyContinue
+    throw "IExpress 설치 파일 생성 시간이 초과되었습니다. 기존 설치 파일은 유지했습니다."
 }
-if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
-    throw "IExpress 설치 파일 생성에 실패했습니다."
+$iexpressProcess.Refresh()
+if ($iexpressProcess.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $candidateInstallerPath -PathType Leaf)) {
+    throw "IExpress 설치 파일 생성에 실패했습니다. 기존 설치 파일은 유지했습니다."
+}
+$candidateInstaller = Get-Item -LiteralPath $candidateInstallerPath
+if ($candidateInstaller.Length -lt 1MB) {
+    throw "새 설치 파일의 크기가 비정상입니다. 기존 설치 파일은 유지했습니다."
+}
+
+$movedCurrentInstaller = $false
+try {
+    if (Test-Path -LiteralPath $previousInstallerPath) {
+        Remove-Item -LiteralPath $previousInstallerPath -Force
+    }
+    if (Test-Path -LiteralPath $installerPath) {
+        Move-Item -LiteralPath $installerPath -Destination $previousInstallerPath -Force
+        $movedCurrentInstaller = $true
+    }
+    Move-Item -LiteralPath $candidateInstallerPath -Destination $installerPath -Force
+} catch {
+    if ($movedCurrentInstaller -and -not (Test-Path -LiteralPath $installerPath) -and (Test-Path -LiteralPath $previousInstallerPath)) {
+        Move-Item -LiteralPath $previousInstallerPath -Destination $installerPath -Force
+    }
+    throw
 }
 
 if (-not $KeepStaging) {
     Remove-Item -LiteralPath $stagingRoot -Recurse -Force
 }
 
-Get-Item -LiteralPath $installerPath | Select-Object FullName, Length, LastWriteTime
+$installer = Get-Item -LiteralPath $installerPath
+[PSCustomObject]@{
+    FullName = $installer.FullName
+    Length = $installer.Length
+    LastWriteTime = $installer.LastWriteTime
+    Sha256 = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash
+}

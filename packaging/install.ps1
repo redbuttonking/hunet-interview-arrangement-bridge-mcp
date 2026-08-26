@@ -23,6 +23,7 @@ try {
   }
 
   $installedNodePath = Join-Path $installRoot "runtime\node.exe"
+  $installedDatabasePath = Join-Path $installRoot "data\bridge.db"
   if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
     Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
   }
@@ -30,7 +31,28 @@ try {
     Get-Process -Name "node" -ErrorAction SilentlyContinue |
       Where-Object { $_.Path -eq $installedNodePath } |
       Stop-Process -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Milliseconds 500
+    $stopDeadline = (Get-Date).AddSeconds(10)
+    while (
+      (Get-Process -Name "node" -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -eq $installedNodePath }) -and
+      (Get-Date) -lt $stopDeadline
+    ) {
+      Start-Sleep -Milliseconds 250
+    }
+    if (Get-Process -Name "node" -ErrorAction SilentlyContinue |
+      Where-Object { $_.Path -eq $installedNodePath }) {
+      throw "기존 워커 또는 대시보드를 종료하지 못해 업데이트를 중단했습니다."
+    }
+  }
+
+  if (Test-Path -LiteralPath $installedDatabasePath -PathType Leaf) {
+    $backupScript = Join-Path $applicationSource "scripts\backup-existing-database.mjs"
+    $backupNode = Join-Path $applicationSource "runtime\node.exe"
+    $backupDirectory = Join-Path $installRoot "data\backups"
+    & $backupNode $backupScript $installedDatabasePath $backupDirectory
+    if ($LASTEXITCODE -ne 0) {
+      throw "업데이트 전 DB 백업에 실패해 설치를 중단했습니다."
+    }
   }
 
   New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
@@ -43,21 +65,25 @@ try {
     Copy-Item -LiteralPath (Join-Path $seedSource ".env") -Destination $installedEnvPath -Force
   }
 
-  $installedDatabasePath = Join-Path $installRoot "data\bridge.db"
   if (-not (Test-Path -LiteralPath $installedDatabasePath -PathType Leaf)) {
     Copy-Item -LiteralPath (Join-Path $seedSource "bridge.db") -Destination $installedDatabasePath -Force
   }
 
   $nodePath = Join-Path $installRoot "runtime\node.exe"
   $workerEntryPoint = Join-Path $installRoot "dist\src\worker\main.js"
-  if (-not (Test-Path -LiteralPath $nodePath -PathType Leaf) -or -not (Test-Path -LiteralPath $workerEntryPoint -PathType Leaf)) {
+  $workerLauncher = Join-Path $installRoot "scripts\start-worker.cmd"
+  if (
+    -not (Test-Path -LiteralPath $nodePath -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $workerEntryPoint -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $workerLauncher -PathType Leaf)
+  ) {
     throw "워커 실행 파일이 완전하지 않습니다."
   }
 
   $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
   $taskAction = New-ScheduledTaskAction `
-    -Execute $nodePath `
-    -Argument ('"{0}"' -f $workerEntryPoint) `
+    -Execute $env:ComSpec `
+    -Argument ('/d /c ""{0}""' -f $workerLauncher) `
     -WorkingDirectory $installRoot
   $taskTrigger = New-ScheduledTaskTrigger -AtLogOn -User $currentUser
   $taskSettings = New-ScheduledTaskSettingsSet `
@@ -88,6 +114,12 @@ try {
   $shortcut.WorkingDirectory = $installRoot
   $shortcut.Description = "인터뷰 운영 대시보드를 엽니다."
   $shortcut.Save()
+
+  $currentUserSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  & icacls.exe $installRoot /inheritance:r /grant:r "*$currentUserSid`:(OI)(CI)F" "*S-1-5-18`:(OI)(CI)F" "*S-1-5-32-544`:(OI)(CI)F" /T /C | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    throw "설치 폴더의 접근 권한을 안전하게 설정하지 못했습니다."
+  }
 
   Start-Process -FilePath (Join-Path $installRoot "Hunet Interview Ops.cmd")
   Write-Output "설치 완료: $installRoot"
