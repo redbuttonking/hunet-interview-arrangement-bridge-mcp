@@ -61,6 +61,15 @@ describe("operational readiness", () => {
         },
       },
       {
+        async status() {
+          return {
+            connected: true,
+            profileDir: "C:/temp/ninehire-profile",
+            debugUrl: "http://127.0.0.1:9223",
+          };
+        },
+      },
+      {
         auth: {
           async test() {
             slackAuthCalls += 1;
@@ -75,7 +84,10 @@ describe("operational readiness", () => {
     expect(local).toMatchObject({
       overallStatus: "READY",
       externalChecks: { performed: false, checks: { slack: { status: "NOT_RUN" } } },
-      checks: { slack: { latestReconciledMessage: { value: "100.0" } } },
+      checks: {
+        slack: { latestReconciledMessage: { value: "100.0" } },
+        ninehireBrowser: { status: "READY", connected: true },
+      },
     });
     expect(slackAuthCalls).toBe(0);
     expect(ninehireCalls).toBe(0);
@@ -113,6 +125,15 @@ describe("operational readiness", () => {
             connected: true,
             profileDir: "C:/temp/daou-profile",
             debugUrl: "http://127.0.0.1:9222",
+          };
+        },
+      },
+      {
+        async status() {
+          return {
+            connected: true,
+            profileDir: "C:/temp/ninehire-profile",
+            debugUrl: "http://127.0.0.1:9223",
           };
         },
       },
@@ -158,6 +179,15 @@ describe("operational readiness", () => {
         },
       },
       {
+        async status() {
+          return {
+            connected: true,
+            profileDir: "C:/temp/ninehire-profile",
+            debugUrl: "http://127.0.0.1:9223",
+          };
+        },
+      },
+      {
         auth: {
           async test() {
             return {};
@@ -174,5 +204,116 @@ describe("operational readiness", () => {
       status: "ATTENTION",
       reason: "TOOL_LIST_TIMEOUT",
     });
+  });
+
+  it("uses a recent worker sync when a direct external check is unavailable", async () => {
+    db = new BridgeDatabase(":memory:");
+    db.registerWorkerStart({ workerKey: INTERVIEW_BRIDGE_WORKER_KEY });
+    db.setCursor("sync:slack:last_success", new Date().toISOString());
+    db.setCursor("sync:ninehire:last_success", new Date().toISOString());
+    const service = new OperationalReadinessService(
+      config,
+      db,
+      {
+        isConfigured: () => true,
+        async listTools() {
+          throw new Error("network unavailable");
+        },
+      },
+      {
+        async status() {
+          return {
+            connected: true,
+            profileDir: "C:/temp/daou-profile",
+            debugUrl: "http://127.0.0.1:9222",
+          };
+        },
+      },
+      {
+        async status() {
+          return {
+            connected: true,
+            profileDir: "C:/temp/ninehire-profile",
+            debugUrl: "http://127.0.0.1:9223",
+          };
+        },
+      },
+      {
+        auth: {
+          async test() {
+            throw new Error("network unavailable");
+          },
+        },
+      },
+    );
+
+    const result = await service.inspect({ checkExternal: true });
+
+    expect(result).toMatchObject({
+      overallStatus: "READY",
+      externalChecks: {
+        checks: {
+          slack: {
+            status: "READY",
+            verification: "RECENT_WORKER_SYNC",
+            directCheckStatus: "ATTENTION",
+          },
+          ninehire: {
+            status: "READY",
+            verification: "RECENT_WORKER_SYNC",
+            directCheckStatus: "ATTENTION",
+          },
+        },
+      },
+    });
+  });
+
+  it("protects NineHire diagnostics during an API rate-limit cooldown", async () => {
+    db = new BridgeDatabase(":memory:");
+    db.registerWorkerStart({ workerKey: INTERVIEW_BRIDGE_WORKER_KEY });
+    const service = new OperationalReadinessService(
+      config,
+      db,
+      {
+        isConfigured: () => true,
+        async listTools() {
+          throw new Error("API 요청 한도를 초과했습니다. code: 000132");
+        },
+      },
+      {
+        async status() {
+          return {
+            connected: true,
+            profileDir: "C:/temp/daou-profile",
+            debugUrl: "http://127.0.0.1:9222",
+          };
+        },
+      },
+      {
+        async status() {
+          return {
+            connected: true,
+            profileDir: "C:/temp/ninehire-profile",
+            debugUrl: "http://127.0.0.1:9223",
+          };
+        },
+      },
+      {
+        auth: {
+          async test() {
+            return {};
+          },
+        },
+      },
+    );
+
+    const result = await service.inspect({ checkExternal: true });
+
+    expect(result.externalChecks.checks.ninehire).toMatchObject({
+      status: "ATTENTION",
+      reason: "RATE_LIMIT_COOLDOWN",
+    });
+    expect(result.nextActions).not.toContain("CHECK_NINEHIRE_CONNECTION");
+    expect(db.getCursor("ninehire:rate_limit_until")).toBeTruthy();
   });
 });

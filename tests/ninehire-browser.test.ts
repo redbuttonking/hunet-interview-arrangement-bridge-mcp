@@ -22,6 +22,10 @@ describe("NineHire browser profile", () => {
     expect(args).toContain("--remote-debugging-address=127.0.0.1");
     expect(args).toContain("--remote-debugging-port=9223");
     expect(args).toContain("--user-data-dir=C:/temp/ninehire-profile");
+    expect(args).toContain("--disable-gpu");
+    expect(args).toContain("--disable-gpu-compositing");
+    expect(args).toContain("--in-process-gpu");
+    expect(args).toContain("--start-maximized");
     expect(args.at(-1)).toBe("https://app.ninehire.com/workspace");
     expect(ninehireDebugUrl(9223)).toBe("http://127.0.0.1:9223");
   });

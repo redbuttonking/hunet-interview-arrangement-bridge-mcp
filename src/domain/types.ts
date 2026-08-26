@@ -47,9 +47,15 @@ export interface NinehireInterviewer {
   required: boolean;
 }
 
+export interface InterviewerScoreSheetGroup {
+  title: string;
+  interviewerIds: string[];
+}
+
 export interface InterviewerLookup {
   interviewers: NinehireInterviewer[];
   unresolvedUserGroups: string[];
+  scoreSheetGroups?: InterviewerScoreSheetGroup[];
   reason?: string;
 }
 

@@ -1,5 +1,5 @@
 // 평가표 확인 후 사용자 승인으로 면접 조율 건을 만드는 흐름을 검증한다.
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AppConfig } from "../src/config.js";
 import { BridgeDatabase } from "../src/db/database.js";
 import { INTERVIEW_BRIDGE_WORKER_KEY } from "../src/domain/worker-health.js";
@@ -8,7 +8,10 @@ import { WorkflowService } from "../src/services/workflow.js";
 import type { ParsedSlackNotification } from "../src/slack/parser.js";
 
 let db: BridgeDatabase | undefined;
-afterEach(() => db?.close());
+afterEach(() => {
+  vi.useRealTimers();
+  db?.close();
+});
 
 const config: AppConfig = {
   dbPath: ":memory:",
@@ -62,7 +65,18 @@ function createAwaitingCandidateConfirmationCase(
   });
   database.setCaseStatus(interviewCase.id, "READY_TO_SCHEDULE");
   database.confirmInternalSchedule(interviewCase.id);
+  mapCaseToSlackChannel(database, interviewCase.id);
   return interviewCase.id;
+}
+
+function mapCaseToSlackChannel(database: BridgeDatabase, caseId: string, channelId = "C1"): void {
+  const interviewCase = database.getCase(caseId);
+  if (!interviewCase) throw new Error("테스트용 인터뷰 건이 필요합니다.");
+  database.upsertRecruitmentSlackChannel({
+    recruitmentId: interviewCase.recruitmentRef ?? `test:${caseId}`,
+    recruitmentName: interviewCase.recruitmentName ?? `테스트 채용 ${caseId}`,
+    channelId,
+  });
 }
 
 describe("evaluation approval workflow", () => {
@@ -119,13 +133,15 @@ describe("evaluation approval workflow", () => {
 
     await expect(workflow.reconcileReceiptEvaluationCompletions()).resolves.toEqual({
       scanned: 1,
-      queuedForApproval: 1,
+      queuedForLookup: 1,
+      queuedForApproval: 0,
       excluded: 0,
       reviewRequired: 0,
       skipped: 0,
     });
-    expect(db.listOpenReviews()).toMatchObject([
-      { reviewType: "INTERVIEW_ARRANGEMENT_START_REQUIRED" },
+    expect(db.listOpenReviews()).toEqual([]);
+    expect(db.listIntegrationRetryJobs({ status: "PENDING" })).toMatchObject([
+      { jobType: "NINEHIRE_EVALUATION_LOOKUP" },
     ]);
     await expect(workflow.reconcileReceiptEvaluationCompletions()).resolves.toMatchObject({
       scanned: 1,
@@ -262,6 +278,149 @@ describe("evaluation approval workflow", () => {
       evaluation: { currentStep: { stepId: "S2", name: "CEO interview" } },
     });
     expect(db.listInterviewSkillDecisions({ status: "PENDING" })).toEqual([]);
+  });
+
+  it("refreshes one open evaluation review at a time and rotates after the lookup interval", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-25T00:00:00.000Z"));
+    db = new BridgeDatabase(":memory:");
+    const lookupCompletedEvaluation = vi.fn(async (context: { candidateRef?: string }) => {
+      const candidateRef = context.candidateRef ?? "A1";
+      return {
+        context: {
+        candidateRef,
+        candidateName: candidateRef === "A1" ? "Candidate one" : "Candidate two",
+        recruitmentRef: "R1",
+        recruitmentName: "Recruitment",
+      },
+      summary: {
+        applicantProgressId: candidateRef,
+        recruitmentId: "R1",
+        scoreSheets: [],
+      },
+      };
+    });
+    for (const candidateRef of ["A1", "A2"]) {
+      const notification = db.insertNotification({
+        channelId: "C1",
+        messageTs: `refresh-${candidateRef}`,
+        eventType: "EVALUATION_COMPLETED",
+        title: "Evaluation completed",
+        payloadHash: `refresh-${candidateRef}`,
+        payloadJson: "{}",
+        candidateRef,
+        candidateName: candidateRef === "A1" ? "Candidate one" : "Candidate two",
+        recruitmentRef: "R1",
+        recruitmentName: "Recruitment",
+      }, "AWAITING_START_APPROVAL");
+      db.createReview({
+        notificationId: notification.id,
+        reviewType: "INTERVIEW_ARRANGEMENT_START_REQUIRED",
+        reason: "Approval required.",
+        summary: {
+          context: {
+            candidateRef,
+            candidateName: candidateRef === "A1" ? "Candidate one" : "Candidate two",
+            recruitmentRef: "R1",
+            recruitmentName: "Recruitment",
+          },
+          evaluation: {
+            applicantProgressId: candidateRef,
+            recruitmentId: "R1",
+            scoreSheets: [],
+          },
+        },
+      });
+    }
+    const workflow = new WorkflowService(db, config, {
+      lookupCompletedEvaluation,
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    });
+
+    await expect(workflow.refreshOpenInterviewArrangementReviewStages()).resolves.toMatchObject({ scanned: 1 });
+    await expect(workflow.refreshOpenInterviewArrangementReviewStages()).resolves.toMatchObject({ scanned: 0 });
+    vi.advanceTimersByTime(30_000);
+    await expect(workflow.refreshOpenInterviewArrangementReviewStages()).resolves.toMatchObject({ scanned: 1 });
+
+    expect(lookupCompletedEvaluation).toHaveBeenCalledTimes(2);
+    expect(new Set(lookupCompletedEvaluation.mock.calls.map(([context]) => context.candidateRef))).toEqual(
+      new Set(["A1", "A2"]),
+    );
+  });
+
+  it("does not create a duplicate case when the same interview route is approved twice", async () => {
+    db = new BridgeDatabase(":memory:");
+    db.upsertRecruitmentInterviewTemplate({
+      recruitmentId: "R1",
+      recruitmentName: "Recruitment",
+      pipelineHash: "stable-pipeline",
+      steps: [{
+        stepId: "S1",
+        title: "First interview",
+        name: "First interview",
+        order: 2,
+        mode: "STANDARD",
+        durationMinutes: 60,
+      }],
+      routes: [{ triggerStepId: "S1", mode: "STANDARD", stepIds: ["S1"] }],
+    });
+    const workflow = new WorkflowService(db, config, {
+      async lookupCompletedEvaluation() {
+        return { reason: "Not used in this test." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    });
+    const reviewIds: string[] = [];
+    for (const messageTs of ["duplicate-1", "duplicate-2"]) {
+      const notification = db.insertNotification({
+        channelId: "C1",
+        messageTs,
+        eventType: "EVALUATION_COMPLETED",
+        title: "Evaluation completed",
+        payloadHash: messageTs,
+        payloadJson: "{}",
+        candidateRef: "A1",
+        candidateName: "Candidate",
+        recruitmentRef: "R1",
+        recruitmentName: "Recruitment",
+      }, "AWAITING_START_APPROVAL");
+      reviewIds.push(db.createReview({
+        notificationId: notification.id,
+        reviewType: "INTERVIEW_ARRANGEMENT_START_REQUIRED",
+        reason: "Approval required.",
+        summary: {
+          context: {
+            candidateRef: "A1",
+            candidateName: "Candidate",
+            recruitmentRef: "R1",
+            recruitmentName: "Recruitment",
+          },
+          evaluation: {
+            applicantProgressId: "A1",
+            recruitmentId: "R1",
+            scoreSheets: [],
+            currentStep: { stepId: "S1", name: "First interview", order: 2 },
+          },
+        },
+      }));
+    }
+
+    const first = await workflow.approveInterviewArrangement({ reviewId: reviewIds[0]!, routeTriggerStepId: "S1" });
+    const duplicate = await workflow.approveInterviewArrangement({ reviewId: reviewIds[1]!, routeTriggerStepId: "S1" });
+
+    expect(first.result).toBe("INTERVIEW_CASE_CREATED");
+    expect(duplicate).toMatchObject({ result: "INTERVIEW_CASE_ALREADY_ACTIVE", caseId: first.caseId });
+    expect(db.listCases()).toHaveLength(1);
   });
 
   it("merges multiple score-sheet notifications for the same candidate into one open review", async () => {
@@ -467,6 +626,108 @@ describe("evaluation approval workflow", () => {
         },
       },
     ]);
+  });
+
+  it("paces recovered NineHire evaluation lookups after an API rate limit", () => {
+    db = new BridgeDatabase(":memory:");
+    const workflow = new WorkflowService(db, config, {
+      async lookupCompletedEvaluation() {
+        return { reason: "Not used in this test." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    });
+    const notification = db.insertNotification({
+      channelId: "C1",
+      messageTs: "rate-limit.1",
+      eventType: "EVALUATION_COMPLETED",
+      title: "Evaluation completed",
+      candidateName: "Rate limited candidate",
+      recruitmentName: "Recruitment",
+      payloadHash: "rate-limit-evaluation",
+      payloadJson: "{}",
+    }, "RETRY_PENDING");
+    const retry = db.enqueueIntegrationRetry({
+      jobType: "NINEHIRE_EVALUATION_LOOKUP",
+      dedupeKey: notification.id,
+      payload: {
+        notificationId: notification.id,
+        parsed: {
+          eventType: "EVALUATION_COMPLETED",
+          title: "Evaluation completed",
+          text: "Evaluation completed",
+          links: [],
+          payloadHash: "rate-limit-evaluation",
+          payloadJson: "{}",
+          candidateName: "Rate limited candidate",
+          recruitmentName: "Recruitment",
+        },
+      },
+      maxAttempts: 1,
+    });
+    const failed = db.failIntegrationRetryJob(
+      retry.id,
+      "API 요청 한도를 초과했습니다. code: 000132",
+    );
+    workflow.handleIntegrationRetryExhausted(failed);
+
+    const recovered = workflow.recoverRateLimitedEvaluationRetries({
+      cooldownMs: 15 * 60_000,
+      intervalMs: 30_000,
+      now: new Date("2026-08-20T04:00:00.000Z"),
+    });
+
+    expect(recovered).toBe(1);
+    expect(db.getIntegrationRetryJob(retry.id)).toMatchObject({ status: "PENDING" });
+    expect(db.listOpenReviews()).toEqual([]);
+  });
+
+  it("defers evaluation and confirmed-schedule retries together after a NineHire rate limit", () => {
+    db = new BridgeDatabase(":memory:");
+    const workflow = new WorkflowService(db, config, {
+      async lookupCompletedEvaluation() {
+        return { reason: "Not used in this test." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    });
+    const now = new Date("2026-08-24T10:00:00.000Z");
+    db.enqueueIntegrationRetry({
+      jobType: "NINEHIRE_EVALUATION_LOOKUP",
+      dedupeKey: "evaluation-rate-limit",
+      payload: {},
+      now,
+    });
+    db.enqueueIntegrationRetry({
+      jobType: "NINEHIRE_SCHEDULE_RECONCILIATION",
+      dedupeKey: "schedule-rate-limit",
+      payload: {},
+      now,
+    });
+
+    const until = workflow.deferNinehireRequestsAfterRateLimit(now);
+
+    expect(workflow.getNinehireRateLimitUntil(now)).toEqual(until);
+    expect(db.listIntegrationRetryJobs({ status: "PENDING" })).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          jobType: "NINEHIRE_EVALUATION_LOOKUP",
+          nextAttemptAt: until.toISOString(),
+        }),
+        expect.objectContaining({
+          jobType: "NINEHIRE_SCHEDULE_RECONCILIATION",
+          nextAttemptAt: until.toISOString(),
+        }),
+      ]),
+    );
   });
 
   it("requeues an exhausted integration job only after an explicit operator request", () => {
@@ -847,6 +1108,82 @@ describe("evaluation approval workflow", () => {
     expect(db.getCase(interviewCase.id)?.durationMinutes).toBe(60);
   });
 
+  it("resets an unsent candidate exception plan to the original recruitment route", async () => {
+    db = new BridgeDatabase(":memory:");
+    const ninehire: NinehireWorkflowAdapter = {
+      async lookupCompletedEvaluation() {
+        return { reason: "Not used in this test." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+      async getRecruitmentPipeline() {
+        return {
+          recruitmentId: "R1",
+          recruitmentName: "Recruitment",
+          steps: [
+            { stepId: "S1", title: "First", name: "First", order: 1, applicantCount: 0 },
+            { stepId: "S2", title: "Second", name: "Second", order: 2, applicantCount: 0 },
+          ],
+        };
+      },
+    };
+    const workflow = new WorkflowService(db, config, ninehire);
+    await workflow.approveRecruitmentInterviewTemplate({
+      recruitmentId: "R1",
+      steps: [
+        { stepId: "S1", mode: "STANDARD" },
+        { stepId: "S2", mode: "STANDARD" },
+      ],
+    });
+    const interviewCase = db.createInterviewCase({
+      candidateName: "Candidate",
+      recruitmentRef: "R1",
+      proposalDates: ["2026-07-30"],
+    });
+    await workflow.applyTemplateInterviewRouteToCase({
+      caseId: interviewCase.id,
+      routeTriggerStepId: "S1",
+    });
+    const first = db.addOrUpdateInterviewer({
+      caseId: interviewCase.id,
+      displayName: "First interviewer",
+      source: "MANUAL",
+    });
+    const second = db.addOrUpdateInterviewer({
+      caseId: interviewCase.id,
+      displayName: "Second interviewer",
+      source: "MANUAL",
+    });
+    workflow.setCaseCombinedInterviewPlan({
+      caseId: interviewCase.id,
+      stepIds: ["S1", "S2"],
+      interviewerIds: [first.id, second.id],
+    });
+    const draft = db.createDraft({
+      caseId: interviewCase.id,
+      channelId: "C1",
+      previewText: "Draft",
+      blocksJson: "[]",
+      payloadHash: "exception-draft",
+      messageType: "INTERVIEWER_REQUEST",
+    });
+
+    const plan = await workflow.resetCaseInterviewPlanToTemplate(interviewCase.id);
+
+    expect(plan).toMatchObject({
+      source: "TEMPLATE",
+      mode: "STANDARD",
+      stepIds: ["S1"],
+      durationMinutes: 60,
+    });
+    expect(db.getCase(interviewCase.id)?.status).toBe("READY_FOR_DRAFT");
+    expect(db.getDraft(draft.id)?.status).toBe("CANCELLED");
+  });
+
   it("stores a candidate-specific sequential plan with stage-specific interviewers", () => {
     db = new BridgeDatabase(":memory:");
     const ninehire: NinehireWorkflowAdapter = {
@@ -989,6 +1326,137 @@ describe("evaluation approval workflow", () => {
         { stepId: "S2", interviewerIds: [] },
       ],
     });
+  });
+
+  it("applies a one-board-step sequential route with score-sheet-specific interviewers", async () => {
+    db = new BridgeDatabase(":memory:");
+    const ninehire: NinehireWorkflowAdapter = {
+      async lookupCompletedEvaluation() {
+        return { reason: "Not used in this test." };
+      },
+      async listInterviewers() {
+        return {
+          interviewers: [
+            { ninehireUserId: "U1", displayName: "First interviewer", required: true },
+            { ninehireUserId: "U2", displayName: "Second interviewer", required: true },
+          ],
+          unresolvedUserGroups: [],
+          scoreSheetGroups: [
+            { title: "1차 인터뷰 평가표", interviewerIds: ["U1"] },
+            { title: "2차 인터뷰 평가표", interviewerIds: ["U2"] },
+          ],
+        };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+      async getRecruitmentPipeline() {
+        return {
+          recruitmentId: "R1",
+          recruitmentName: "Enterprise sales",
+          steps: [
+            { stepId: "S1", title: "One-day interview", name: "One-day interview", order: 1, applicantCount: 0 },
+          ],
+        };
+      },
+    };
+    const workflow = new WorkflowService(db, config, ninehire);
+    await workflow.approveRecruitmentInterviewTemplate({
+      recruitmentId: "R1",
+      steps: [{ stepId: "S1", mode: "COMBINED" }],
+      routes: [{
+        triggerStepId: "S1",
+        mode: "SEQUENTIAL",
+        stepIds: ["S1"],
+        sessions: [
+          { sessionId: "S1:first", sessionName: "First interview", scoreSheetTitleIncludes: "1차" },
+          { sessionId: "S1:second", sessionName: "Second interview", scoreSheetTitleIncludes: "2차" },
+        ],
+      }],
+    });
+    const notification = db.insertNotification({
+      channelId: "C1",
+      messageTs: "virtual-sequential.1",
+      eventType: "EVALUATION_COMPLETED",
+      title: "Evaluation completed",
+      payloadHash: "virtual-sequential",
+      payloadJson: "{}",
+    }, "EVALUATION_READY_FOR_APPROVAL");
+    const reviewId = db.createReview({
+      notificationId: notification.id,
+      reviewType: "INTERVIEW_ARRANGEMENT_START_REQUIRED",
+      reason: "Approval required.",
+      summary: {
+        context: {
+          candidateRef: "A1",
+          candidateName: "Candidate",
+          recruitmentRef: "R1",
+          recruitmentName: "Enterprise sales",
+        },
+        evaluation: {
+          applicantProgressId: "A1",
+          recruitmentId: "R1",
+          scoreSheets: [],
+          currentStep: { stepId: "S1", name: "One-day interview", order: 1 },
+        },
+      },
+    });
+
+    const approved = await workflow.approveInterviewArrangement({
+      reviewId,
+      routeTriggerStepId: "S1",
+    });
+    await workflow.syncCaseInterviewers(approved.caseId);
+
+    expect(db.getCaseInterviewPlan(approved.caseId)).toMatchObject({
+      mode: "SEQUENTIAL",
+      durationMinutes: 120,
+      sessions: [
+        { stepId: "S1:first", interviewerIds: [expect.any(String)] },
+        { stepId: "S1:second", interviewerIds: [expect.any(String)] },
+      ],
+    });
+    expect(db.getCaseBundle(approved.caseId)?.interviewers.filter((item) => item.required)).toHaveLength(2);
+  });
+
+  it("limits contract recruitment templates to the first interview stage", async () => {
+    db = new BridgeDatabase(":memory:");
+    const ninehire: NinehireWorkflowAdapter = {
+      async lookupCompletedEvaluation() {
+        return { reason: "Not used in this test." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+      async getRecruitmentPipeline() {
+        return {
+          recruitmentId: "R1",
+          recruitmentName: "Contract role 계약직",
+          steps: [
+            { stepId: "S1", title: "1차 인터뷰", name: "1차 인터뷰", order: 1, applicantCount: 0 },
+            { stepId: "S2", title: "2차 인터뷰", name: "2차 인터뷰", order: 2, applicantCount: 0 },
+            { stepId: "S3", title: "CEO 인터뷰", name: "CEO 인터뷰", order: 3, applicantCount: 0 },
+          ],
+        };
+      },
+    };
+    const workflow = new WorkflowService(db, config, ninehire);
+
+    const preview = await workflow.previewRecruitmentInterviewTemplate("R1");
+    expect(preview).toMatchObject({ employmentType: "CONTRACT" });
+    expect(preview.suggestedRoutes).toEqual([
+      { triggerStepId: "S1", mode: "STANDARD", stepIds: ["S1"] },
+    ]);
+    await expect(workflow.approveRecruitmentInterviewTemplate({
+      recruitmentId: "R1",
+      steps: [
+        { stepId: "S1", mode: "STANDARD" },
+        { stepId: "S2", mode: "STANDARD" },
+      ],
+    })).rejects.toThrow("Contract recruitments may only use the first interview stage.");
   });
 
   it("waits for user approval before creating an interview case", async () => {
@@ -1733,6 +2201,7 @@ describe("evaluation approval workflow", () => {
       { date: "2026-07-30", start: "09:00", end: "10:00" },
     ]);
     db.setCaseStatus(interviewCase.id, "COLLECTING_AVAILABILITY");
+    mapCaseToSlackChannel(db, interviewCase.id);
 
     db.registerWorkerStart({
       workerKey: INTERVIEW_BRIDGE_WORKER_KEY,
@@ -1965,6 +2434,7 @@ describe("evaluation approval workflow", () => {
     });
     db.setCaseStatus(interviewCase.id, "READY_TO_SCHEDULE");
     workflow.confirmInternalSchedule(interviewCase.id);
+    mapCaseToSlackChannel(db, interviewCase.id);
 
     expect(() => workflow.createScheduleConfirmationDraft(interviewCase.id)).toThrow(
       "only after the candidate has confirmed",
@@ -1991,6 +2461,7 @@ describe("evaluation approval workflow", () => {
       interviewCase: { status: "READY_FOR_DRAFT", scheduleRound: 2 },
       scheduleUpdateDraft: null,
     });
+    expect(reopened.interviewCase.proposalDates).toEqual(["2026-08-27"]);
 
     db.setCaseStatus(interviewCase.id, "READY_TO_SCHEDULE");
     db.allocateRoomBlock({
@@ -2108,6 +2579,7 @@ describe("evaluation approval workflow", () => {
     });
     db.confirmSequentialInternalSchedule(interviewCase.id);
     db.setCaseStatus(interviewCase.id, "CONFIRMED");
+    mapCaseToSlackChannel(db, interviewCase.id);
 
     const draft = workflow.createScheduleConfirmationDraft(interviewCase.id);
 
@@ -2245,12 +2717,85 @@ describe("evaluation approval workflow", () => {
       const review = db.listOpenReviews().find(
         (item) => item.reviewType === "CANDIDATE_MESSAGE_REVIEW_REQUIRED",
       );
-      expect(review?.reason).toContain("Candidate message:");
+      expect(review?.reason).toContain("Please reschedule.");
       expect(db.getCase(caseId)?.status).toBe("REVIEW_REQUIRED");
       expect(workflow.resolveCandidateInterviewAbsenceReview({
         reviewId: review!.id,
         action: "RESCHEDULE_USING_EXISTING_AVAILABILITY",
       })).toMatchObject({ reviewOpen: false, caseId });
+    });
+
+    it("ignores a general candidate message after a schedule proposal", async () => {
+      db = new BridgeDatabase(":memory:");
+      const ninehire: NinehireWorkflowAdapter = {
+        async lookupCompletedEvaluation() { return { reason: "Not used in this test." }; },
+        async listInterviewers() { return { interviewers: [], unresolvedUserGroups: [] }; },
+        async listInProgressRecruitments() { return { count: 0, limit: 100, offset: 0, recruitments: [] }; },
+      };
+      const workflow = new WorkflowService(db, config, ninehire);
+      const caseId = createAwaitingCandidateConfirmationCase(db, "General candidate message test");
+      const interviewCase = db.getCase(caseId)!;
+
+      await expect(workflow.ingestSlackNotification({
+        channelId: "C1",
+        messageTs: "candidate-message.general.1",
+        parsed: {
+          eventType: "CANDIDATE_MESSAGE",
+          title: "Candidate message",
+          text: "Candidate message received.",
+          candidateMessage: "I cannot upload my reference material. Please send the request again.",
+          links: [],
+          payloadHash: "candidate-message-general",
+          payloadJson: "{}",
+          candidateName: interviewCase.candidateName!,
+          recruitmentName: interviewCase.recruitmentName!,
+        },
+      })).resolves.toMatchObject({
+        result: "CANDIDATE_MESSAGE_NOT_SCHEDULE_RELATED",
+      });
+
+      expect(db.getCase(caseId)?.status).toBe("AWAITING_CANDIDATE_CONFIRMATION");
+      expect(
+        db.listOpenReviews().some(
+          (item) => item.reviewType === "CANDIDATE_MESSAGE_REVIEW_REQUIRED",
+        ),
+      ).toBe(false);
+    });
+
+    it("clears an empty candidate-response review after the candidate confirms", async () => {
+      db = new BridgeDatabase(":memory:");
+      const ninehire: NinehireWorkflowAdapter = {
+        async lookupCompletedEvaluation() { return { reason: "Not used in this test." }; },
+        async listInterviewers() { return { interviewers: [], unresolvedUserGroups: [] }; },
+        async listInProgressRecruitments() { return { count: 0, limit: 100, offset: 0, recruitments: [] }; },
+      };
+      const workflow = new WorkflowService(db, config, ninehire);
+      const caseId = createAwaitingCandidateConfirmationCase(db, "Confirmed response review candidate");
+      db.recordCandidateScheduleProposalSent(caseId);
+      const reviewId = db.createReview({
+        caseId,
+        reviewType: "CANDIDATE_MESSAGE_REVIEW_REQUIRED",
+        reason: "사용자가 후보자의 일정 변경, 취소 또는 보류 여부를 검토하도록 요청했습니다.",
+        summary: { scheduledDate: "2026-07-27", scheduledStartTime: "15:00", scheduledEndTime: "16:00" },
+      });
+
+      db.recordExternallyConfirmedCandidateSchedule({
+        caseId,
+        sourceEventId: "confirmed-response-review",
+        date: "2026-07-27",
+        startTime: "15:00",
+        endTime: "16:00",
+      });
+
+      expect(workflow.reconcileNonSchedulingCandidateMessageReviews()).toEqual({
+        scanned: 1,
+        resolved: 1,
+      });
+      expect(db.getCase(caseId)?.status).toBe("CONFIRMED");
+      expect(db.getReview(reviewId)).toMatchObject({
+        status: "RESOLVED",
+        resolution: "AUTO_RESOLVED_AFTER_CANDIDATE_CONFIRMATION",
+      });
     });
 
     it("auto-assigns one cached meeting room for an externally confirmed ready interview", async () => {
@@ -2669,6 +3214,7 @@ describe("evaluation approval workflow", () => {
       manuallyRecorded: 1,
       roomSelectionRequired: 0,
       roomReviewRequired: 0,
+      scheduleDeletionDetected: 0,
     });
 
     expect(db.getReview(reviewId)?.status).toBe("RESOLVED");
@@ -2782,6 +3328,327 @@ describe("evaluation approval workflow", () => {
         ],
       },
     ]);
+  });
+
+  it("refreshes an expired unsent availability request before creating a new draft", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-20T01:00:00.000Z"));
+    db = new BridgeDatabase(":memory:");
+    db.upsertRecruitmentSlackChannel({
+      recruitmentId: "R1",
+      recruitmentName: "Recruitment",
+      channelId: "C1",
+    });
+    db.upsertIdentityMapping({
+      ninehireUserId: "N1",
+      slackUserId: "U1",
+      displayName: "Interviewer",
+    });
+    const interviewCase = db.createInterviewCase({
+      candidateRef: "A1",
+      candidateName: "Candidate",
+      recruitmentRef: "R1",
+      recruitmentName: "Recruitment",
+      proposalDates: ["2026-08-17", "2026-08-18", "2026-08-19", "2026-08-20"],
+    });
+    const oldDraft = db.createDraft({
+      caseId: interviewCase.id,
+      channelId: "C1",
+      previewText: "Expired request",
+      blocksJson: "[]",
+      payloadHash: "expired-request",
+      messageType: "INTERVIEWER_REQUEST",
+    });
+    const ninehire: NinehireWorkflowAdapter = {
+      async lookupCompletedEvaluation() {
+        return { reason: "Not used in this test." };
+      },
+      async listInterviewers() {
+        return {
+          interviewers: [{
+            ninehireUserId: "N1",
+            displayName: "Interviewer",
+            required: true,
+          }],
+          unresolvedUserGroups: [],
+        };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    };
+    const workflow = new WorkflowService(db, config, ninehire);
+
+    const freshDraft = await workflow.createRequestDraft(interviewCase.id);
+
+    expect(db.getCase(interviewCase.id)?.proposalDates).toEqual([
+      "2026-08-21",
+      "2026-08-24",
+      "2026-08-25",
+      "2026-08-26",
+    ]);
+    expect(db.getDraft(oldDraft.id)?.status).toBe("CANCELLED");
+    expect(freshDraft).toMatchObject({
+      status: "DRAFT",
+      messageType: "INTERVIEWER_REQUEST",
+      channelId: "C1",
+    });
+  });
+
+  it("refreshes an already-created expired request without a new user action", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-20T01:00:00.000Z"));
+    db = new BridgeDatabase(":memory:");
+    const interviewCase = db.createInterviewCase({
+      candidateName: "Candidate",
+      recruitmentRef: "R-EXPIRED",
+      recruitmentName: "Expired request recruitment",
+      proposalDates: ["2026-08-17", "2026-08-18", "2026-08-19", "2026-08-20"],
+    });
+    mapCaseToSlackChannel(db, interviewCase.id);
+    const oldDraft = db.createDraft({
+      caseId: interviewCase.id,
+      channelId: "C1",
+      previewText: "Expired request",
+      blocksJson: "[]",
+      payloadHash: "expired-request",
+      messageType: "INTERVIEWER_REQUEST",
+    });
+    const workflow = new WorkflowService(db, {
+      ...config,
+      slack: { requestChannelId: "C1" },
+    }, {
+      async lookupCompletedEvaluation() {
+        return { reason: "Not used in this test." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    });
+
+    expect(workflow.refreshExpiredUnsentAvailabilityRequestDrafts()).toEqual({
+      refreshedCaseIds: [interviewCase.id],
+    });
+    expect(db.getCase(interviewCase.id)?.proposalDates).toEqual([
+      "2026-08-21",
+      "2026-08-24",
+      "2026-08-25",
+      "2026-08-26",
+    ]);
+    expect(db.getDraft(oldDraft.id)?.status).toBe("CANCELLED");
+    expect(db.getCaseBundle(interviewCase.id)?.drafts).toContainEqual(
+      expect.objectContaining({
+        messageType: "INTERVIEWER_REQUEST",
+        status: "DRAFT",
+      }),
+    );
+  });
+
+  it("refreshes a legacy recollection draft with next-week proposal dates", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-21T01:00:00.000Z"));
+    db = new BridgeDatabase(":memory:");
+    const interviewCase = db.createInterviewCase({
+      candidateName: "Candidate",
+      recruitmentRef: "R-LEGACY",
+      recruitmentName: "Legacy recollection recruitment",
+      proposalDates: ["2026-08-25", "2026-08-26"],
+    });
+    mapCaseToSlackChannel(db, interviewCase.id);
+    const oldDraft = db.createDraft({
+      caseId: interviewCase.id,
+      channelId: "C1",
+      previewText: "Old recollection request",
+      blocksJson: "[]",
+      payloadHash: "legacy-recollection-request",
+      messageType: "INTERVIEWER_REQUEST",
+    });
+    db.addEvent(interviewCase.id, "SCHEDULE_REOPENED", "USER", {
+      availabilityPolicy: "RECOLLECT",
+    });
+    const workflow = new WorkflowService(db, {
+      ...config,
+      slack: { requestChannelId: "C1" },
+    }, {
+      async lookupCompletedEvaluation() {
+        return { reason: "Not used in this test." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    });
+
+    expect(workflow.refreshLegacyRecollectionAvailabilityRequestDrafts()).toEqual({
+      refreshedCaseIds: [interviewCase.id],
+    });
+    expect(db.getCase(interviewCase.id)?.proposalDates).toEqual([
+      "2026-09-01",
+      "2026-09-02",
+    ]);
+    expect(db.getDraft(oldDraft.id)?.status).toBe("CANCELLED");
+    expect(db.getCaseBundle(interviewCase.id)?.drafts).toContainEqual(
+      expect.objectContaining({
+        messageType: "INTERVIEWER_REQUEST",
+        status: "DRAFT",
+      }),
+    );
+    expect(workflow.refreshLegacyRecollectionAvailabilityRequestDrafts()).toEqual({
+      refreshedCaseIds: [],
+    });
+    expect(db.getCase(interviewCase.id)?.proposalDates).toEqual([
+      "2026-09-01",
+      "2026-09-02",
+    ]);
+  });
+
+  it("restores the first corrected dates when a legacy refresh repeated", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-21T01:00:00.000Z"));
+    db = new BridgeDatabase(":memory:");
+    const interviewCase = db.createInterviewCase({
+      candidateName: "Candidate",
+      recruitmentRef: "R-LEGACY-REPEAT",
+      recruitmentName: "Repeated legacy recollection recruitment",
+      proposalDates: ["2026-09-08", "2026-09-09"],
+    });
+    mapCaseToSlackChannel(db, interviewCase.id);
+    const oldDraft = db.createDraft({
+      caseId: interviewCase.id,
+      channelId: "C1",
+      previewText: "Repeated legacy recollection request",
+      blocksJson: "[]",
+      payloadHash: "repeated-legacy-recollection-request",
+      messageType: "INTERVIEWER_REQUEST",
+    });
+    db.addEvent(interviewCase.id, "SCHEDULE_REOPENED", "USER", {
+      availabilityPolicy: "RECOLLECT",
+    });
+    const sourceEventId = db.listCaseEvents(interviewCase.id).find(
+      (event) => event.eventType === "SCHEDULE_REOPENED",
+    )!.id;
+    db.addEvent(interviewCase.id, "LEGACY_RECOLLECTION_PROPOSAL_DATES_REFRESHED", "SYSTEM", {
+      sourceEventId,
+      proposalDates: ["2026-09-01", "2026-09-02"],
+    });
+    db.addEvent(interviewCase.id, "LEGACY_RECOLLECTION_PROPOSAL_DATES_REFRESHED", "SYSTEM", {
+      sourceEventId,
+      proposalDates: ["2026-09-08", "2026-09-09"],
+    });
+    const workflow = new WorkflowService(db, {
+      ...config,
+      slack: { requestChannelId: "C1" },
+    }, {
+      async lookupCompletedEvaluation() {
+        return { reason: "Not used in this test." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+    });
+
+    expect(workflow.refreshLegacyRecollectionAvailabilityRequestDrafts()).toEqual({
+      refreshedCaseIds: [interviewCase.id],
+    });
+    expect(db.getCase(interviewCase.id)?.proposalDates).toEqual([
+      "2026-09-01",
+      "2026-09-02",
+    ]);
+    expect(db.getDraft(oldDraft.id)?.status).toBe("CANCELLED");
+    expect(workflow.refreshLegacyRecollectionAvailabilityRequestDrafts()).toEqual({
+      refreshedCaseIds: [],
+    });
+  });
+
+  it("detects a future confirmed schedule deletion after one successful NineHire lookup", async () => {
+    db = new BridgeDatabase(":memory:");
+    const interviewCase = db.createInterviewCase({
+      candidateRef: "A4",
+      candidateName: "Deleted schedule candidate",
+      recruitmentRef: "R4",
+      recruitmentName: "Deleted schedule recruitment",
+      proposalDates: ["2099-08-07"],
+    });
+    db.setCaseStatus(interviewCase.id, "READY_TO_SCHEDULE");
+    const [block] = db.syncMeetingRoomBlocks(["2099-08-07"], [
+      {
+        sourceKey: "DAOU:deleted-schedule",
+        roomId: "R4",
+        roomName: "Room D",
+        reservedBy: "Recruiter",
+        purpose: "Interview",
+        date: "2099-08-07",
+        startTime: "15:00",
+        endTime: "18:00",
+        sourcePayloadHash: "deleted-schedule-room",
+      },
+    ]);
+    db.allocateRoomBlock({
+      caseId: interviewCase.id,
+      roomBlockId: block!.id,
+      startTime: "16:00",
+      endTime: "17:00",
+    });
+    db.confirmInternalSchedule(interviewCase.id);
+    db.recordCandidateScheduleProposalSent(interviewCase.id);
+    db.recordExternallyConfirmedCandidateSchedule({
+      caseId: interviewCase.id,
+      sourceEventId: "E4",
+      date: "2099-08-07",
+      startTime: "16:00",
+      endTime: "17:00",
+    });
+    const staleProposalReviewId = db.createReview({
+      caseId: interviewCase.id,
+      reviewType: "NINEHIRE_SCHEDULE_PROPOSAL_CONFIRMATION_REQUIRED",
+      reason: "Candidate schedule proposal dispatch result could not be verified.",
+      summary: {},
+    });
+
+    const ninehire: NinehireWorkflowAdapter = {
+      async lookupCompletedEvaluation() {
+        return { reason: "Not used in this test." };
+      },
+      async listInterviewers() {
+        return { interviewers: [], unresolvedUserGroups: [] };
+      },
+      async listInProgressRecruitments() {
+        return { count: 0, limit: 100, offset: 0, recruitments: [] };
+      },
+      async listCandidateSchedules() {
+        return [];
+      },
+    };
+    const workflow = new WorkflowService(db, config, ninehire);
+
+    await expect(workflow.reconcileNinehireConfirmedSchedules()).resolves.toMatchObject({
+      trackedCandidates: 1,
+      discoveredSchedules: 0,
+      scheduleDeletionDetected: 1,
+    });
+    expect(db.getCase(interviewCase.id)).toMatchObject({ status: "REVIEW_REQUIRED" });
+    expect(db.listOpenReviews()).toMatchObject([
+      {
+        caseId: interviewCase.id,
+        reviewType: "NINEHIRE_SCHEDULE_DELETION_DETECTED",
+        reason: "나인하이어 일정 삭제가 확인되었습니다.",
+      },
+    ]);
+    expect(db.listRoomAllocations(interviewCase.id)).toMatchObject([
+      { status: "ACTIVE" },
+    ]);
+    expect(db.getReview(staleProposalReviewId)).toMatchObject({
+      status: "RESOLVED",
+      resolution: "SUPERSEDED_BY_NINEHIRE_SCHEDULE_DELETION",
+    });
   });
 
   it("reconciles a direct NineHire candidate confirmation after an internal proposal", async () => {

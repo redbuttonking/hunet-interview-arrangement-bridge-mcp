@@ -3,8 +3,9 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { AlertCircle, ArrowRight, CalendarClock, CheckCircle2, ChevronLeft, ChevronRight, ClipboardList, Clock3, Loader2, RefreshCw, Search, SearchX, TriangleAlert, UsersRound, Wifi } from "lucide-react";
+import { AlertCircle, ArrowRight, CalendarClock, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ClipboardList, Clock3, Loader2, MapPin, RefreshCw, Search, SearchX, TriangleAlert, UsersRound, Wifi } from "lucide-react";
 import { AppHeader, PageHeader } from "./app-shell";
+import { DraftApprovalCard } from "./draft-approval-card";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
@@ -30,13 +31,26 @@ type ActionItem = {
   decision?: Decision;
   review?: Review;
   caseId?: string;
-  caseSkillKey?: "AVAILABILITY_COLLECTION" | "INTERVIEW_SCHEDULING" | "CANDIDATE_SCHEDULE_PROPOSAL";
+  caseSkillKey?: "AVAILABILITY_COLLECTION" | "INTERVIEW_SCHEDULING" | "CANDIDATE_SCHEDULE_PROPOSAL" | "CANDIDATE_SCHEDULE_RESPONSE";
+  pendingDrafts?: CandidateCase["pendingDrafts"];
+  interviewerNames?: CandidateCase["interviewerNames"];
+  interviewerResponses?: CandidateCase["interviewerResponses"];
   relatedItems?: ActionItem[];
 };
 
 type ActiveDecision = {
   decision: Decision;
   dismissOnClose: boolean;
+};
+
+type ExternalRefreshResult = {
+  completedAt: string;
+  steps: Array<{
+    id: "SLACK" | "NINEHIRE" | "DAOU_CALENDAR" | "DAOU_ROOMS" | "SCHEDULING";
+    label: string;
+    status: "COMPLETED" | "DEFERRED" | "FAILED";
+    detail: string;
+  }>;
 };
 
 type UpcomingInterview = {
@@ -55,6 +69,7 @@ type RecruitmentTemplatePreview = {
   preview: {
     recruitmentId: string;
     recruitmentName: string;
+    employmentType: "CONTRACT" | "REGULAR";
     requiresApproval: boolean;
     approvedTemplate: {
       steps: Array<{
@@ -81,8 +96,104 @@ const supportedReviewDecisionTypes = new Set([
   "RECRUITMENT_TEMPLATE_CHECK_REQUIRED",
   "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED",
   "CANDIDATE_MESSAGE_REVIEW_REQUIRED",
+  "NINEHIRE_SCHEDULE_DELETION_DETECTED",
   "WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED",
+  "NINEHIRE_SCHEDULE_PROPOSAL_CONFIRMATION_REQUIRED",
 ]);
+
+const scheduleSelectionDecisionTypes = new Set([
+  "CONFIRM_STANDARD_SCHEDULE",
+  "CONFIRM_SEQUENTIAL_SCHEDULE",
+]);
+
+type ScheduleOptionSort = "TIME" | "DATE" | "ROOM";
+type ScheduleOptionParts = {
+  date: string;
+  startTime: string;
+  endTime: string;
+  roomName: string;
+};
+
+function isScheduleSelectionDecision(decision: Decision) {
+  return scheduleSelectionDecisionTypes.has(decision.decisionType);
+}
+
+function decisionActionLabel(decision: Decision) {
+  if (isScheduleSelectionDecision(decision)) return "일정 선택";
+  if (decision.decisionType === "CANDIDATE_SCHEDULE_PROPOSAL_SENT") return "메일 보내기";
+  if (decision.decisionType === "NINEHIRE_SCHEDULE_DELETION_ACTION") return "확인 필요";
+  if (decision.decisionType === "CANDIDATE_SCHEDULE_RESPONSE_ACTION") return "응답 조치 선택";
+  if (decision.decisionType === "CANDIDATE_SCHEDULE_RESCHEDULE_METHOD") return "재조율 방법 선택";
+  return "결정 계속하기";
+}
+
+function scheduleOptionParts(label: string): ScheduleOptionParts | null {
+  const match = /^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})~(\d{2}:\d{2})\s+·\s+(.+)$/u.exec(label.trim());
+  return match
+    ? { date: match[1]!, startTime: match[2]!, endTime: match[3]!, roomName: match[4]!.trim() }
+    : null;
+}
+
+function roomSortPriority(roomName: string) {
+  if (roomName.includes("열정룸")) return 0;
+  if (roomName.includes("행복룸")) return 1;
+  if (roomName.includes("게임체인저")) return 2;
+  if (roomName.includes("의문당")) return 3;
+  return 4;
+}
+
+function roomBadgeClassName(roomName: string) {
+  if (roomName.includes("열정룸")) return "border-amber-200 bg-amber-50 text-amber-900";
+  if (roomName.includes("행복룸")) return "border-rose-200 bg-rose-50 text-rose-900";
+  if (roomName.includes("게임체인저")) return "border-orange-200 bg-orange-50 text-orange-900";
+  if (roomName.includes("의문당")) return "border-violet-200 bg-violet-50 text-violet-900";
+  return "border-slate-200 bg-slate-50 text-slate-700";
+}
+
+function RoomBadge({ roomName }: { roomName: string }) {
+  return <span className={`mt-1 inline-flex items-center gap-1 rounded-md border px-2 py-1 text-sm font-semibold ${roomBadgeClassName(roomName)}`}><MapPin className="size-3.5" />{roomName}</span>;
+}
+
+function ScheduleOptionSummary({ schedule, sort }: { schedule: ScheduleOptionParts; sort: ScheduleOptionSort }) {
+  if (sort === "ROOM") {
+    return <><strong className="block text-base text-slate-950">{formatDate(schedule.date)} {schedule.startTime}~{schedule.endTime}</strong><RoomBadge roomName={schedule.roomName} /></>;
+  }
+  return <><strong className="block text-base text-slate-950">{sort === "TIME" ? `${formatDate(schedule.date)} ` : ""}{schedule.startTime}~{schedule.endTime}</strong><RoomBadge roomName={schedule.roomName} /></>;
+}
+
+function sortedScheduleOptions(decision: Decision, sort: ScheduleOptionSort) {
+  return [...decision.options].sort((left, right) => {
+    const leftParts = scheduleOptionParts(left.label);
+    const rightParts = scheduleOptionParts(right.label);
+    if (!leftParts || !rightParts) return left.label.localeCompare(right.label, "ko");
+    const byTime = leftParts.startTime.localeCompare(rightParts.startTime)
+      || leftParts.date.localeCompare(rightParts.date)
+      || leftParts.roomName.localeCompare(rightParts.roomName, "ko");
+    if (sort === "TIME") return byTime;
+    if (sort === "DATE") {
+      return leftParts.date.localeCompare(rightParts.date)
+        || leftParts.startTime.localeCompare(rightParts.startTime)
+        || leftParts.roomName.localeCompare(rightParts.roomName, "ko");
+    }
+    return roomSortPriority(leftParts.roomName) - roomSortPriority(rightParts.roomName)
+      || leftParts.roomName.localeCompare(rightParts.roomName, "ko")
+      || leftParts.date.localeCompare(rightParts.date)
+      || leftParts.startTime.localeCompare(rightParts.startTime);
+  });
+}
+
+function groupScheduleOptions(options: Decision["options"], sort: ScheduleOptionSort) {
+  if (sort === "TIME") return [{ label: null, options }];
+  const groups = new Map<string, Decision["options"]>();
+  for (const option of options) {
+    const schedule = scheduleOptionParts(option.label);
+    const label = schedule
+      ? sort === "DATE" ? formatDate(schedule.date) : schedule.roomName
+      : "기타 일정";
+    groups.set(label, [...(groups.get(label) ?? []), option]);
+  }
+  return [...groups.entries()].map(([label, groupedOptions]) => ({ label, options: groupedOptions }));
+}
 
 function integrationRetryReason(reason: string) {
   const normalized = reason.toLocaleLowerCase();
@@ -185,6 +296,46 @@ function stageLabel(interviewCase: CandidateCase) {
   return name;
 }
 
+function interviewerResponseLabel(status: CandidateCase["interviewerResponses"]["interviewers"][number]["status"]) {
+  const labels = {
+    PENDING: "미제출",
+    SUBMITTED: "제출 완료",
+    DECLINED_PENDING_REVIEW: "일정 불가",
+    EXCLUDED_BY_USER: "제외",
+    EXCLUDED_UPSTREAM: "제외",
+  } as const;
+  return labels[status];
+}
+
+function InterviewerResponseSummary({
+  responses,
+}: {
+  responses: CandidateCase["interviewerResponses"];
+}) {
+  if (responses.interviewers.length === 0) return null;
+  const allSubmitted = responses.pending === 0 && responses.declinedPendingReview === 0;
+  return (
+    <section className="mt-4" aria-label="면접관 일정 제출 현황">
+      <p className="text-sm font-semibold text-slate-900">{allSubmitted ? "모든 면접관이 제출 완료했습니다." : "면접관 일정 제출 현황"}</p>
+      <div className="mt-2 space-y-1.5">
+        {responses.interviewers.map((interviewer) => {
+          const variant = interviewer.status === "SUBMITTED"
+            ? "success"
+            : interviewer.status === "DECLINED_PENDING_REVIEW"
+              ? "warning"
+              : "secondary";
+
+          return <p className="flex items-center gap-2 text-sm text-slate-700" key={interviewer.displayName}>
+            <span className="font-medium text-slate-950">{interviewer.displayName}</span>
+            <span className="text-slate-400">:</span>
+            <Badge variant={variant}>{interviewerResponseLabel(interviewer.status)}</Badge>
+          </p>;
+        })}
+      </div>
+    </section>
+  );
+}
+
 function reviewCategory(review: Review) {
   const labels: Record<string, string> = {
     INTERVIEW_ARRANGEMENT_START_REQUIRED: "조율 시작 확인",
@@ -192,7 +343,9 @@ function reviewCategory(review: Review) {
     RECRUITMENT_TEMPLATE_CHECK_REQUIRED: "인터뷰 규칙 확인",
     CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED: "후보자 응답 확인",
     CANDIDATE_MESSAGE_REVIEW_REQUIRED: "후보자 응답 확인",
+    NINEHIRE_SCHEDULE_DELETION_DETECTED: "일정 삭제 감지",
     WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED: "가용시간 복구 확인",
+    NINEHIRE_SCHEDULE_PROPOSAL_CONFIRMATION_REQUIRED: "나인하이어 일정 제안 발송 확인",
     INTERVIEWER_NO_RESPONSE: "면접관 일정 회신 대기",
     INTEGRATION_RETRY_EXHAUSTED: "연동 재시도 소진",
   };
@@ -205,6 +358,12 @@ function reviewActionLabel(review: Review) {
   }
   if (["CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED", "CANDIDATE_MESSAGE_REVIEW_REQUIRED"].includes(review.reviewType)) {
     return "응답 조치 선택";
+  }
+  if (review.reviewType === "NINEHIRE_SCHEDULE_DELETION_DETECTED") {
+    return "확인 필요";
+  }
+  if (review.reviewType === "NINEHIRE_SCHEDULE_PROPOSAL_CONFIRMATION_REQUIRED") {
+    return "발송 이력 확인";
   }
   if (
     [
@@ -228,6 +387,7 @@ function caseAction(interviewCase: CandidateCase): ActionItem | undefined {
     candidateName: interviewCase.candidateName,
     recruitmentName: interviewCase.recruitmentName,
     href: `/cases/${interviewCase.id}`,
+    interviewerResponses: interviewCase.interviewerResponses,
   };
 
   if (interviewCase.status === "READY_FOR_DRAFT") {
@@ -244,14 +404,31 @@ function caseAction(interviewCase: CandidateCase): ActionItem | undefined {
     };
   }
   if (["REQUEST_SENT", "COLLECTING_AVAILABILITY"].includes(interviewCase.status)) {
+    const pendingReminderDrafts = interviewCase.pendingDrafts.filter((draft) =>
+      draft.status === "DRAFT" && draft.messageType === "AVAILABILITY_REMINDER",
+    );
+    if (pendingReminderDrafts.length > 0) {
+      return {
+        ...base,
+        queue: "ACTION",
+        priority: "normal",
+        category: "면접관 일정 추가 요청 초안",
+        title: "자동 리마인드 이후 추가로 보낼 일정 요청 초안을 확인해 주세요.",
+        description: stageLabel(interviewCase),
+        meta: "초안을 확인하고 승인하기 전에는 Slack에 발송되지 않습니다.",
+        actionLabel: "초안 확인",
+        pendingDrafts: pendingReminderDrafts,
+        interviewerNames: interviewCase.interviewerNames,
+      };
+    }
     return {
       ...base,
       queue: "WAITING",
       priority: "normal",
       category: "면접관 일정 수집",
       title: "면접관 가능 일정 제출 상태를 확인해 주세요.",
-      description: `${stageLabel(interviewCase)} · 제출 ${interviewCase.interviewerResponses.submitted}/${interviewCase.interviewerResponses.required}`,
-      meta: interviewCase.interviewerResponses.pending > 0 ? `미제출 ${interviewCase.interviewerResponses.pending}명` : "모든 필수 면접관이 제출했습니다.",
+      description: stageLabel(interviewCase),
+      meta: interviewCase.interviewerResponses.pending > 0 ? "면접관별 제출 현황을 확인하세요. 자동 리마인드는 최대 2회 발송됩니다." : "모든 면접관이 제출 완료했습니다.",
       actionLabel: "제출 상태 확인",
       caseSkillKey: "AVAILABILITY_COLLECTION",
     };
@@ -270,6 +447,9 @@ function caseAction(interviewCase: CandidateCase): ActionItem | undefined {
     };
   }
   if (interviewCase.status === "DRAFT_CREATED") {
+    const pendingAvailabilityDrafts = interviewCase.pendingDrafts.filter((draft) =>
+      ["INTERVIEWER_REQUEST", "AVAILABILITY_RECOVERY"].includes(draft.messageType),
+    );
     return {
       ...base,
       queue: "ACTION",
@@ -278,7 +458,9 @@ function caseAction(interviewCase: CandidateCase): ActionItem | undefined {
       title: "면접관에게 보낼 일정 요청 초안을 검토해 주세요.",
       description: stageLabel(interviewCase),
       meta: "승인 전에는 Slack으로 발송되지 않습니다.",
-      actionLabel: "초안 확인",
+      actionLabel: pendingAvailabilityDrafts.length > 0 ? "초안 확인" : "상세 보기",
+      pendingDrafts: pendingAvailabilityDrafts,
+      interviewerNames: interviewCase.interviewerNames,
     };
   }
   if (interviewCase.status === "AWAITING_CANDIDATE_CONFIRMATION") {
@@ -302,8 +484,9 @@ function caseAction(interviewCase: CandidateCase): ActionItem | undefined {
       category: "후보자 응답 대기",
       title: "내부 확정된 인터뷰 일정의 후보자 응답을 기다리고 있습니다.",
       description: formatSchedule(interviewCase),
-      meta: "후보자에게 보내는 나인하이어 일정 제안은 직접 처리합니다.",
-      actionLabel: "일정 확인",
+      meta: "후보자가 직접 연락해 일정 변경을 요청했다면 응답 조치를 선택하세요.",
+      actionLabel: "응답 조치",
+      caseSkillKey: "CANDIDATE_SCHEDULE_RESPONSE",
     };
   }
   if (interviewCase.status === "REVIEW_REQUIRED") {
@@ -334,14 +517,19 @@ function buildActionItems(data: DashboardSnapshot): ActionItem[] {
     candidateJourney: decision.caseId
       ? casesById.get(decision.caseId)?.candidateJourney
       : decision.reviewId ? reviewsById.get(decision.reviewId)?.candidateJourney : undefined,
-    category: "선택 대기",
+    category: isScheduleSelectionDecision(decision) ? "시간·회의실 선택 대기" : "선택 대기",
     title: decision.title,
     description: decision.prompt,
     candidateName: decision.candidateName,
     recruitmentName: decision.recruitmentName,
     caseId: decision.caseId ?? undefined,
-    meta: "선택 적용 전에는 인터뷰 상태가 바뀌지 않습니다.",
-    actionLabel: "결정 계속하기",
+    interviewerResponses: decision.caseId
+      ? casesById.get(decision.caseId)?.interviewerResponses
+      : undefined,
+    meta: isScheduleSelectionDecision(decision)
+      ? "면접관 일정 제출과 회의실 가능 시간을 함께 확인할 수 있습니다."
+      : "선택 적용 전에는 인터뷰 상태가 바뀌지 않습니다.",
+    actionLabel: decisionActionLabel(decision),
     href: decision.caseId ? `/cases/${decision.caseId}` : null,
     decision,
     review: decision.reviewId ? reviewsById.get(decision.reviewId) : undefined,
@@ -354,7 +542,7 @@ function buildActionItems(data: DashboardSnapshot): ActionItem[] {
       const interviewerNoResponse = review.reviewType === "INTERVIEWER_NO_RESPONSE";
       return {
         id: `review:${review.id}`,
-        queue: workerDowntimeAvailabilityReview || interviewerNoResponse ? "WAITING" : integrationRetryExhausted || !supportedReviewDecisionTypes.has(review.reviewType) ? "EXCEPTION" : "ACTION",
+        queue: workerDowntimeAvailabilityReview ? "WAITING" : interviewerNoResponse ? "ACTION" : integrationRetryExhausted || !supportedReviewDecisionTypes.has(review.reviewType) ? "EXCEPTION" : "ACTION",
         priority: workerDowntimeAvailabilityReview ? "watch" : interviewerNoResponse ? "normal" : supportedReviewDecisionTypes.has(review.reviewType) || integrationRetryExhausted ? "urgent" : "normal",
         candidateJourney: review.caseId
           ? casesById.get(review.caseId)?.candidateJourney
@@ -363,11 +551,15 @@ function buildActionItems(data: DashboardSnapshot): ActionItem[] {
         title: integrationRetryExhausted
           ? "자동 재시도가 끝난 연동 오류를 확인해 주세요."
           : interviewerNoResponse
-            ? "면접관 일정 회신을 기다리고 있습니다."
+            ? "자동 리마인드 2회 후에도 면접관 일정이 제출되지 않았습니다."
           : review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED"
             ? "인터뷰 조율을 시작할지 확인해 주세요."
             : review.reviewType === "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED"
               ? "후보자 응답에 대한 처리 방법을 선택해 주세요."
+              : review.reviewType === "NINEHIRE_SCHEDULE_DELETION_DETECTED"
+                ? "나인하이어 일정 삭제가 확인되었습니다."
+              : review.reviewType === "NINEHIRE_SCHEDULE_PROPOSAL_CONFIRMATION_REQUIRED"
+                ? "나인하이어 일정 제안 메일의 발송 결과를 확인해 주세요."
               : review.reason,
         description: integrationRetryExhausted
           ? integrationRetryReason(review.reason)
@@ -375,19 +567,28 @@ function buildActionItems(data: DashboardSnapshot): ActionItem[] {
             ? review.reason
           : review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED"
             ? `${review.currentStepName ?? "평가 완료"} · ${review.reason}`
-            : review.currentStepName ?? "상세 내용을 확인해 주세요.",
+            : review.reviewType === "NINEHIRE_SCHEDULE_DELETION_DETECTED"
+              ? `기존 일정: ${formatDate(review.scheduledDate)} ${review.scheduledStartTime ?? ""}~${review.scheduledEndTime ?? ""}${review.scheduledRoomName ? ` · ${review.scheduledRoomName}` : ""}`
+              : review.currentStepName ?? "상세 내용을 확인해 주세요.",
         candidateName: review.candidateName,
         recruitmentName: review.recruitmentName,
         caseId: review.caseId ?? undefined,
+        interviewerResponses: review.caseId
+          ? casesById.get(review.caseId)?.interviewerResponses
+          : undefined,
         meta: integrationRetryExhausted
           ? "재동기화 전 워커와 연동 상태를 확인하세요. 이 화면에서는 외부 발송이나 자동 재시도를 실행하지 않습니다."
           : interviewerNoResponse
-            ? "추가 리마인드는 채용 담당자 요청 시에만 발송합니다."
-            : review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED" ? "승인 전에는 나인하이어·Slack에 변경이 없습니다." : null,
+            ? "필요한 경우에만 추가 요청 초안을 만들고, 확인 후 Slack 발송을 승인합니다."
+            : review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED"
+              ? "승인 전에는 나인하이어·Slack에 변경이 없습니다."
+              : review.reviewType === "NINEHIRE_SCHEDULE_PROPOSAL_CONFIRMATION_REQUIRED"
+                ? "중복 전송을 막기 위해 이전 전송을 자동으로 다시 시도하지 않습니다."
+                : null,
         actionLabel: integrationRetryExhausted
           ? "연동 상태 확인"
           : interviewerNoResponse
-            ? "상세 보기"
+            ? "추가 요청 검토"
           : supportedReviewDecisionTypes.has(review.reviewType)
             ? reviewActionLabel(review)
             : review.caseId ? "상세 보기" : null,
@@ -529,15 +730,65 @@ function EvaluationSummaryPanel({ evaluation }: { evaluation: EvaluationSummary 
   );
 }
 
-function DecisionModal({ activeDecision, evaluationSummary, onClose, onResolve, loading }: {
+function CandidateScheduleProposalPanel({ proposal }: {
+  proposal: NonNullable<Decision["candidateScheduleProposal"]>;
+}) {
+  return (
+    <section className="rounded-xl border border-blue-200 bg-blue-50/70 p-4 text-sm leading-6 text-slate-800">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="font-semibold text-slate-950">나인하이어 일정 제안 내용</p>
+          <p className="mt-1 text-slate-600">후보자에게 보낼 내용을 확인한 뒤 발송 방법을 선택하세요.</p>
+        </div>
+        <Badge variant="secondary">제안 일정 {proposal.proposalOptions.length}개</Badge>
+      </div>
+      <dl className="mt-4 grid gap-3 sm:grid-cols-2">
+        <div className="rounded-lg bg-white/80 px-3 py-2.5"><dt className="text-xs font-medium text-slate-500">일정 제목</dt><dd className="mt-1 font-medium text-slate-950">{proposal.title ?? "확인 필요"}</dd></div>
+        <div className="rounded-lg bg-white/80 px-3 py-2.5"><dt className="text-xs font-medium text-slate-500">소요 시간 · 회신 기한</dt><dd className="mt-1 font-medium text-slate-950">{proposal.durationMinutes ?? "확인 필요"}분 · {proposal.replyDeadlineDays ?? "확인 필요"}일</dd></div>
+        <div className="rounded-lg bg-white/80 px-3 py-2.5"><dt className="text-xs font-medium text-slate-500">장소</dt><dd className="mt-1 font-medium text-slate-950">{proposal.location ?? "확인 필요"}</dd></div>
+        <div className="rounded-lg bg-white/80 px-3 py-2.5"><dt className="text-xs font-medium text-slate-500">내부 참석자</dt><dd className="mt-1 font-medium text-slate-950">{proposal.internalAttendeeNames.length > 0 ? proposal.internalAttendeeNames.join(", ") : "현재 인터뷰 평가표 면접관 확인 필요"}</dd></div>
+        <div className="rounded-lg bg-white/80 px-3 py-2.5 sm:col-span-2"><dt className="text-xs font-medium text-slate-500">메일 템플릿</dt><dd className="mt-1 font-medium text-slate-950">{proposal.emailTemplateName ?? "사용자 지정 필요"}</dd></div>
+      </dl>
+      <div className="mt-4 border-t border-blue-200 pt-4">
+        <p className="font-semibold text-slate-900">후보자에게 제안할 일정</p>
+        <ol className="mt-3 grid gap-2">
+          {proposal.proposalOptions.map((option, index) => <li className="flex flex-wrap items-center gap-3 rounded-lg border border-blue-100 bg-white px-3 py-3" key={`${option.date}:${option.startTime}:${option.roomName}`}>
+            <span className="grid size-7 shrink-0 place-items-center rounded-full bg-blue-100 text-xs font-bold text-blue-700">{index + 1}</span>
+            <div className="min-w-[11rem] flex-1"><p className="font-semibold text-slate-950">{formatDate(option.date)}</p><p className="mt-0.5 flex items-center gap-1.5 text-slate-700"><Clock3 className="size-3.5" />{option.startTime}~{option.endTime}</p></div>
+            <span className="flex items-center gap-1.5 rounded-md bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-700"><MapPin className="size-3.5" />{option.roomName}</span>
+          </li>)}
+        </ol>
+      </div>
+      {proposal.notice ? <p className="mt-3 text-slate-600">안내 사항. {proposal.notice}</p> : null}
+    </section>
+  );
+}
+
+function DecisionModal({ activeDecision, evaluationSummary, error, onClose, onResolve, loading }: {
   activeDecision: ActiveDecision;
   evaluationSummary?: EvaluationSummary | null;
+  error?: string | null;
   onClose: () => void;
   onResolve: (optionIds: string[]) => void;
   loading: boolean;
 }) {
   const { decision, dismissOnClose } = activeDecision;
   const [selectedOptionIds, setSelectedOptionIds] = useState<string[]>([]);
+  const [showInterviewerAvailability, setShowInterviewerAvailability] = useState(false);
+  const [scheduleOptionSort, setScheduleOptionSort] = useState<ScheduleOptionSort>("TIME");
+  const scheduleSelection = isScheduleSelectionDecision(decision);
+  const availabilityWaiting = decision.decisionType === "WAIT_FOR_AVAILABILITY";
+  const interviewerAvailability = decision.schedulingComparison?.interviewerAvailability
+    ?? decision.interviewerAvailability
+    ?? [];
+  const allInterviewersSubmitted = interviewerAvailability.length > 0
+    && interviewerAvailability.every((interviewer) => interviewer.submitted);
+  const displayedOptions = scheduleSelection
+    ? sortedScheduleOptions(decision, scheduleOptionSort)
+    : decision.options;
+  const scheduleOptionGroups = scheduleSelection
+    ? groupScheduleOptions(displayedOptions, scheduleOptionSort)
+    : [{ label: null, options: displayedOptions }];
 
   useEffect(() => {
     if (decision.selectionMode !== "MULTIPLE") {
@@ -554,6 +805,11 @@ function DecisionModal({ activeDecision, evaluationSummary, onClose, onResolve, 
     setSelectedOptionIds(recommended.length > 0 ? recommended : decision.options.slice(0, 1).map((option) => option.id));
   }, [decision.id, decision.options]);
 
+  useEffect(() => {
+    setShowInterviewerAvailability(false);
+    setScheduleOptionSort("TIME");
+  }, [decision.id]);
+
   const toggleOption = (optionId: string) => {
     if (decision.selectionMode === "SINGLE") {
       setSelectedOptionIds([optionId]);
@@ -563,6 +819,12 @@ function DecisionModal({ activeDecision, evaluationSummary, onClose, onResolve, 
       ? current.filter((selected) => selected !== optionId)
       : [...current, optionId]);
   };
+  const selectedCandidateProposalOption = selectedOptionIds[0];
+  const candidateProposalSubmitLabel = selectedCandidateProposalOption === "SEND_NINEHIRE_SCHEDULE_PROPOSAL"
+    ? "나인하이어 메일 자동 발송"
+    : selectedCandidateProposalOption === "MARK_MANUAL_CANDIDATE_SCHEDULE_PROPOSAL_SENT"
+      ? "발송 완료 기록"
+      : "처리 방법 선택";
 
   return (
     <Dialog open onOpenChange={(open) => !open && !loading && onClose()}>
@@ -573,23 +835,73 @@ function DecisionModal({ activeDecision, evaluationSummary, onClose, onResolve, 
           <DialogDescription>{decision.candidateName ?? "후보자"} · {decision.recruitmentName ?? "채용 정보 확인 필요"}</DialogDescription>
         </DialogHeader>
         <p className="text-base leading-7 text-slate-700">{decision.prompt}</p>
+        {scheduleSelection && decision.schedulingComparison ? <section className="grid gap-4 rounded-2xl border border-slate-300 bg-white p-4 shadow-sm">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="text-base font-semibold text-slate-950">면접관 일정 수집 완료</p>
+              <p className="mt-1 text-sm leading-6 text-slate-600">면접관별 제출 시간을 확인한 뒤 아래에서 후보자에게 제안할 일정을 선택해 주세요.</p>
+            </div>
+            <Badge variant={allInterviewersSubmitted ? "success" : "warning"}>제출 {interviewerAvailability.filter((interviewer) => interviewer.submitted).length}/{interviewerAvailability.length}명</Badge>
+          </div>
+          <div>
+            <button aria-controls={`interviewer-availability-${decision.id}`} aria-expanded={showInterviewerAvailability} className="flex w-full items-center justify-between rounded-xl border border-slate-950 bg-white px-3 py-2.5 text-left text-sm font-semibold text-slate-900 transition-colors hover:bg-slate-50" onClick={() => setShowInterviewerAvailability((open) => !open)} type="button">
+              <span>면접관별 제출 일정 전체 보기</span>
+              <ChevronDown className={`size-4 text-slate-900 transition-transform duration-300 ${showInterviewerAvailability ? "rotate-180" : ""}`} />
+            </button>
+            <div className={`grid transition-[grid-template-rows,margin,opacity] duration-300 ease-out ${showInterviewerAvailability ? "mt-3 grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0"}`} id={`interviewer-availability-${decision.id}`}>
+              <div className="min-h-0 overflow-hidden">
+                <div className="grid max-h-72 gap-2 overflow-y-auto pr-1">{decision.schedulingComparison.interviewerAvailability.map((interviewer) => <div className="rounded-xl border border-slate-200 bg-white p-3" key={interviewer.displayName}><div className="flex flex-wrap items-center justify-between gap-2"><p className="font-semibold text-slate-950">{interviewer.displayName}</p><Badge variant={interviewer.submitted ? "success" : "warning"}>{interviewer.submitted ? "제출 완료" : "미제출"}</Badge></div><p className="mt-1 text-xs text-slate-500">{interviewer.stepNames.length > 0 ? `참여 인터뷰: ${interviewer.stepNames.join(", ")}` : interviewer.required ? "필수 면접관" : "선택 면접관"}</p>{interviewer.slots.length > 0 ? <div className="mt-3 flex flex-wrap gap-2">{interviewer.slots.map((slot) => <span className="rounded-md bg-slate-100 px-2 py-1 text-xs font-medium text-slate-700" key={`${interviewer.displayName}:${slot.date}:${slot.startTime}:${slot.endTime}`}>{formatDate(slot.date)} {slot.startTime}~{slot.endTime}</span>)}</div> : <p className="mt-3 text-sm text-slate-600">제출된 시간이 없습니다.</p>}</div>)}</div>
+              </div>
+            </div>
+          </div>
+        </section> : null}
+        {availabilityWaiting && interviewerAvailability.length > 0 ? <section className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="text-base font-semibold text-slate-950">{allInterviewersSubmitted ? "모든 면접관이 제출 완료했습니다." : "면접관 일정 제출 현황"}</p>
+              <p className="mt-1 text-sm leading-6 text-slate-600">미제출 면접관을 확인하고 필요할 때만 일정 재요청 초안을 만드세요.</p>
+            </div>
+            <Badge variant={allInterviewersSubmitted ? "success" : "warning"}>제출 {interviewerAvailability.filter((interviewer) => interviewer.submitted).length}/{interviewerAvailability.length}명</Badge>
+          </div>
+          <div className="mt-4 grid gap-2">
+            {interviewerAvailability.map((interviewer) => <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-3 py-3" key={interviewer.displayName}>
+              <div>
+                <p className="font-semibold text-slate-950">{interviewer.displayName}</p>
+                <p className="mt-1 text-sm text-slate-600">{interviewer.submitted ? "가능 일정 제출 완료" : "가능 일정 미제출"}</p>
+              </div>
+              <Badge variant={interviewer.submitted ? "success" : "warning"}>{interviewer.submitted ? "제출 완료" : "미제출"}</Badge>
+            </div>)}
+          </div>
+        </section> : null}
         {decision.decisionType === "START_INTERVIEW_ARRANGEMENT" || decision.decisionType === "SELECT_INTERVIEW_ROUTE" || decision.decisionType === "REVIEW_RECRUITMENT_TEMPLATE" ? <EvaluationSummaryPanel evaluation={evaluationSummary} /> : null}
         {decision.candidateMessage ? <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-4 text-sm leading-6 text-amber-950"><p className="font-semibold">후보자 메시지</p><p className="mt-2 whitespace-pre-wrap">{decision.candidateMessage}</p>{decision.scheduledDate && decision.scheduledStartTime && decision.scheduledEndTime ? <p className="mt-3 border-t border-amber-200 pt-3 text-amber-900">기존 제안. {formatDate(decision.scheduledDate)} {decision.scheduledStartTime}~{decision.scheduledEndTime}{decision.scheduledRoomName ? ` · ${decision.scheduledRoomName}` : ""}</p> : null}</div> : null}
-        {decision.candidateScheduleProposal ? <div className="rounded-xl border border-blue-200 bg-blue-50/70 p-4 text-sm leading-6 text-slate-800"><p className="font-semibold text-slate-950">나인하이어 일정 제안 내용</p><dl className="mt-3 grid gap-x-5 gap-y-2 sm:grid-cols-[auto_minmax(0,1fr)]"><dt className="font-medium text-slate-600">일정 제목</dt><dd>{decision.candidateScheduleProposal.title ?? "확인 필요"}</dd><dt className="font-medium text-slate-600">소요 시간</dt><dd>{decision.candidateScheduleProposal.durationMinutes ?? "확인 필요"}분 · 회신 기한 {decision.candidateScheduleProposal.replyDeadlineDays ?? "확인 필요"}일</dd><dt className="font-medium text-slate-600">장소</dt><dd>{decision.candidateScheduleProposal.location ?? "확인 필요"}</dd><dt className="font-medium text-slate-600">내부 참석자</dt><dd>{decision.candidateScheduleProposal.internalAttendeeNames.length > 0 ? decision.candidateScheduleProposal.internalAttendeeNames.join(", ") : "현재 인터뷰 평가표 면접관 확인 필요"}</dd><dt className="font-medium text-slate-600">메일 템플릿</dt><dd>{decision.candidateScheduleProposal.emailTemplateName ?? "사용자 지정 필요"}</dd></dl><div className="mt-4 border-t border-blue-200 pt-3"><p className="font-medium text-slate-700">후보자 제안 일정</p><ul className="mt-2 grid gap-2">{decision.candidateScheduleProposal.proposalOptions.map((option) => <li className="rounded-lg bg-white px-3 py-2" key={`${option.date}:${option.startTime}:${option.roomName}`}>{formatDate(option.date)} {option.startTime}~{option.endTime} · {option.roomName}</li>)}</ul></div>{decision.candidateScheduleProposal.notice ? <p className="mt-3 text-slate-600">안내 사항. {decision.candidateScheduleProposal.notice}</p> : null}</div> : null}
-        <p className="rounded-lg bg-slate-50 px-3 py-2 text-sm leading-6 text-slate-600">{decision.decisionType === "CANDIDATE_SCHEDULE_PROPOSAL_SENT" ? "나인하이어 메일 발송을 누르면 위 내용으로 후보자에게 실제 이메일이 발송됩니다." : "선택 적용을 누르기 전에는 인터뷰 상태나 외부 시스템이 변경되지 않습니다."}</p>
+        {decision.candidateScheduleProposal ? <CandidateScheduleProposalPanel proposal={decision.candidateScheduleProposal} /> : null}
+        {error ? <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm leading-6 text-rose-800">{error}</div> : null}
+        {!scheduleSelection ? <p className="rounded-lg bg-slate-50 px-3 py-2 text-sm leading-6 text-slate-600">{decision.decisionType === "CANDIDATE_SCHEDULE_PROPOSAL_SENT" ? "자동 발송은 위 내용으로 후보자에게 실제 이메일을 보냅니다. 직접 발송 완료 기록은 외부 전송 없이 로컬 상태만 변경합니다." : "선택 적용을 누르기 전에는 인터뷰 상태나 외부 시스템이 변경되지 않습니다."}</p> : null}
         <fieldset className="grid gap-3" aria-label="결정 선택지">
           <legend className="text-sm font-semibold text-slate-900">{decision.selectionMode === "MULTIPLE" ? "후보자에게 제안할 일정을 1개 이상 선택해 주세요." : "처리 방법을 하나 선택해 주세요."}</legend>
-          {decision.options.map((option) => (
-            <label key={option.id} className={`flex cursor-pointer gap-3 rounded-xl border p-4 transition-colors ${selectedOptionIds.includes(option.id) ? "border-blue-500 bg-blue-50/70" : "border-slate-200 hover:border-slate-300"}`}>
-              <input className="mt-1 size-4 accent-blue-600" type={decision.selectionMode === "MULTIPLE" ? "checkbox" : "radio"} name="decision" value={option.id} checked={selectedOptionIds.includes(option.id)} onChange={() => toggleOption(option.id)} />
-              <span><strong className="block text-base text-slate-950">{option.label}</strong><small className="mt-1 block text-sm leading-6 text-slate-600">{option.description}</small></span>
-            </label>
-          ))}
+          {scheduleSelection ? <div aria-label="가능한 일정 정렬" className="mt-3 flex w-fit items-center gap-1 rounded-lg border border-slate-200 bg-white p-1">{([
+            ["TIME", "시간순"],
+            ["DATE", "날짜순"],
+            ["ROOM", "회의실순"],
+          ] as const).map(([sort, label]) => <button aria-pressed={scheduleOptionSort === sort} className={`rounded-md px-2.5 py-1.5 text-xs font-semibold transition-colors ${scheduleOptionSort === sort ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100 hover:text-slate-950"}`} key={sort} onClick={() => setScheduleOptionSort(sort)} type="button">{label}</button>)}</div> : null}
+          {scheduleOptionGroups.map((group, groupIndex) => <div className="grid gap-3" key={group.label ?? `all-options-${groupIndex}`}>
+            {group.label ? <p className="border-b border-slate-200 pb-2 text-base font-semibold text-slate-950">{group.label}</p> : null}
+            {group.options.map((option) => {
+              const schedule = scheduleSelection ? scheduleOptionParts(option.label) : null;
+              return (
+                <label key={option.id} className={`flex cursor-pointer gap-3 rounded-xl border p-4 transition-colors ${selectedOptionIds.includes(option.id) ? "border-blue-500 bg-blue-50/70" : "border-slate-200 hover:border-slate-300"}`}>
+                  <input className="mt-1 size-4 accent-blue-600" type={decision.selectionMode === "MULTIPLE" ? "checkbox" : "radio"} name="decision" value={option.id} checked={selectedOptionIds.includes(option.id)} onChange={() => toggleOption(option.id)} />
+                  <span>{schedule ? <ScheduleOptionSummary schedule={schedule} sort={scheduleOptionSort} /> : <><strong className="block text-base text-slate-950">{option.label}</strong><small className="mt-2 block text-sm leading-6 text-slate-600">{option.description}</small></>}</span>
+                </label>
+              );
+            })}
+          </div>)}
         </fieldset>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>{dismissOnClose ? "닫기" : "나중에 결정"}</Button>
           <Button disabled={selectedOptionIds.length === 0 || loading} onClick={() => onResolve(selectedOptionIds)}>
-            {loading ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}{decision.decisionType === "CANDIDATE_SCHEDULE_PROPOSAL_SENT" ? "나인하이어 메일 발송" : "선택 적용"}
+            {loading ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}{decision.decisionType === "CANDIDATE_SCHEDULE_PROPOSAL_SENT" ? candidateProposalSubmitLabel : "선택 적용"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -629,6 +941,7 @@ function TemplatePreviewDialog({ preview, onClose, onSave, loading, error }: {
   error: string | null;
 }) {
   const suggestedSteps = preview.steps.filter((step) => step.suggestedAsInterview);
+  const isContractRecruitment = preview.employmentType === "CONTRACT";
   const [selections, setSelections] = useState<Record<string, TemplateStepSelection>>(() => initialTemplateStepSelections(preview));
 
   useEffect(() => {
@@ -665,13 +978,14 @@ function TemplatePreviewDialog({ preview, onClose, onSave, loading, error }: {
             ? "저장된 인터뷰 규칙이 없거나 현재 칸반과 달라 확인이 필요합니다. 이 화면에서는 아직 저장하지 않습니다."
             : "현재 저장된 인터뷰 규칙이 최신 칸반과 일치합니다."}
         </div>
+        {isContractRecruitment ? <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm leading-6 text-blue-900">계약직 채용은 1차 인터뷰만 진행하도록 설정됩니다. 2차 인터뷰와 CEO 인터뷰는 선택할 수 없습니다.</div> : null}
         <div className="grid gap-3">
           {preview.steps.map((step) => {
             const selection = selections[step.stepId]!;
             return (
             <div className={`flex flex-col gap-3 rounded-xl border p-4 transition-colors sm:flex-row sm:items-start sm:justify-between ${selection.selected ? "border-blue-200 bg-blue-50/40" : "border-slate-200 bg-white"}`} key={step.stepId}>
               <label className="flex cursor-pointer items-center gap-2 text-sm font-semibold text-slate-700 sm:pt-1">
-                <input checked={selection.selected} className="size-4 accent-blue-600" onChange={(event) => updateSelection(step.stepId, { selected: event.target.checked })} type="checkbox" />
+                <input checked={selection.selected} className="size-4 accent-blue-600" disabled={isContractRecruitment && !step.suggestedAsInterview} onChange={(event) => updateSelection(step.stepId, { selected: event.target.checked })} type="checkbox" />
                 인터뷰 단계
               </label>
               <div><p className="text-base font-semibold text-slate-950">{step.order}. {step.name}</p><p className="mt-1 text-sm text-slate-600">{step.title}</p></div>
@@ -924,8 +1238,22 @@ function readinessReasonLabel(reason: unknown) {
   if (reason === "AUTH_TEST_TIMEOUT" || reason === "TOOL_LIST_TIMEOUT") return "응답 시간 초과";
   if (reason === "AUTH_TEST_FAILED") return "인증 확인 실패";
   if (reason === "TOOL_LIST_FAILED") return "도구 목록 확인 실패";
+  if (reason === "RATE_LIMIT_COOLDOWN") return "나인하이어 요청 한도 보호 대기";
   if (reason === "MISSING_CONFIGURATION") return "필수 설정 없음";
   return "추가 확인 필요";
+}
+
+function readinessCheckDetail(check: Record<string, unknown> | undefined) {
+  if (check?.verification === "RECENT_WORKER_SYNC") {
+    const syncedAt = typeof check.lastSuccessfulSyncAt === "string"
+      ? formatDateTime(check.lastSuccessfulSyncAt)
+      : undefined;
+    return syncedAt ? `최근 워커 동기화 확인 · ${syncedAt}` : "최근 워커 동기화 확인";
+  }
+  if (check?.reason === "RATE_LIMIT_COOLDOWN" && typeof check.retryAfter === "string") {
+    return `${readinessReasonLabel(check.reason)} · ${formatDateTime(check.retryAfter)} 이후 자동 재시도`;
+  }
+  return check?.reason ? readinessReasonLabel(check.reason) : null;
 }
 
 function freshnessStatusInfo(state: "FRESH" | "STALE" | "UNKNOWN" | undefined) {
@@ -970,7 +1298,7 @@ function SummaryMetricCard({
 }
 
 function OperationsReadinessCard() {
-  const READINESS_REQUEST_TIMEOUT_MS = 12_000;
+  const READINESS_REQUEST_TIMEOUT_MS = 20_000;
   const [data, setData] = useState<OperationalReadinessPayload | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1011,7 +1339,13 @@ function OperationsReadinessCard() {
         method: "POST",
         signal: AbortSignal.timeout(READINESS_REQUEST_TIMEOUT_MS),
       });
-      const result = await response.json() as { error?: string };
+      const responseText = await response.text();
+      let result: { error?: string };
+      try {
+        result = JSON.parse(responseText) as { error?: string };
+      } catch {
+        throw new Error(`다우오피스 로그인 창 요청이 올바른 응답을 반환하지 않았습니다. 상태 코드 ${response.status}`);
+      }
       if (!response.ok) throw new Error(result.error ?? "다우오피스 로그인 창을 열지 못했습니다.");
       await load(false);
     } catch (caught) {
@@ -1028,9 +1362,15 @@ function OperationsReadinessCard() {
         method: "POST",
         signal: AbortSignal.timeout(READINESS_REQUEST_TIMEOUT_MS),
       });
-      const result = await response.json() as { error?: string };
+      const responseText = await response.text();
+      let result: { error?: string };
+      try {
+        result = JSON.parse(responseText) as { error?: string };
+      } catch {
+        throw new Error(`나인하이어 로그인 창 요청이 올바른 응답을 반환하지 않았습니다. 상태 코드 ${response.status}`);
+      }
       if (!response.ok) throw new Error(result.error ?? "나인하이어 로그인 창을 열지 못했습니다.");
-      setLoading(false);
+      await load(false);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "나인하이어 로그인 창을 열지 못했습니다.");
       setLoading(false);
@@ -1056,6 +1396,8 @@ function OperationsReadinessCard() {
   useEffect(() => { void load(false); }, []);
   const daou = data?.readiness.checks.daouOfficeBrowser;
   const daouConnected = daou?.connected === true;
+  const ninehireBrowser = data?.readiness.checks.ninehireBrowser;
+  const ninehireConnected = ninehireBrowser?.connected === true;
   const readinessStatus = readinessStatusInfo(data?.readiness.overallStatus);
   const externalChecks = data?.readiness.externalChecks.checks ?? {};
   const workerCheck = data?.readiness.checks.worker;
@@ -1063,6 +1405,23 @@ function OperationsReadinessCard() {
   const activeRetries = retries.filter((job) => job.status !== "COMPLETED");
   const pendingRetries = activeRetries.filter((job) => job.status === "PENDING");
   const failedRetries = activeRetries.filter((job) => job.status === "FAILED");
+  const nextAutomaticRetryAt = pendingRetries
+    .map((job) => job.nextAttemptAt)
+    .filter((value): value is string => Boolean(value))
+    .sort()[0];
+  const failedRetryGroups = failedRetries.reduce(
+    (groups, job) => {
+      const key = `${job.jobType}:${integrationRetryReason(job.lastError ?? "")}`;
+      const existing = groups.find((group) => group.key === key);
+      if (existing) {
+        existing.count += 1;
+      } else {
+        groups.push({ key, job, count: 1 });
+      }
+      return groups;
+    },
+    [] as Array<{ key: string; job: (typeof failedRetries)[number]; count: number }>,
+  );
 
   return (
     <Card className="mt-6" id="integration-health">
@@ -1070,36 +1429,59 @@ function OperationsReadinessCard() {
         <div><p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">INTEGRATION HEALTH</p><CardTitle className="mt-2">연동 상태와 복구</CardTitle><CardDescription className="mt-2">자동 재시도는 워커가 처리합니다. 한도 초과 작업은 확인 후 다시 대기열에 넣을 수 있으며, 외부 메시지는 즉시 발송되지 않습니다.</CardDescription></div>
         <Badge variant={readinessStatus.variant}>{readinessStatus.label}</Badge>
       </CardHeader>
-      <CardContent className="grid gap-5 p-6 pt-0 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto] lg:items-start">
-        <div className="rounded-xl border border-slate-200 p-4"><p className="text-sm font-medium text-slate-500">다우오피스 전용 브라우저</p><p className="mt-2 text-lg font-semibold text-slate-950">{daouConnected ? "연결됨" : "로그인 또는 연결 확인 필요"}</p><p className="mt-2 text-sm leading-6 text-slate-600">{daou?.latestMeetingRoomSyncAt ? `마지막 회의실 동기화. ${formatDateTime(String(daou.latestMeetingRoomSyncAt))}` : "회의실을 추천하기 전 해당 후보자 기준으로 동기화합니다."}</p></div>
+      <CardContent className="grid gap-5 p-6 pt-0 xl:grid-cols-3 xl:items-start">
+        <div className="rounded-xl border border-slate-200 p-4">
+          <p className="text-sm font-medium text-slate-500">다우오피스 전용 브라우저</p>
+          <p className="mt-2 text-lg font-semibold text-slate-950">{daouConnected ? "연결됨" : "로그인 또는 연결 확인 필요"}</p>
+          <p className="mt-2 text-sm leading-6 text-slate-600">{daou?.latestMeetingRoomSyncAt ? `마지막 회의실 동기화. ${formatDateTime(String(daou.latestMeetingRoomSyncAt))}` : "회의실을 추천하기 전 해당 후보자 기준으로 동기화합니다."}</p>
+          <div className="mt-4 border-t border-slate-200 pt-4">
+            <p className="text-sm font-medium text-slate-500">나인하이어 전용 브라우저</p>
+            <p className="mt-2 text-lg font-semibold text-slate-950">{ninehireConnected ? "연결됨" : "로그인 또는 연결 확인 필요"}</p>
+            <p className="mt-2 text-sm leading-6 text-slate-600">후보자 일정 제안 자동화에 사용하는 별도 Chrome 창입니다.</p>
+          </div>
+        </div>
         <div className="rounded-xl border border-slate-200 p-4">
           <div className="flex flex-wrap items-center justify-between gap-2"><p className="text-sm font-medium text-slate-500">외부 연결 확인</p><Badge variant={data?.readiness.externalChecks.performed ? "success" : "secondary"}>{data?.readiness.externalChecks.performed ? "진단 완료" : "진단 전"}</Badge></div>
           <div className="mt-3 space-y-2">
             {[{ label: "Slack", check: externalChecks.slack }, { label: "나인하이어", check: externalChecks.ninehire }, { label: "워커", check: workerCheck }].map(({ label, check }) => {
               const status = typeof check?.status === "string" ? check.status : "NOT_RUN";
               const info = readinessStatusInfo(status);
-              return <div className="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2" key={label}><span className="text-sm font-medium text-slate-700">{label}</span><span className="flex items-center gap-2"><span className="text-xs text-slate-500">{check?.reason ? readinessReasonLabel(check.reason) : null}</span><Badge variant={info.variant}>{info.label}</Badge></span></div>;
+              return <div className="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2" key={label}><span className="text-sm font-medium text-slate-700">{label}</span><span className="flex items-center gap-2"><span className="text-xs text-slate-500">{readinessCheckDetail(check)}</span><Badge variant={info.variant}>{info.label}</Badge></span></div>;
             })}
           </div>
           <p className="mt-3 text-xs leading-5 text-slate-500">연결 다시 진단을 누르면 Slack과 나인하이어를 다시 확인합니다. 워커가 최신이 아니면 자동화 처리가 멈출 수 있습니다.</p>
         </div>
         <div className="rounded-xl border border-slate-200 p-4">
-          <div className="flex flex-wrap items-center justify-between gap-2"><p className="text-sm font-medium text-slate-500">자동 복구 대기열</p><div className="flex gap-1.5"><Badge variant="warning">대기 {pendingRetries.length}</Badge><Badge variant="destructive">실패 {failedRetries.length}</Badge></div></div>
-          <p className="mt-2 text-lg font-semibold text-slate-950">확인 필요한 작업 {activeRetries.length}건</p>
-          <p className="mt-2 text-sm leading-6 text-slate-600">Slack·나인하이어 조회가 잠시 실패하면 워커가 자동으로 다시 시도합니다. 외부 메시지 발송은 자동으로 진행하지 않습니다.</p>
-          {activeRetries.length > 0 ? <div className="mt-4 grid max-h-64 gap-2 overflow-y-auto pr-1">{activeRetries.slice(0, 5).map((job) => {
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <p className="text-sm font-medium text-slate-500">자동 복구 현황</p>
+              <p className="mt-1 text-lg font-semibold text-slate-950">
+                {failedRetries.length > 0
+                  ? `사용자 확인 ${failedRetries.length}건`
+                  : pendingRetries.length > 0
+                    ? `확인 중 ${pendingRetries.length}건`
+                    : "확인할 복구 작업이 없습니다"}
+              </p>
+            </div>
+            {failedRetries.length > 0 ? <Badge variant="destructive">확인 필요</Badge> : pendingRetries.length > 0 ? <Badge variant="warning">자동 처리 중</Badge> : <Badge variant="success">정상</Badge>}
+          </div>
+          <p className="mt-3 text-sm leading-6 text-slate-600">
+            일시적인 Slack·나인하이어 조회 오류는 워커가 자동으로 다시 확인합니다. 외부 메시지는 자동 발송하지 않습니다.
+          </p>
+          {failedRetryGroups.length > 0 ? <div className="mt-4 grid max-h-64 gap-2 overflow-y-auto pr-1">{failedRetryGroups.map(({ job, count }) => {
             const info = retryStatusInfo(job.status);
             const maxAttempts = job.maxAttempts ?? 3;
-            return <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3" key={job.id}>
-              <div className="flex flex-wrap items-start justify-between gap-2"><p className="text-sm font-semibold text-slate-900">{retryJobTypeLabel(job.jobType)}</p><Badge variant={info.variant}>{info.label}</Badge></div>
-              <p className="mt-1 text-xs leading-5 text-slate-600">{info.detail}</p>
-              <div className="mt-2 flex flex-wrap items-center justify-between gap-2"><p className="text-xs text-slate-500">시도 {job.attemptCount}/{maxAttempts}{job.status === "PENDING" && job.nextAttemptAt ? ` · 다음 확인 ${formatDateTime(job.nextAttemptAt)}` : ""}</p>{job.status === "FAILED" ? <Button disabled={retryingId === job.id || loading} onClick={() => void retryIntegrationJob(job.id)} size="sm" variant="outline">{retryingId === job.id ? <Loader2 className="size-3.5 animate-spin" /> : null}재시도 승인</Button> : null}</div>
+            return <div className="rounded-lg border border-rose-100 bg-rose-50/50 p-3" key={job.id}>
+              <div className="flex flex-wrap items-start justify-between gap-2"><p className="text-sm font-semibold text-slate-900">{retryJobTypeLabel(job.jobType)}{count > 1 ? ` ${count}건` : ""}</p><Badge variant={info.variant}>{info.label}</Badge></div>
+              <p className="mt-1 text-xs leading-5 text-slate-600">{integrationRetryReason(job.lastError ?? info.detail)}</p>
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2"><p className="text-xs text-slate-500">자동 확인 {job.attemptCount}/{maxAttempts}회 완료{count > 1 ? " · 같은 원인으로 묶어 표시" : ""}</p><Button disabled={retryingId === job.id || loading} onClick={() => void retryIntegrationJob(job.id)} size="sm" variant="outline">{retryingId === job.id ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}{count > 1 ? "대표 1건 다시 확인" : "지금 다시 확인"}</Button></div>
             </div>;
-          })}</div> : <p className="mt-3 rounded-lg bg-emerald-50 px-3 py-2 text-sm leading-6 text-emerald-800">현재 자동으로 복구할 작업이 없습니다.</p>}
-          {activeRetries.length > 5 ? <p className="mt-2 text-xs text-slate-500">최근 5건만 표시합니다. 전체 상태는 연결 진단 결과에서 확인하세요.</p> : null}
+          })}</div> : null}
+          {pendingRetries.length > 0 ? <div className="mt-4 rounded-lg border border-amber-100 bg-amber-50/60 px-3 py-3"><div className="flex items-center gap-2 text-sm font-semibold text-amber-900"><Clock3 className="size-4" />자동으로 다시 확인하고 있습니다</div><p className="mt-1 text-sm leading-6 text-amber-800">{nextAutomaticRetryAt ? `다음 확인 예정: ${formatDateTime(nextAutomaticRetryAt)}.` : "다음 동기화 주기에 다시 확인합니다."}</p></div> : null}
+          {activeRetries.length === 0 ? <p className="mt-4 rounded-lg bg-emerald-50 px-3 py-3 text-sm leading-6 text-emerald-800">연동 오류로 다시 확인해야 할 작업이 없습니다.</p> : null}
         </div>
-        <div className="flex flex-wrap gap-2 lg:justify-end"><Button disabled={loading} onClick={() => void load(true)} variant="outline">{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}연결 다시 진단</Button>{!daouConnected ? <Button disabled={loading} onClick={() => void openDaouLogin()} variant="outline">다우오피스 로그인</Button> : null}<Button disabled={loading} onClick={() => void openNinehireLogin()} variant="outline">나인하이어 자동화 로그인</Button></div>
-        {error ? <p aria-live="assertive" className="lg:col-span-4 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">{error}</p> : null}
+        <div className="flex flex-wrap gap-2 xl:col-span-3 xl:justify-end"><Button disabled={loading} onClick={() => void load(true)} variant="outline">{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}연결 다시 진단</Button><Button disabled={loading} onClick={() => void openDaouLogin()} variant="outline">{daouConnected ? "다우오피스 창 다시 열기" : "다우오피스 로그인"}</Button><Button disabled={loading} onClick={() => void openNinehireLogin()} variant="outline">{ninehireConnected ? "나인하이어 자동화 창 다시 열기" : "나인하이어 자동화 로그인"}</Button></div>
+        {error ? <p aria-live="assertive" className="xl:col-span-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">{error}</p> : null}
       </CardContent>
     </Card>
   );
@@ -1108,7 +1490,7 @@ function OperationsReadinessCard() {
 function ActionRow({ item, onCreateReviewDecision, onCreateCaseDecision, onOpenDecision, loading }: {
   item: ActionItem;
   onCreateReviewDecision: (review: Review) => void;
-  onCreateCaseDecision: (caseId: string, skillKey: "AVAILABILITY_COLLECTION" | "INTERVIEW_SCHEDULING" | "CANDIDATE_SCHEDULE_PROPOSAL") => void;
+  onCreateCaseDecision: (caseId: string, skillKey: "AVAILABILITY_COLLECTION" | "INTERVIEW_SCHEDULING" | "CANDIDATE_SCHEDULE_PROPOSAL" | "CANDIDATE_SCHEDULE_RESPONSE") => void;
   onOpenDecision: (decision: Decision) => void;
   loading: boolean;
 }) {
@@ -1116,6 +1498,7 @@ function ActionRow({ item, onCreateReviewDecision, onCreateCaseDecision, onOpenD
   const review = item.review;
   const detailHref = item.href ?? (review ? `/reviews/${review.id}` : null);
   const actionableReview = Boolean(review && supportedReviewDecisionTypes.has(review.reviewType));
+  const pendingAvailabilityDrafts = item.pendingDrafts?.filter((draft) => draft.status === "DRAFT") ?? [];
   const priority = priorityStyle(item.priority);
   const actionKind = directDecision ? "결정 재개" : actionableReview ? "검토 필요" : item.caseSkillKey ? "다음 단계 선택" : "상세 확인";
   const actionHint = directDecision
@@ -1145,7 +1528,7 @@ function ActionRow({ item, onCreateReviewDecision, onCreateCaseDecision, onOpenD
                   return (
                     <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-slate-50 px-3 py-2" key={related.id}>
                       <div className="min-w-0"><p className="truncate text-sm font-medium text-slate-800">{related.title}</p><p className="mt-0.5 text-xs text-slate-500">{related.category}</p></div>
-                      {relatedDecision ? <Button aria-label={`${related.candidateName ?? "후보자"} 결정 재개`} onClick={() => onOpenDecision(relatedDecision)} size="sm" title="선택지를 확인한 뒤 적용합니다." variant="decision">결정 계속하기<ArrowRight className="size-3.5" /></Button> : null}
+                      {relatedDecision ? <Button aria-label={`${related.candidateName ?? "후보자"} ${decisionActionLabel(relatedDecision)}`} onClick={() => onOpenDecision(relatedDecision)} size="sm" title="선택지를 확인한 뒤 적용합니다." variant="decision">{decisionActionLabel(relatedDecision)}<ArrowRight className="size-3.5" /></Button> : null}
                       {!relatedDecision && relatedActionableReview && relatedReview ? <Button aria-label={`${related.candidateName ?? "후보자"} 검토 열기`} disabled={loading} onClick={() => onCreateReviewDecision(relatedReview)} size="sm" title="검토 내용을 열어 처리 방법을 선택합니다." variant="outline">검토하기<ArrowRight className="size-3.5" /></Button> : null}
                       {!relatedDecision && !relatedActionableReview && related.caseSkillKey && related.caseId ? <Button aria-label={`${related.candidateName ?? "후보자"} 다음 단계 선택`} disabled={loading} onClick={() => onCreateCaseDecision(related.caseId!, related.caseSkillKey!)} size="sm" title="다음 단계와 실행 범위를 확인합니다.">결정하기<ArrowRight className="size-3.5" /></Button> : null}
                       {!relatedDecision && !relatedActionableReview && !related.caseSkillKey && related.href ? <Button asChild aria-label={`${related.candidateName ?? "후보자"} 상세 확인`} size="sm" title="후보자 상세에서 현재 상태를 확인합니다." variant="outline"><Link href={related.href}>상세 보기<ArrowRight className="size-3.5" /></Link></Button> : null}
@@ -1161,17 +1544,21 @@ function ActionRow({ item, onCreateReviewDecision, onCreateCaseDecision, onOpenD
         <div className="mt-4 border-y border-slate-100 py-4"><CandidateJourneyTimeline journey={item.candidateJourney} /></div>
         <p className="mt-4 text-base font-medium leading-6 text-slate-800">{item.title}</p>
         <p className="mt-1 text-sm leading-6 text-slate-600">{item.description}</p>
+        {item.interviewerResponses ? <InterviewerResponseSummary responses={item.interviewerResponses} /> : null}
       </div>
       <div className="flex shrink-0 flex-col items-stretch gap-2 sm:items-end">
         <span className={`text-xs font-semibold ${directDecision ? "text-indigo-700" : actionableReview ? "text-slate-600" : item.caseSkillKey ? "text-blue-700" : "text-slate-500"}`}>{actionKind}</span>
-        {directDecision ? <Button aria-label={`${item.candidateName ?? "후보자"} ${actionHint}`} title={actionHint} variant="decision" onClick={() => onOpenDecision(directDecision)}>결정 계속하기<ArrowRight className="size-4" /></Button> : null}
+        {directDecision ? <Button aria-label={`${item.candidateName ?? "후보자"} ${decisionActionLabel(directDecision)}`} title={actionHint} variant="decision" onClick={() => onOpenDecision(directDecision)}>{decisionActionLabel(directDecision)}<ArrowRight className="size-4" /></Button> : null}
         {!directDecision && actionableReview && review ? (
           <Button aria-label={`${item.candidateName ?? "후보자"} ${actionHint}`} disabled={loading} onClick={() => onCreateReviewDecision(review)} title={actionHint} variant="outline">{loading ? <Loader2 className="size-4 animate-spin" /> : null}{item.actionLabel ?? "검토 열기"}<ArrowRight className="size-4" /></Button>
         ) : null}
-        {!directDecision && !actionableReview && item.caseSkillKey && item.caseId ? (
+        {!directDecision && !actionableReview && pendingAvailabilityDrafts.length > 0 ? (
+          <DraftApprovalCard drafts={pendingAvailabilityDrafts} interviewerNames={item.interviewerNames ?? {}} triggerLabel="초안 확인" variant="trigger" />
+        ) : null}
+        {!directDecision && !actionableReview && pendingAvailabilityDrafts.length === 0 && item.caseSkillKey && item.caseId ? (
           <Button aria-label={`${item.candidateName ?? "후보자"} ${actionHint}`} disabled={loading} onClick={() => onCreateCaseDecision(item.caseId!, item.caseSkillKey!)} title={actionHint}>{loading ? <Loader2 className="size-4 animate-spin" /> : null}{item.actionLabel ?? "결정하기"}<ArrowRight className="size-4" /></Button>
         ) : null}
-        {!directDecision && !actionableReview && !item.caseSkillKey && item.href && item.actionLabel ? <Button asChild aria-label={`${item.candidateName ?? "후보자"} ${actionHint}`} title={actionHint} variant="outline"><Link href={item.href}>{item.actionLabel}<ArrowRight className="size-4" /></Link></Button> : null}
+        {!directDecision && !actionableReview && pendingAvailabilityDrafts.length === 0 && !item.caseSkillKey && item.href && item.actionLabel ? <Button asChild aria-label={`${item.candidateName ?? "후보자"} ${actionHint}`} title={actionHint} variant="outline"><Link href={item.href}>{item.actionLabel}<ArrowRight className="size-4" /></Link></Button> : null}
         {detailHref ? <Button asChild size="sm" variant="ghost"><Link href={detailHref}>상세 보기<ArrowRight className="size-3.5" /></Link></Button> : null}
       </div>
     </article>
@@ -1225,11 +1612,14 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
   const [interviewerMapping, setInterviewerMapping] = useState<InterviewerSlackMappingRequest | null>(null);
   const [loadingId, setLoadingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [queueTab, setQueueTab] = useState<"ACTION" | "WAITING" | "EXCEPTION" | "ALL">("ACTION");
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
   const [hydrated, setHydrated] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [externalRefreshing, setExternalRefreshing] = useState(false);
+  const [externalRefreshResult, setExternalRefreshResult] = useState<ExternalRefreshResult | null>(null);
   const refreshRequestId = useRef(0);
 
   const refresh = useCallback(async () => {
@@ -1241,13 +1631,40 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
       const nextData = await response.json() as DashboardSnapshot;
       if (requestId !== refreshRequestId.current) return;
       setData(nextData);
-      setError(null);
     } catch (caught) {
       if (requestId === refreshRequestId.current) throw caught;
     } finally {
       if (requestId === refreshRequestId.current) setRefreshing(false);
     }
   }, []);
+
+  const refreshExternalData = async () => {
+    if (externalRefreshing) return;
+    setExternalRefreshing(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/operations/external-refresh", { method: "POST" });
+      const result = await readApiJson<ExternalRefreshResult & { error?: string }>(
+        response,
+        "외부 데이터를 업데이트하지 못했습니다.",
+      );
+      if (!response.ok) {
+        throw new Error(result.error ?? "외부 데이터를 업데이트하지 못했습니다.");
+      }
+      setExternalRefreshResult(result);
+      const failedSteps = result.steps.filter((step) => step.status === "FAILED");
+      setNotice(
+        failedSteps.length > 0
+          ? `외부 데이터 업데이트를 완료했지만 ${failedSteps.length}개 항목은 확인이 필요합니다.`
+          : "외부 데이터를 최신 상태로 업데이트했습니다.",
+      );
+      await refresh();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "외부 데이터를 업데이트하지 못했습니다.");
+    } finally {
+      setExternalRefreshing(false);
+    }
+  };
 
   useEffect(() => {
     setHydrated(true);
@@ -1272,7 +1689,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
 
   const createCaseDecision = async (
     caseId: string,
-    skillKey: "AVAILABILITY_COLLECTION" | "INTERVIEW_SCHEDULING" | "CANDIDATE_SCHEDULE_PROPOSAL",
+    skillKey: "AVAILABILITY_COLLECTION" | "INTERVIEW_SCHEDULING" | "CANDIDATE_SCHEDULE_PROPOSAL" | "CANDIDATE_SCHEDULE_RESPONSE",
   ) => {
     setLoadingId(`case:${caseId}`);
     setError(null);
@@ -1308,6 +1725,11 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
       });
       const result = await readApiJson<{ error?: string; followUp?: unknown }>(response, "결정문을 처리하지 못했습니다.");
       if (!response.ok) throw new Error(result.error ?? "결정문을 처리하지 못했습니다.");
+      if (decision.decisionType === "WAIT_FOR_AVAILABILITY") {
+        setNotice(optionId === "OPEN_RECOVERY"
+          ? "미제출 면접관에게 보낼 일정 재요청 초안을 만들었습니다. 초안 확인 후에만 Slack으로 발송됩니다."
+          : "면접관 일정 제출 대기 상태를 유지했습니다.");
+      }
       const followUpDecision = result.followUp
         && typeof result.followUp === "object"
         && "decision" in result.followUp
@@ -1513,18 +1935,54 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
       <AppHeader active="operations" workerStatus={summary.worker.status} />
       <main className="mx-auto max-w-[1440px] px-5 pb-12 sm:px-8" id="main-content">
         <PageHeader
-          actions={<Button disabled={refreshing} variant="outline" onClick={() => void refresh().catch((caught) => setError(caught instanceof Error ? caught.message : "운영 현황을 새로 불러오지 못했습니다."))}>{refreshing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} {refreshing ? "갱신 중" : "새로고침"}</Button>}
+          actions={<div className="flex flex-wrap items-center justify-end gap-2">
+            <Button disabled={externalRefreshing} onClick={() => void refreshExternalData()}>
+              {externalRefreshing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+              {externalRefreshing ? "업데이트 중" : "외부 데이터 업데이트"}
+            </Button>
+            <Button disabled={refreshing || externalRefreshing} variant="outline" onClick={() => void refresh().catch((caught) => setError(caught instanceof Error ? caught.message : "운영 현황을 새로 불러오지 못했습니다."))}>
+              {refreshing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+              {refreshing ? "갱신 중" : "화면 새로고침"}
+            </Button>
+          </div>}
           description="판단하거나 처리해야 하는 인터뷰 업무부터 확인하고, 확정된 일정과 운영 상태를 함께 살펴보세요."
           eyebrow="INTERVIEW OPERATIONS"
           title="오늘의 인터뷰 운영"
         />
 
         {error ? <div className="mb-6 flex items-center gap-2 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-800"><AlertCircle className="size-4" />{error}</div> : null}
+        {notice ? <div aria-live="polite" className="mb-6 flex items-center justify-between gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-900"><span>{notice}</span><button aria-label="안내 닫기" className="text-emerald-800 underline underline-offset-2" onClick={() => setNotice(null)} type="button">닫기</button></div> : null}
         {freshnessWarnings.length > 0 ? (
           <div aria-live="polite" className="mb-6 flex flex-col gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-4 text-amber-950 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex items-start gap-3"><TriangleAlert className="mt-0.5 size-5 shrink-0 text-amber-700" /><div><p className="text-sm font-bold">최신 운영 데이터 확인이 필요합니다.</p><p className="mt-1 text-sm leading-6 text-amber-900">{freshnessWarnings.join(", ")} 상태가 최신이 아닙니다. 아래 큐는 마지막으로 성공한 동기화 기준으로 표시됩니다.</p></div></div>
-            <Button className="shrink-0" disabled={refreshing} onClick={() => void refresh().catch((caught) => setError(caught instanceof Error ? caught.message : "운영 현황을 새로 불러오지 못했습니다."))} size="sm" variant="outline">{refreshing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}다시 확인</Button>
+            <Button className="shrink-0" disabled={externalRefreshing} onClick={() => void refreshExternalData()} size="sm" variant="outline">{externalRefreshing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}데이터 업데이트</Button>
           </div>
+        ) : null}
+
+        {externalRefreshResult ? (
+          <section aria-live="polite" className="mb-6 rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="text-sm font-semibold text-slate-950">외부 데이터 업데이트 결과</p>
+                <p className="mt-1 text-sm text-slate-600">Slack, 나인하이어, 다우오피스를 조회해 로컬 운영 현황을 갱신했습니다. 메시지 발송이나 일정 변경은 실행하지 않았습니다.</p>
+              </div>
+              <div className="flex shrink-0 items-center gap-3">
+                <p className="text-xs text-slate-500">{hydrated ? formatGeneratedAt(externalRefreshResult.completedAt) : "방금 완료"}</p>
+                <button className="text-sm font-medium text-slate-600 underline underline-offset-2 transition-colors hover:text-slate-950" onClick={() => setExternalRefreshResult(null)} type="button">닫기</button>
+              </div>
+            </div>
+            <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+              {externalRefreshResult.steps.map((step) => (
+                <div className={`rounded-lg border px-3 py-3 ${step.status === "COMPLETED" ? "border-emerald-200 bg-emerald-50" : step.status === "DEFERRED" ? "border-amber-200 bg-amber-50" : "border-rose-200 bg-rose-50"}`} key={step.id}>
+                  <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+                    {step.status === "COMPLETED" ? <CheckCircle2 className="size-4 shrink-0 text-emerald-600" /> : step.status === "DEFERRED" ? <Clock3 className="size-4 shrink-0 text-amber-700" /> : <TriangleAlert className="size-4 shrink-0 text-rose-600" />}
+                    {step.label}
+                  </div>
+                  <p className="mt-2 text-xs leading-5 text-slate-600">{step.detail}</p>
+                </div>
+              ))}
+            </div>
+          </section>
         ) : null}
 
         <section className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-5" aria-label="운영 요약">
@@ -1640,7 +2098,7 @@ export function DashboardClient({ initialData }: { initialData: DashboardSnapsho
         <OperationsReadinessCard />
       </main>
 
-      {activeDecision ? <DecisionModal activeDecision={activeDecision} evaluationSummary={activeReview?.evaluationSummary} loading={loadingId === activeDecision.decision.id} onClose={() => void closeDecision()} onResolve={resolveDecision} /> : null}
+      {activeDecision ? <DecisionModal activeDecision={activeDecision} evaluationSummary={activeReview?.evaluationSummary} error={error} loading={loadingId === activeDecision.decision.id} onClose={() => void closeDecision()} onResolve={resolveDecision} /> : null}
       {templatePreview ? <TemplatePreviewDialog
         error={error}
         loading={loadingId === `template:${templatePreview.preview.recruitmentId}`}

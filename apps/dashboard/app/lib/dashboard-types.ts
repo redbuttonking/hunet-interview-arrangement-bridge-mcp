@@ -32,6 +32,15 @@ export type CandidateCase = {
     endTime: string;
   }>;
   candidateScheduleProposalSent: boolean;
+  pendingDrafts: Array<{
+    id: string;
+    messageType: string;
+    status: string;
+    previewText: string;
+    blocksJson: string;
+    createdAt: string;
+  }>;
+  interviewerNames: Record<string, string>;
   cancellationExternalFollowUps: Array<{
     id: string;
     followUpType: "NINEHIRE_CANDIDATE_SCHEDULE" | "DAOU_ROOM_RESERVATION";
@@ -45,6 +54,10 @@ export type CandidateCase = {
     submitted: number;
     pending: number;
     declinedPendingReview: number;
+    interviewers: Array<{
+      displayName: string;
+      status: "PENDING" | "SUBMITTED" | "DECLINED_PENDING_REVIEW" | "EXCLUDED_BY_USER" | "EXCLUDED_UPSTREAM";
+    }>;
   };
   needsAttention: boolean;
   interviewPlan: {
@@ -139,6 +152,42 @@ export type Decision = {
       roomName: string;
     }>;
   } | null;
+  schedulingComparison?: {
+    interviewerAvailability: Array<{
+      displayName: string;
+      required: boolean;
+      submitted: boolean;
+      stepNames: string[];
+      slots: Array<{
+        date: string;
+        startTime: string;
+        endTime: string;
+      }>;
+    }>;
+    isSequential: boolean;
+    commonSlots: Array<{
+      date: string;
+      startTime: string;
+      endTime: string;
+    }>;
+    roomMatchedSlots: Array<{
+      date: string;
+      startTime: string;
+      endTime: string;
+      roomName: string;
+    }>;
+  } | null;
+  interviewerAvailability?: Array<{
+    displayName: string;
+    required: boolean;
+    submitted: boolean;
+    stepNames: string[];
+    slots: Array<{
+      date: string;
+      startTime: string;
+      endTime: string;
+    }>;
+  }> | null;
   createdAt: string;
 };
 

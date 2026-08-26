@@ -17,6 +17,10 @@ describe("DaouOffice browser profile", () => {
     expect(args).toContain("--remote-debugging-address=127.0.0.1");
     expect(args).toContain("--remote-debugging-port=9222");
     expect(args).toContain("--user-data-dir=C:/temp/daou-profile");
+    expect(args).toContain("--disable-gpu");
+    expect(args).toContain("--disable-gpu-compositing");
+    expect(args).toContain("--in-process-gpu");
+    expect(args).toContain("--start-maximized");
     expect(args.at(-1)).toBe("https://hug.hunet.co.kr/app/asset");
     expect(daouOfficeDebugUrl(9222)).toBe("http://127.0.0.1:9222");
   });

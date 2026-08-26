@@ -29,6 +29,7 @@ export interface CandidateJourneyInput {
   interviewCase?: InterviewCaseRow;
   plannedStepIds?: string[];
   evaluationStatus?: CandidateJourneyEvaluationStatus;
+  candidateScheduleProposalSent?: boolean;
 }
 
 type JourneyRoute = RecruitmentInterviewRoute & {
@@ -108,6 +109,7 @@ function scheduledDetail(
 function currentStageDetail(
   interviewCase?: InterviewCaseRow,
   evaluationStatus?: CandidateJourneyEvaluationStatus,
+  candidateScheduleProposalSent = false,
 ): string {
   if (!interviewCase) return "일정 조율 시작 대기";
   const labels: Partial<Record<InterviewCaseStatus, string>> = {
@@ -116,7 +118,7 @@ function currentStageDetail(
     REQUEST_SENT: "면접관 일정 응답 대기",
     COLLECTING_AVAILABILITY: "면접관 일정 응답 대기",
     READY_TO_SCHEDULE: "시간·회의실 선택 대기",
-    AWAITING_CANDIDATE_CONFIRMATION: "후보자 응답 대기",
+    AWAITING_CANDIDATE_CONFIRMATION: candidateScheduleProposalSent ? "후보자 응답 대기" : "일정 제안 보내기 전",
     CONFIRMED: scheduledDetail(interviewCase, evaluationStatus),
     REVIEW_REQUIRED: "예외 상황 확인 필요",
     ON_HOLD: "조율 보류",
@@ -162,7 +164,11 @@ export function buildCandidateJourney(input: CandidateJourneyInput): CandidateJo
       || currentRoute.stepIds.some((stepId) => plannedStepIds.has(stepId));
   const currentInterviewCase = caseMatchesCurrentRoute ? input.interviewCase : undefined;
   const interviewCaseState = stageStateForCase(currentInterviewCase);
-  const currentDetail = currentStageDetail(currentInterviewCase, input.evaluationStatus);
+  const currentDetail = currentStageDetail(
+    currentInterviewCase,
+    input.evaluationStatus,
+    input.candidateScheduleProposalSent,
+  );
   const stages: CandidateJourneyStage[] = [
     {
       id: "document-screening",

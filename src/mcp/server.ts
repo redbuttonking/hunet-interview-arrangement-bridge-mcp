@@ -127,6 +127,7 @@ export function createBridgeMcpServer(
     db,
     gateway,
     daouOfficeBrowser,
+    ninehireBrowser,
     slackClient,
   );
   const interviewSkills = new InterviewArrangementSkills(db, workflow, readiness);
@@ -1012,6 +1013,11 @@ export function createBridgeMcpServer(
           triggerStepId: z.string().min(1),
           mode: z.enum(["STANDARD", "COMBINED", "SEQUENTIAL"]),
           stepIds: z.array(z.string().min(1)).min(1).max(10),
+          sessions: z.array(z.object({
+            sessionId: z.string().min(1),
+            sessionName: z.string().min(1),
+            scoreSheetTitleIncludes: z.string().min(1).optional(),
+          })).min(2).max(10).optional(),
         })).max(10).optional(),
       },
       annotations: {

@@ -20,6 +20,7 @@
     "start:mcp": "node dist/src/mcp/main.js",
     "start:worker": "node dist/src/worker/main.js",
     "build:dashboard": "npm run build && next build apps/dashboard",
+    "build:installer": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\build-installer.ps1",
     "start:dashboard": "next start apps/dashboard --hostname 127.0.0.1 --port 3100",
     "check:repo": "node scripts/check-repository-hygiene.mjs",
     "test": "vitest run",

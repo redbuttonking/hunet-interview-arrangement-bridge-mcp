@@ -8,22 +8,21 @@ import {
 } from "../src/domain/calendar.js";
 
 describe("proposalDates", () => {
-  it("uses this Thursday and next Monday through Thursday on Monday", () => {
-    expect(proposalDates("2026-07-27")).toEqual([
-      "2026-07-30",
-      "2026-08-03",
-      "2026-08-04",
-      "2026-08-05",
-      "2026-08-06",
+  it("uses the next four Korean business days", () => {
+    expect(proposalDates("2026-08-20")).toEqual([
+      "2026-08-21",
+      "2026-08-24",
+      "2026-08-25",
+      "2026-08-26",
     ]);
   });
 
-  it("uses next Monday through Thursday on other weekdays", () => {
-    expect(proposalDates("2026-07-24")).toEqual([
-      "2026-07-27",
-      "2026-07-28",
-      "2026-07-29",
-      "2026-07-30",
+  it("skips Korean substitute public holidays", () => {
+    expect(proposalDates("2026-08-14")).toEqual([
+      "2026-08-18",
+      "2026-08-19",
+      "2026-08-20",
+      "2026-08-21",
     ]);
   });
 
@@ -39,6 +38,13 @@ describe("proposalDates", () => {
     expect(
       nextProposalWeekDates(["2026-08-18", "2026-08-19", "2026-08-20"], "2026-09-01"),
     ).toEqual(["2026-09-01", "2026-09-02", "2026-09-03"]);
+  });
+
+  it("moves a next-week date that falls on a Korean public holiday", () => {
+    expect(nextProposalWeekDates(["2026-09-17", "2026-09-18"])).toEqual([
+      "2026-09-28",
+      "2026-09-29",
+    ]);
   });
 });
 

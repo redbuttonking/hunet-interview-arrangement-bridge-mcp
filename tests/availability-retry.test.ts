@@ -1,5 +1,5 @@
 // 공통 일정이 없을 때 다음 주 일정 요청 초안만 생성하는 흐름을 검증한다.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AppConfig } from "../src/config.js";
 import { BridgeDatabase } from "../src/db/database.js";
 import { WorkflowService } from "../src/services/workflow.js";
@@ -25,6 +25,8 @@ const config: AppConfig = {
 
 describe("next-week availability retry", () => {
   it("다음 주 일정 요청 초안을 만들되 Slack에는 발송하지 않는다", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-18T12:00:00+09:00"));
     const db = new BridgeDatabase(":memory:");
     try {
       db.upsertRecruitmentSlackChannel({
@@ -93,6 +95,7 @@ describe("next-week availability retry", () => {
       expect(db.getInterviewer(interviewer.id)?.status).toBe("PENDING");
     } finally {
       db.close();
+      vi.useRealTimers();
     }
   });
 });

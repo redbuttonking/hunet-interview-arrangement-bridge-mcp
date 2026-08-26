@@ -9,6 +9,8 @@ import {
   buildCandidateJourney,
   type CandidateJourneyEvaluationStatus,
 } from "./candidate-journey.js";
+import { suggestCommonSlots } from "../domain/availability.js";
+import { suggestInterviewSlotsWithRooms } from "../services/room-scheduling.js";
 
 const FRESHNESS_THRESHOLD_MS = 10 * 60 * 1000;
 
@@ -66,6 +68,88 @@ function records(value: unknown): Record<string, unknown>[] {
 
 function number(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function isScheduleSelectionDecision(decision: InterviewSkillDecisionRow): boolean {
+  return ["CONFIRM_STANDARD_SCHEDULE", "CONFIRM_SEQUENTIAL_SCHEDULE"].includes(decision.decisionType);
+}
+
+function interviewerAvailability(db: BridgeDatabase, decision: InterviewSkillDecisionRow) {
+  if (!decision.caseId) return null;
+  const bundle = db.getCaseBundle(decision.caseId);
+  if (!bundle) return null;
+  const plan = db.getCaseInterviewPlan(decision.caseId);
+  const stepNamesByInterviewerId = new Map<string, string[]>();
+  if (plan?.mode === "SEQUENTIAL") {
+    for (const session of plan.sessions) {
+      for (const interviewerId of session.interviewerIds) {
+        const stepNames = stepNamesByInterviewerId.get(interviewerId) ?? [];
+        stepNames.push(session.stepName);
+        stepNamesByInterviewerId.set(interviewerId, stepNames);
+      }
+    }
+  } else if (plan) {
+    for (const interviewerId of plan.interviewerIds) {
+      stepNamesByInterviewerId.set(interviewerId, plan.stepNames);
+    }
+  }
+  const availabilityByInterviewer = new Map<string, Array<{ date: string; startTime: string; endTime: string }>>();
+  for (const slot of bundle.availability) {
+    const slots = availabilityByInterviewer.get(slot.interviewerId) ?? [];
+    slots.push({ date: slot.date, startTime: slot.start, endTime: slot.end });
+    availabilityByInterviewer.set(slot.interviewerId, slots);
+  }
+  return bundle.interviewers
+    .filter((interviewer) => interviewer.active && interviewer.required)
+    .map((interviewer) => ({
+      displayName: interviewer.displayName,
+      required: interviewer.required,
+      submitted: interviewer.status === "SUBMITTED",
+      stepNames: stepNamesByInterviewerId.get(interviewer.id) ?? [],
+      slots: (availabilityByInterviewer.get(interviewer.id) ?? [])
+        .sort((left, right) => `${left.date}|${left.startTime}`.localeCompare(`${right.date}|${right.startTime}`)),
+    }));
+}
+
+function schedulingComparison(db: BridgeDatabase, decision: InterviewSkillDecisionRow) {
+  if (!decision.caseId || !isScheduleSelectionDecision(decision)) return null;
+  const bundle = db.getCaseBundle(decision.caseId);
+  if (!bundle) return null;
+  const availability = interviewerAvailability(db, decision);
+  if (!availability) return null;
+  const plan = db.getCaseInterviewPlan(decision.caseId);
+  const common = plan?.mode === "SEQUENTIAL" ? null : suggestCommonSlots(bundle);
+  const storedRoomMatches = records(decision.context.roomMatchedSlots).flatMap((slot) => {
+    const date = text(slot.date);
+    const startTime = text(slot.startTime);
+    const endTime = text(slot.endTime);
+    const roomName = text(slot.roomName);
+    return date && startTime && endTime && roomName
+      ? [{ date, startTime, endTime, roomName }]
+      : [];
+  });
+  const roomMatches = storedRoomMatches.length > 0
+    ? storedRoomMatches
+    : decision.decisionType === "CONFIRM_STANDARD_SCHEDULE"
+      ? suggestInterviewSlotsWithRooms(db, decision.caseId).suggestions.flatMap((suggestion) =>
+          suggestion.rooms.map((room) => ({
+            date: suggestion.date,
+            startTime: suggestion.start,
+            endTime: suggestion.end,
+            roomName: room.roomName,
+          })),
+        )
+      : [];
+  return {
+    interviewerAvailability: availability,
+    isSequential: plan?.mode === "SEQUENTIAL",
+    commonSlots: (common?.suggestions ?? []).map((slot) => ({
+      date: slot.date,
+      startTime: slot.start,
+      endTime: slot.end,
+    })),
+    roomMatchedSlots: roomMatches,
+  };
 }
 
 function plainText(value: unknown): string | null {
@@ -143,18 +227,23 @@ function reviewContext(db: BridgeDatabase, review: ReviewRow) {
   const evaluation = evaluationSummary(review.summary?.evaluation);
   const rawEvaluation = record(review.summary?.evaluation);
   const currentStep = record(rawEvaluation?.currentStep);
+  const notification = review.notificationId
+    ? db.getStoredSlackNotification(review.notificationId)
+    : undefined;
   const interviewCase = review.caseId ? db.getCase(review.caseId) : undefined;
   const plan = review.caseId ? db.getCaseInterviewPlan(review.caseId) : undefined;
   return {
-    candidateRef: text(summaryContext?.candidateRef),
-    recruitmentRef: text(summaryContext?.recruitmentRef),
+    candidateRef: text(summaryContext?.candidateRef) ?? notification?.candidateRef ?? null,
+    recruitmentRef: text(summaryContext?.recruitmentRef) ?? notification?.recruitmentRef ?? null,
     currentStepId: text(currentStep?.stepId),
     candidateName: text(summaryContext?.candidateName)
       ?? text(summary?.candidateName)
+      ?? notification?.candidateName
       ?? interviewCase?.candidateName
       ?? null,
     recruitmentName: text(summaryContext?.recruitmentName)
       ?? text(summary?.recruitmentName)
+      ?? notification?.recruitmentName
       ?? interviewCase?.recruitmentName
       ?? null,
     currentStepName: evaluation?.currentStep?.name ?? plan?.stepNames.join(
@@ -258,20 +347,38 @@ export function getCandidateJourneyForCase(
     currentStepId,
     plannedStepIds: plan?.stepIds,
     evaluationStatus: evaluationStatusForCase(db, interviewCase, plan),
+    candidateScheduleProposalSent: db.hasCandidateScheduleProposalSent(interviewCase.id),
   });
 }
 
 function decisionSummary(db: BridgeDatabase, decision: InterviewSkillDecisionRow) {
   const interviewCase = decision.caseId ? db.getCase(decision.caseId) : undefined;
   const proposal = record(decision.context.candidateScheduleProposal);
+  const comparison = schedulingComparison(db, decision);
+  const availability = interviewerAvailability(db, decision);
+  const options = decision.decisionType === "CANDIDATE_SCHEDULE_PROPOSAL_SENT"
+    && !decision.options.some((option) => option.id === "MARK_MANUAL_CANDIDATE_SCHEDULE_PROPOSAL_SENT")
+    ? [
+      ...decision.options,
+      {
+        id: "MARK_MANUAL_CANDIDATE_SCHEDULE_PROPOSAL_SENT",
+        label: "직접 발송 완료로 기록",
+        description: "나인하이어에서 직접 메일 발송을 완료한 뒤에만 선택하세요. 외부 발송 없이 로컬 상태만 후보자 응답 대기로 바꿉니다.",
+      },
+    ]
+    : decision.options;
   return {
     id: decision.id,
     skillKey: decision.skillKey,
     decisionType: decision.decisionType,
     title: decision.title,
-    prompt: decision.prompt,
+    prompt: isScheduleSelectionDecision(decision)
+      ? "모든 면접관이 일정을 제출하였습니다. 인터뷰 진행할 일정을 선택해주세요."
+      : decision.decisionType === "CANDIDATE_SCHEDULE_PROPOSAL_SENT"
+        ? "제안할 일정과 제목·장소·면접관·이메일 템플릿을 확인한 뒤 발송 방법을 선택하세요."
+        : decision.prompt,
     selectionMode: decision.selectionMode,
-    options: decision.options,
+    options,
     reviewId: decision.reviewId ?? null,
     caseId: decision.caseId ?? null,
     candidateName: text(decision.context.candidateName) ?? interviewCase?.candidateName ?? null,
@@ -303,6 +410,8 @@ function decisionSummary(db: BridgeDatabase, decision: InterviewSkillDecisionRow
           : [];
       }),
     } : null,
+    schedulingComparison: comparison,
+    interviewerAvailability: availability,
     createdAt: decision.createdAt,
   };
 }
@@ -395,6 +504,9 @@ export function getDashboardSnapshot(db: BridgeDatabase, limit = 100) {
         currentStepId: context.currentStepId ?? undefined,
         interviewCase: matchedCase?.interviewCase,
         plannedStepIds: matchedCase?.plan?.stepIds,
+        candidateScheduleProposalSent: matchedCase
+          ? db.hasCandidateScheduleProposalSent(matchedCase.interviewCase.id)
+          : undefined,
         evaluationStatus: matchedCase
           ? evaluationStatusForCase(db, matchedCase.interviewCase, matchedCase.plan)
           : undefined,

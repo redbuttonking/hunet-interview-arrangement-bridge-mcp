@@ -39,7 +39,7 @@ export class SlackReconciler {
       messageTs: message.ts,
       sourceBotId: message.bot_id,
       parsed,
-    });
+    }, { deferEvaluationLookup: true });
   }
 
   async reconcile(): Promise<{ scanned: number; latestTs?: string }> {

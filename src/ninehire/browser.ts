@@ -20,7 +20,12 @@ export function ninehireChromeLaunchArguments(config: AppConfig["ninehire"]): st
     `--user-data-dir=${config.browserProfileDir ?? "./data/ninehire-chrome-profile"}`,
     "--no-first-run",
     "--no-default-browser-check",
+    "--disable-gpu",
+    "--disable-gpu-compositing",
+    "--in-process-gpu",
+    "--disable-software-rasterizer",
     "--new-window",
+    "--start-maximized",
     config.appUrl ?? "https://app.ninehire.com",
   ];
 }
@@ -56,6 +61,7 @@ export class NinehireBrowserController {
     const current = await this.status();
     const url = this.config.appUrl ?? "https://app.ninehire.com";
     if (current.connected) {
+      this.openVisibleWindow(url);
       return { alreadyRunning: true, profileDir: current.profileDir, url };
     }
     const executablePath = this.executablePath();
@@ -66,7 +72,11 @@ export class NinehireBrowserController {
     }
     mkdirSync(this.profileDir(), { recursive: true });
     const child = this.launch();
+    const launchError = new Promise<never>((_, reject) => {
+      child.once("error", (error) => reject(error));
+    });
     child.unref();
+    await Promise.race([this.waitForDebugConnection(), launchError]);
     return { alreadyRunning: false, profileDir: this.profileDir(), url };
   }
 
@@ -78,6 +88,20 @@ export class NinehireBrowserController {
     );
   }
 
+  private openVisibleWindow(url: string): void {
+    const child = spawn(this.executablePath(), [
+      `--user-data-dir=${this.profileDir()}`,
+      "--new-window",
+      "--start-maximized",
+      url,
+    ], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: false,
+    });
+    child.unref();
+  }
+
   private profileDir(): string {
     return this.config.browserProfileDir ?? "./data/ninehire-chrome-profile";
   }
@@ -85,5 +109,15 @@ export class NinehireBrowserController {
   private executablePath(): string {
     return this.config.chromeExecutablePath
       ?? "C:/Program Files/Google/Chrome/Application/chrome.exe";
+  }
+
+  private async waitForDebugConnection(): Promise<void> {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if ((await this.status()).connected) return;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    throw new Error(
+      `나인하이어 전용 Chrome이 실행되지 않았습니다. 디버깅 포트 ${this.config.remoteDebugPort ?? 9223}가 열리지 않았습니다.`,
+    );
   }
 }

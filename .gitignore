@@ -15,10 +15,13 @@ data/backups/
 data/daou-office-profile/
 data/daou-office-chrome-profile/
 data/ninehire-chrome-profile/
+data/test-chrome-profile/
+data/test-chrome-profile-*/
 *.log
 *.err
 *.out
 tmp/
+release/
 .codex/
 .codex-worker-dev.err
 .codex-worker-dev.out

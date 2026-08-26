@@ -19,6 +19,7 @@ function createSkills(input: {
   recordManualConfirmedInterview?: (input: Record<string, unknown>) => unknown;
   resolveCandidateInterviewAbsenceReview?: (input: Record<string, unknown>) => unknown;
   createAvailabilityRecoveryDraft?: (reviewId: string) => unknown;
+  createAvailabilityReminderDraft?: (caseId: string) => unknown;
 } = {}) {
   const workflow = {
     approveInterviewArrangement:
@@ -33,6 +34,8 @@ function createSkills(input: {
       input.resolveCandidateInterviewAbsenceReview ?? (() => ({ action: "HOLD" })),
     createAvailabilityRecoveryDraft:
       input.createAvailabilityRecoveryDraft ?? (() => ({ id: "recovery-draft", status: "DRAFT" })),
+    createAvailabilityReminderDraft:
+      input.createAvailabilityReminderDraft ?? (() => ({ id: "reminder-draft", status: "DRAFT" })),
   } as unknown as WorkflowService;
   const readiness = {
     async inspect() {
@@ -237,6 +240,59 @@ describe("interview arrangement skills", () => {
     expect(resolved.decision.status).toBe("RESOLVED");
   });
 
+  it("waits for the automatic reminder policy before offering an additional request", async () => {
+    db = new BridgeDatabase(":memory:");
+    const interviewCase = db.createInterviewCase({
+      candidateName: "Candidate",
+      proposalDates: ["2026-08-10"],
+    });
+    db.addOrUpdateInterviewer({
+      caseId: interviewCase.id,
+      slackUserId: "U1",
+      displayName: "Interviewer",
+      source: "MANUAL",
+    });
+    db.setCaseStatus(interviewCase.id, "REQUEST_SENT");
+    const skills = createSkills();
+
+    const decision = skills.createAvailabilityCollectionDecision(interviewCase.id);
+    expect(decision.decisionType).toBe("WAIT_FOR_AVAILABILITY");
+    expect(decision.options.map((option) => option.id)).toEqual(["WAIT"]);
+  });
+
+  it("offers an additional reminder draft only after two automatic reminders", async () => {
+    db = new BridgeDatabase(":memory:");
+    const interviewCase = db.createInterviewCase({
+      candidateName: "Candidate",
+      proposalDates: ["2026-08-10"],
+    });
+    db.addOrUpdateInterviewer({
+      caseId: interviewCase.id,
+      slackUserId: "U1",
+      displayName: "Interviewer",
+      source: "MANUAL",
+    });
+    db.setCaseStatus(interviewCase.id, "COLLECTING_AVAILABILITY");
+    const reviewId = db.createReview({
+      caseId: interviewCase.id,
+      reviewType: "INTERVIEWER_NO_RESPONSE",
+      reason: "Automatic reminders were sent twice.",
+    });
+    const skills = createSkills();
+
+    const decision = skills.createInterviewerNoResponseDecision(reviewId);
+    const resolved = await skills.resolveDecision({
+      decisionId: decision.id,
+      optionId: "CREATE_ADDITIONAL_REMINDER_DRAFT",
+    });
+
+    expect(decision.decisionType).toBe("INTERVIEWER_NO_RESPONSE_ACTION");
+    expect(resolved.outcome).toMatchObject({
+      action: "CREATE_ADDITIONAL_REMINDER_DRAFT",
+      nextAction: "CREATE_AVAILABILITY_REMINDER_DRAFT",
+    });
+  });
+
   it("confirms a selected standard interview slot without sending Slack messages", async () => {
     db = new BridgeDatabase(":memory:");
     const interviewCase = db.createInterviewCase({
@@ -275,6 +331,14 @@ describe("interview arrangement skills", () => {
     });
 
     expect(decision.decisionType).toBe("CONFIRM_STANDARD_SCHEDULE");
+    expect(decision).toMatchObject({
+      prompt: "모든 면접관이 일정을 제출하였습니다. 인터뷰 진행할 일정을 선택해주세요.",
+      context: {
+        interviewerAvailability: [{ displayName: "Interviewer", submitted: true }],
+        commonSlots: [{ date: "2026-08-10", startTime: "10:00", endTime: "11:00" }],
+        roomMatchedSlots: [{ date: "2026-08-10", roomName: "행복룸" }],
+      },
+    });
     expect(resolved).toMatchObject({
       outcome: {
         schedule: {
@@ -498,7 +562,7 @@ describe("interview arrangement skills", () => {
     expect(db.getCase(interviewCase.id)?.status).toBe("AWAITING_CANDIDATE_CONFIRMATION");
   });
 
-  it("turns a candidate absence review into one recorded response decision", async () => {
+  it("keeps candidate rescheduling in two user-selected steps", async () => {
     db = new BridgeDatabase(":memory:");
     const interviewCase = db.createInterviewCase({
       candidateName: "Candidate",
@@ -518,14 +582,27 @@ describe("interview arrangement skills", () => {
     });
 
     const decision = skills.createCandidateScheduleResponseDecision(reviewId);
-    const resolved = await skills.resolveDecision({
+    expect(decision.options.map((option) => option.id)).toEqual(["RESCHEDULE", "CANCEL", "HOLD"]);
+
+    const selectedReschedule = await skills.resolveDecision({
       decisionId: decision.id,
-      optionId: "CANCEL",
-      note: "Candidate requested cancellation.",
+      optionId: "RESCHEDULE",
+    });
+    expect(actions).toEqual([]);
+    expect(selectedReschedule.outcome).toMatchObject({
+      action: "RESCHEDULE",
+      nextAction: "CHOOSE_CANDIDATE_RESCHEDULE_METHOD",
     });
 
-    expect(actions).toEqual(["CANCEL"]);
-    expect(resolved.decision.selectedOptionId).toBe("CANCEL");
+    const methodDecision = skills.createCandidateRescheduleMethodDecision(reviewId);
+    const resolved = await skills.resolveDecision({
+      decisionId: methodDecision.id,
+      optionId: "RESCHEDULE_REUSE",
+    });
+
+    expect(actions).toEqual(["RESCHEDULE_USING_EXISTING_AVAILABILITY"]);
+    expect(resolved.decision.selectedOptionId).toBe("RESCHEDULE_REUSE");
+    expect(resolved.outcome).toMatchObject({ nextAction: "CREATE_INTERVIEW_SCHEDULING_DECISION" });
   });
 
   it("hands candidate schedule proposal to the external sender before recording it locally", async () => {
@@ -564,6 +641,10 @@ describe("interview arrangement skills", () => {
     const skills = createSkills();
 
     const decision = skills.createCandidateScheduleProposalDecision(interviewCase.id);
+    expect(decision.options.map((option) => option.id)).toEqual([
+      "SEND_NINEHIRE_SCHEDULE_PROPOSAL",
+      "MARK_MANUAL_CANDIDATE_SCHEDULE_PROPOSAL_SENT",
+    ]);
     const resolved = await skills.resolveDecision({
       decisionId: decision.id,
       optionId: "SEND_NINEHIRE_SCHEDULE_PROPOSAL",
@@ -576,6 +657,108 @@ describe("interview arrangement skills", () => {
     expect(db.hasCandidateScheduleProposalSent(interviewCase.id)).toBe(false);
 
     db.recordCandidateScheduleProposalSent(interviewCase.id);
+    expect(db.hasCandidateScheduleProposalSent(interviewCase.id)).toBe(true);
+  });
+
+  it("keeps different-room candidate options in one proposal decision", async () => {
+    db = new BridgeDatabase(":memory:");
+    const interviewCase = db.createInterviewCase({
+      candidateName: "Candidate",
+      recruitmentName: "Recruitment",
+      proposalDates: ["2026-08-10", "2026-08-11"],
+    });
+    db.setCaseStatus(interviewCase.id, "READY_TO_SCHEDULE");
+    const blocks = db.syncMeetingRoomBlocks(
+      ["2026-08-10", "2026-08-11"],
+      [
+        {
+          sourceKey: "DAOU:proposal-location-7f",
+          roomId: "ROOM-7F",
+          roomName: "[710호] 疑問堂(의문당)",
+          reservedBy: "Recruiter",
+          purpose: "Interview",
+          date: "2026-08-10",
+          startTime: "10:00",
+          endTime: "11:00",
+          sourcePayloadHash: "proposal-location-7f",
+        },
+        {
+          sourceKey: "DAOU:proposal-location-8f",
+          roomId: "ROOM-8F",
+          roomName: "[818호] 열정룸",
+          reservedBy: "Recruiter",
+          purpose: "Interview",
+          date: "2026-08-11",
+          startTime: "10:00",
+          endTime: "11:00",
+          sourcePayloadHash: "proposal-location-8f",
+        },
+      ],
+    );
+    const first = db.allocateRoomBlock({
+      caseId: interviewCase.id,
+      roomBlockId: blocks.find((block) => block.roomName.includes("의문당"))!.id,
+      startTime: "10:00",
+      endTime: "11:00",
+    });
+    const second = db.allocateRoomBlock({
+      caseId: interviewCase.id,
+      roomBlockId: blocks.find((block) => block.roomName.includes("열정룸"))!.id,
+      startTime: "10:00",
+      endTime: "11:00",
+      allowAdditionalForCase: true,
+    });
+    db.confirmInternalSchedule(interviewCase.id);
+    db.createCandidateScheduleOptions({
+      caseId: interviewCase.id,
+      allocationIds: [first.id, second.id],
+    });
+    const skills = createSkills();
+
+    const decision = skills.createCandidateScheduleProposalDecision(interviewCase.id);
+    expect(decision.decisionType).toBe("CANDIDATE_SCHEDULE_PROPOSAL_SENT");
+    expect(decision.options).toHaveLength(2);
+    expect(db.listCurrentCandidateScheduleOptions(interviewCase.id)).toMatchObject([
+      { roomName: "[710호] 疑問堂(의문당)" },
+      { roomName: "[818호] 열정룸" },
+    ]);
+    expect(db.listRoomAllocations(interviewCase.id).find((allocation) => allocation.id === second.id)?.status).toBe("ACTIVE");
+  });
+
+  it("records a manually sent candidate schedule proposal without sending a second email", async () => {
+    db = new BridgeDatabase(":memory:");
+    const interviewCase = db.createInterviewCase({
+      candidateName: "Candidate",
+      recruitmentName: "Recruitment",
+      proposalDates: ["2026-08-10"],
+    });
+    db.setCaseStatus(interviewCase.id, "AWAITING_CANDIDATE_CONFIRMATION");
+    const decision = db.createOrGetPendingInterviewSkillDecision({
+      skillKey: "CANDIDATE_SCHEDULE_PROPOSAL",
+      decisionType: "CANDIDATE_SCHEDULE_PROPOSAL_SENT",
+      fingerprint: `case:${interviewCase.id}:candidate-schedule-proposal`,
+      caseId: interviewCase.id,
+      title: "나인하이어 일정 제안 발송",
+      prompt: "후보자 일정 제안을 발송하세요.",
+      selectionMode: "SINGLE",
+      options: [{
+        id: "SEND_NINEHIRE_SCHEDULE_PROPOSAL",
+        label: "나인하이어 메일 자동 발송",
+        description: "자동 발송합니다.",
+      }],
+      context: {},
+    });
+    const skills = createSkills();
+
+    const resolved = await skills.resolveDecision({
+      decisionId: decision.id,
+      optionId: "MARK_MANUAL_CANDIDATE_SCHEDULE_PROPOSAL_SENT",
+    });
+
+    expect(resolved).toMatchObject({
+      decision: { status: "RESOLVED", selectedOptionId: "MARK_MANUAL_CANDIDATE_SCHEDULE_PROPOSAL_SENT" },
+      outcome: { nextAction: "NONE" },
+    });
     expect(db.hasCandidateScheduleProposalSent(interviewCase.id)).toBe(true);
   });
 

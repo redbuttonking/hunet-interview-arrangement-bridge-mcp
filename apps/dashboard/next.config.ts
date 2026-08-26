@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 const dashboardDirectory = path.dirname(fileURLToPath(import.meta.url));
 
 const nextConfig: NextConfig = {
+  output: "standalone",
   outputFileTracingRoot: path.join(dashboardDirectory, "../.."),
   serverExternalPackages: ["node:sqlite"],
   experimental: {

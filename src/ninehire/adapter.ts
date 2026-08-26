@@ -272,8 +272,10 @@ function activeScoreSheetInterviewers(
   const seenGroupNames = new Set<string>();
   const interviewers: NinehireInterviewer[] = [];
   const unresolvedUserGroups: string[] = [];
+  const scoreSheetGroups: Array<{ title: string; interviewerIds: string[] }> = [];
 
   for (const scoreSheet of activeScoreSheets) {
+    const scoreSheetInterviewerIds = new Set<string>();
     for (const participant of records(scoreSheet.participants)) {
       const participantType = codeOf(participant.type);
       const user = asRecord(participant.user);
@@ -290,9 +292,11 @@ function activeScoreSheetInterviewers(
         continue;
       }
       if (!ninehireUserId || !displayName || seenUserIds.has(ninehireUserId)) {
+        if (ninehireUserId && displayName) scoreSheetInterviewerIds.add(ninehireUserId);
         continue;
       }
       seenUserIds.add(ninehireUserId);
+      scoreSheetInterviewerIds.add(ninehireUserId);
       const email = text(participant.email) ?? text(user?.email);
       interviewers.push({
         ninehireUserId,
@@ -301,11 +305,19 @@ function activeScoreSheetInterviewers(
         required: true,
       });
     }
+    const scoreSheetTitle = text(scoreSheet.title);
+    if (scoreSheetTitle && scoreSheetInterviewerIds.size > 0) {
+      scoreSheetGroups.push({
+        title: scoreSheetTitle,
+        interviewerIds: [...scoreSheetInterviewerIds],
+      });
+    }
   }
 
   return {
     interviewers,
     unresolvedUserGroups,
+    ...(scoreSheetGroups.length > 0 ? { scoreSheetGroups } : {}),
     ...(interviewers.length === 0
       ? {
           reason:

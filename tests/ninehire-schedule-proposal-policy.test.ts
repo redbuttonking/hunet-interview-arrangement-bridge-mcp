@@ -59,8 +59,8 @@ describe("나인하이어 일정 제안 정책", () => {
     expect(preview.requiresEmailTemplateSelection).toBe(true);
   });
 
-  it("후보일의 안내 장소가 다르면 발송 전 확인을 요구한다", () => {
-    expect(() => createCandidateScheduleProposalPreview({
+  it("서로 다른 회의실 후보일도 함께 제안한다", () => {
+    const preview = createCandidateScheduleProposalPreview({
       recruitmentName: "[휴넷] 영업대표 채용 [정규직]",
       interviewStepNames: ["1차 인터뷰"],
       durationMinutes: 60,
@@ -74,6 +74,34 @@ describe("나인하이어 일정 제안 정책", () => {
         },
       ],
       sentDate: "2026-08-18",
-    })).toThrow("후보일마다 안내해야 할 인터뷰 장소가 다릅니다");
+    });
+
+    expect(preview.proposalOptions).toHaveLength(2);
+    expect(preview.location).toBe(DEFAULT_INTERVIEW_LOCATION);
+  });
+
+  it("후보일이 모두 의문당이면 7층 장소를 안내한다", () => {
+    const preview = createCandidateScheduleProposalPreview({
+      recruitmentName: "[휴넷] 영업대표 채용 [정규직]",
+      interviewStepNames: ["1차 인터뷰"],
+      durationMinutes: 60,
+      proposalOptions: [
+        {
+          date: "2026-08-20",
+          startTime: "14:00",
+          endTime: "15:00",
+          roomName: "[710호] 疑問堂(의문당)",
+        },
+        {
+          date: "2026-08-21",
+          startTime: "14:00",
+          endTime: "15:00",
+          roomName: "[710호] 疑問堂(의문당)",
+        },
+      ],
+      sentDate: "2026-08-18",
+    });
+
+    expect(preview.location).toBe(UI_MUNDANG_INTERVIEW_LOCATION);
   });
 });

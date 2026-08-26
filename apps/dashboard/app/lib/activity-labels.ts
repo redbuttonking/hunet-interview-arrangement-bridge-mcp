@@ -10,6 +10,7 @@ const eventLabels: Record<string, string> = {
   INTERVIEWER_REQUIREMENT_CHANGED: "면접관 필수 여부를 변경했습니다.",
   AVAILABILITY_SUBMITTED: "면접관이 가능한 일정을 제출했습니다.",
   AVAILABILITY_MANUALLY_RECORDED: "면접관 가능한 일정을 직접 기록했습니다.",
+  AVAILABILITY_REMINDER_SENT: "면접관에게 일정 제출 리마인드를 발송했습니다.",
   DRAFT_CREATED: "Slack 메시지 초안을 만들었습니다.",
   DRAFT_TEXT_REVISED: "Slack 메시지 초안을 수정했습니다.",
   DRAFT_CANCELLED: "Slack 메시지 초안을 취소했습니다.",
@@ -28,6 +29,9 @@ const eventLabels: Record<string, string> = {
   SCHEDULE_CONFIRMATION_SENT: "면접관에게 확정 일정을 안내했습니다.",
   SCHEDULE_UPDATE_SENT: "면접관에게 일정 변경 사항을 안내했습니다.",
   CANDIDATE_INTERVIEW_ABSENCE_HELD: "후보자 불참 검토를 보류했습니다.",
+  NINEHIRE_SCHEDULE_DELETION_DETECTED: "나인하이어에서 확정 인터뷰 일정 삭제를 감지했습니다.",
+  NINEHIRE_SCHEDULE_DELETION_HELD: "나인하이어 일정 삭제 검토를 보류했습니다.",
+  NINEHIRE_SCHEDULE_PROPOSAL_CONFIRMATION_SUPERSEDED: "일정 삭제 감지로 이전 메일 발송 확인을 정리했습니다.",
 };
 
 const actorLabels: Record<string, string> = {
@@ -35,10 +39,23 @@ const actorLabels: Record<string, string> = {
   SYSTEM: "시스템",
   SLACK_USER: "Slack 사용자",
   NINEHIRE: "나인하이어",
+  NINEHIRE_MCP: "나인하이어",
   NINEHIRE_SLACK: "나인하이어 알림",
 };
 
-export function activityEventLabel(eventType: string): string {
+export function activityEventLabel(
+  eventType: string,
+  detail?: Record<string, unknown>,
+): string {
+  if (eventType === "AVAILABILITY_REMINDER_SENT") {
+    const interviewerName = typeof detail?.interviewerName === "string"
+      ? detail.interviewerName
+      : "면접관";
+    const reminderNumber = typeof detail?.reminderNumber === "number"
+      ? `${detail.reminderNumber}차`
+      : "일정 제출";
+    return `${interviewerName} 면접관에게 ${reminderNumber} 리마인드를 발송했습니다.`;
+  }
   return eventLabels[eventType] ?? "인터뷰 조율 업무 이력을 기록했습니다.";
 }
 

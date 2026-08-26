@@ -69,13 +69,11 @@ export function locationForInterviewRoom(roomName: string): string {
 }
 
 function locationForProposalOptions(options: CandidateScheduleProposalOption[]): string {
-  const locations = [...new Set(options.map((option) => locationForInterviewRoom(option.roomName)))];
-  if (locations.length !== 1) {
-    throw new Error(
-      "후보일마다 안내해야 할 인터뷰 장소가 다릅니다. 같은 장소의 후보일만 선택하거나, 장소 안내 기준을 확인해 주세요.",
-    );
-  }
-  return locations[0]!;
+  return options.every(
+    (option) => locationForInterviewRoom(option.roomName) === UI_MUNDANG_INTERVIEW_LOCATION,
+  )
+    ? UI_MUNDANG_INTERVIEW_LOCATION
+    : DEFAULT_INTERVIEW_LOCATION;
 }
 
 function daysBetween(date: string, laterDate: string): number {

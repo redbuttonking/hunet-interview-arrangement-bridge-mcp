@@ -3,6 +3,8 @@ import { WebClient } from "@slack/web-api";
 import { getConfig } from "../config.js";
 import { BrowserDaouOfficeReservationAdapter } from "../daou-office/adapter.js";
 import { DaouOfficeBrowserController } from "../daou-office/browser.js";
+import { DAOU_ROOM_SYNC_WINDOW_DAYS, upcomingKoreanDates } from "../domain/daou-room-sync.js";
+import { isNinehireRateLimitError } from "../domain/integration-retry.js";
 import { BridgeDatabase, type InterviewSkillDecisionRow } from "../db/database.js";
 import { NinehireRecruitmentWorkflowAdapter } from "../ninehire/adapter.js";
 import { NinehireBrowserController } from "../ninehire/browser.js";
@@ -13,9 +15,16 @@ import {
 } from "../ninehire/schedule-proposal-browser.js";
 import { buildCandidateScheduleProposalDraft } from "../ninehire/schedule-proposal.js";
 import { OperationalReadinessService } from "../services/operational-readiness.js";
+import { AutomaticSchedulingPreparationService } from "../services/automatic-scheduling-preparation.js";
 import { ScheduleSelectionRevalidationService } from "../services/schedule-selection-revalidation.js";
+import { SlackReconciler } from "../slack/reconciler.js";
 import { WorkflowService, type SlackIdentityResolver } from "../services/workflow.js";
 import { InterviewArrangementSkills } from "../skills/interview-arrangement.js";
+
+const schedulingSelectionDecisionTypes = new Set([
+  "CONFIRM_STANDARD_SCHEDULE",
+  "CONFIRM_SEQUENTIAL_SCHEDULE",
+]);
 
 class DashboardSlackIdentityResolver implements SlackIdentityResolver {
   constructor(private readonly client: WebClient) {}
@@ -44,7 +53,10 @@ function createRuntime() {
     ? new WebClient(config.slack.botToken, { timeout: 30_000 })
     : undefined;
   const readinessSlackClient = config.slack.botToken
-    ? new WebClient(config.slack.botToken, { timeout: 6_000 })
+    ? new WebClient(config.slack.botToken, {
+      timeout: 12_000,
+      retryConfig: { retries: 0 },
+    })
     : undefined;
   const workflow = new WorkflowService(
     db,
@@ -57,8 +69,9 @@ function createRuntime() {
     db,
     gateway,
     new DaouOfficeBrowserController(config.daouOffice),
+    new NinehireBrowserController(config.ninehire),
     readinessSlackClient,
-    6_000,
+    12_000,
   );
   const skills = new InterviewArrangementSkills(db, workflow, readiness);
   const daouOfficeBrowser = new DaouOfficeBrowserController(config.daouOffice);
@@ -110,11 +123,14 @@ function createOpenReviewDecision(
     [
       "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED",
       "CANDIDATE_MESSAGE_REVIEW_REQUIRED",
+      "NINEHIRE_SCHEDULE_DELETION_DETECTED",
     ].includes(review.reviewType)
   ) {
     decision = runtime.skills.createCandidateScheduleResponseDecision(reviewId);
   } else if (review.reviewType === "WORKER_DOWNTIME_AVAILABILITY_REVIEW_REQUIRED") {
     decision = runtime.skills.createAvailabilityRecoveryDecision(reviewId);
+  } else if (review.reviewType === "INTERVIEWER_NO_RESPONSE") {
+    decision = runtime.skills.createInterviewerNoResponseDecision(reviewId);
   } else if (review.reviewType === "NINEHIRE_SCHEDULE_PROPOSAL_CONFIRMATION_REQUIRED") {
     decision = runtime.skills.createCandidateScheduleProposalReconciliationDecision(reviewId);
   } else {
@@ -141,7 +157,8 @@ export async function createDashboardCaseDecision(input: {
   skillKey:
     | "AVAILABILITY_COLLECTION"
     | "INTERVIEW_SCHEDULING"
-    | "CANDIDATE_SCHEDULE_PROPOSAL";
+    | "CANDIDATE_SCHEDULE_PROPOSAL"
+    | "CANDIDATE_SCHEDULE_RESPONSE";
 }) {
   const runtime = createRuntime();
   try {
@@ -154,8 +171,31 @@ export async function createDashboardCaseDecision(input: {
       decision = runtime.skills.createAvailabilityCollectionDecision(input.caseId);
     } else if (input.skillKey === "INTERVIEW_SCHEDULING") {
       decision = runtime.skills.createInterviewSchedulingDecision(input.caseId);
-    } else {
+    } else if (input.skillKey === "CANDIDATE_SCHEDULE_PROPOSAL") {
       decision = runtime.skills.createCandidateScheduleProposalDecision(input.caseId);
+    } else {
+      const interviewCase = runtime.db.getCase(input.caseId);
+      if (!interviewCase || interviewCase.status !== "AWAITING_CANDIDATE_CONFIRMATION") {
+        throw new Error("후보자 일정 제안 이후 응답 대기 상태에서만 응답 조치를 시작할 수 있습니다.");
+      }
+      const review = runtime.db
+        .listOpenReviews(1_000)
+        .find((item) => item.caseId === input.caseId && [
+          "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED",
+          "CANDIDATE_MESSAGE_REVIEW_REQUIRED",
+        ].includes(item.reviewType));
+      const reviewId = review?.id ?? runtime.db.createReview({
+        caseId: input.caseId,
+        reviewType: "CANDIDATE_MESSAGE_REVIEW_REQUIRED",
+        reason: "사용자가 후보자의 일정 변경, 취소 또는 보류 여부를 검토하도록 요청했습니다.",
+        summary: {
+          scheduledDate: interviewCase.scheduledDate,
+          scheduledStartTime: interviewCase.scheduledStartTime,
+          scheduledEndTime: interviewCase.scheduledEndTime,
+          scheduledRoomName: interviewCase.scheduledRoomName,
+        },
+      });
+      return createOpenReviewDecision(runtime, reviewId);
     }
     return { decision, dismissOnClose: true };
   } finally {
@@ -199,6 +239,7 @@ export async function resumeDashboardHeldCase(caseId: string) {
         "RECRUITMENT_TEMPLATE_CHECK_REQUIRED",
         "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED",
         "CANDIDATE_MESSAGE_REVIEW_REQUIRED",
+        "NINEHIRE_SCHEDULE_DELETION_DETECTED",
       ].includes(heldReview.reviewType)
     ) {
       runtime.db.reopenHeldReview(heldReview.id);
@@ -243,6 +284,34 @@ export async function resolveDashboardDecision(input: {
       };
     }
     if (existing) {
+      if (
+        existing.caseId
+        && schedulingSelectionDecisionTypes.has(existing.decisionType)
+      ) {
+        const interviewCase = runtime.db.getCase(existing.caseId);
+        if (interviewCase?.status === "AWAITING_CANDIDATE_CONFIRMATION") {
+          runtime.db.discardPendingInterviewSkillDecision(existing.id);
+          if (runtime.db.hasCandidateScheduleProposalSent(existing.caseId)) {
+            return {
+              decision: existing,
+              outcome: {
+                action: "SCHEDULE_ALREADY_PROPOSED_TO_CANDIDATE",
+                nextAction: "NONE",
+              },
+              followUp: undefined,
+            };
+          }
+          const followUp = runtime.skills.createCandidateScheduleProposalDecision(existing.caseId);
+          return {
+            decision: followUp,
+            outcome: {
+              action: "SCHEDULE_ALREADY_CONFIRMED",
+              nextAction: "CREATE_CANDIDATE_SCHEDULE_PROPOSAL_DECISION",
+            },
+            followUp,
+          };
+        }
+      }
       let refreshedDecision: InterviewSkillDecisionRow | undefined;
       try {
         refreshedDecision = await runtime.scheduleSelectionRevalidation.refreshIfNeeded(existing);
@@ -282,8 +351,25 @@ export async function resolveDashboardDecision(input: {
     if (caseId && nextAction === "CREATE_AVAILABILITY_COLLECTION_DECISION") {
       followUp = runtime.skills.createAvailabilityCollectionDecision(caseId);
     }
+    if (caseId && nextAction === "CREATE_AVAILABILITY_REMINDER_DRAFT") {
+      followUp = {
+        kind: "AVAILABILITY_REMINDER_DRAFT_CREATED",
+        draft: runtime.workflow.createAvailabilityReminderDraft(
+          caseId,
+          resolved.decision.reviewId ?? undefined,
+        ),
+      };
+    }
     if (caseId && nextAction === "CREATE_INTERVIEW_SCHEDULING_DECISION") {
       followUp = runtime.skills.createInterviewSchedulingDecision(caseId);
+    }
+    if (nextAction === "CHOOSE_CANDIDATE_RESCHEDULE_METHOD") {
+      if (!resolved.decision.reviewId) {
+        throw new Error("후보자 응답 검토 정보를 찾지 못했습니다.");
+      }
+      followUp = runtime.skills.createCandidateRescheduleMethodDecision(
+        resolved.decision.reviewId,
+      );
     }
     if (caseId && nextAction === "MAP_INTERVIEWER_TO_SLACK") {
       const bundle = runtime.db.getCaseBundle(caseId);
@@ -315,7 +401,7 @@ export async function resolveDashboardDecision(input: {
       const proposal = buildCandidateScheduleProposalDraft({
         interviewCase: bundle.interviewCase,
         plan: runtime.db.getCaseInterviewPlan(caseId),
-        proposalOptions: runtime.db.listCandidateScheduleOptions(caseId),
+        proposalOptions: runtime.db.listCurrentCandidateScheduleOptions(caseId),
         interviewers: bundle.interviewers,
         appUrl: runtime.config.ninehire.appUrl,
       });
@@ -425,6 +511,117 @@ export async function getDashboardOperationalReadiness(input?: {
         updatedAt: job.updatedAt,
       })),
     };
+  } finally {
+    runtime.db.close();
+  }
+}
+
+export async function refreshDashboardExternalData(): Promise<{
+  completedAt: string;
+  steps: Array<{
+    id: "SLACK" | "NINEHIRE" | "DAOU_CALENDAR" | "DAOU_ROOMS" | "SCHEDULING";
+    label: string;
+    status: "COMPLETED" | "DEFERRED" | "FAILED";
+    detail: string;
+  }>;
+}> {
+  const runtime = createRuntime();
+  const steps: Array<{
+    id: "SLACK" | "NINEHIRE" | "DAOU_CALENDAR" | "DAOU_ROOMS" | "SCHEDULING";
+    label: string;
+    status: "COMPLETED" | "DEFERRED" | "FAILED";
+    detail: string;
+  }> = [];
+  const runStep = async (
+    id: (typeof steps)[number]["id"],
+    label: string,
+    operation: () => Promise<string>,
+  ) => {
+    try {
+      steps.push({ id, label, status: "COMPLETED", detail: await operation() });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (isNinehireRateLimitError(message)) {
+        const until = runtime.workflow.deferNinehireRequestsAfterRateLimit();
+        steps.push({
+          id,
+          label,
+          status: "DEFERRED",
+          detail: `나인하이어 요청 한도 보호 중입니다. ${until.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })} 이후 자동으로 다시 확인합니다.`,
+        });
+        return;
+      }
+      steps.push({
+        id,
+        label,
+        status: "FAILED",
+        detail: message,
+      });
+    }
+  };
+
+  try {
+    await runStep("SLACK", "Slack 알림과 평가 완료 상태", async () => {
+      if (!runtime.slackClient) throw new Error("Slack 봇 토큰이 설정되어 있지 않습니다.");
+      const reconciler = new SlackReconciler(
+        runtime.db,
+        runtime.config,
+        runtime.slackClient,
+        runtime.workflow,
+      );
+      await reconciler.reconcile();
+      await runtime.workflow.reconcileNonSchedulingCandidateMessageReviews();
+      const rateLimitUntil = runtime.workflow.getNinehireRateLimitUntil();
+      if (rateLimitUntil) {
+        runtime.db.setCursor("sync:slack:last_success", new Date().toISOString());
+        return `Slack 알림을 확인했습니다. 나인하이어 평가는 ${rateLimitUntil.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })} 이후 자동으로 다시 확인합니다.`;
+      }
+      await runtime.workflow.reconcileReceiptEvaluationCompletions();
+      await runtime.workflow.refreshOpenInterviewArrangementReviewStages();
+      runtime.db.setCursor("sync:slack:last_success", new Date().toISOString());
+      return "나인하이어 Slack 알림과 후보자·면접관 상태를 확인했습니다.";
+    });
+    const rateLimitUntil = runtime.workflow.getNinehireRateLimitUntil();
+    if (rateLimitUntil) {
+      steps.push({
+        id: "NINEHIRE",
+        label: "나인하이어 확정 인터뷰 일정",
+        status: "DEFERRED",
+        detail: `나인하이어 요청 한도 보호 중입니다. ${rateLimitUntil.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })} 이후 자동으로 다시 확인합니다.`,
+      });
+    } else {
+      await runStep("NINEHIRE", "나인하이어 확정 인터뷰 일정", async () => {
+        const result = await runtime.workflow.reconcileNinehireConfirmedSchedules();
+        runtime.db.setCursor("sync:ninehire:last_success", new Date().toISOString());
+        return result.scheduleDeletionDetected > 0
+          ? `확정 일정 ${result.discoveredSchedules}건을 확인했고, 일정 삭제 감지 ${result.scheduleDeletionDetected}건을 등록했습니다.`
+          : `확정 일정 ${result.discoveredSchedules}건을 확인했습니다.`;
+      });
+    }
+    await runStep("DAOU_CALENDAR", "다우오피스 인터뷰 캘린더", async () => {
+      const result = await runtime.workflow.reconcileDaouCalendarConfirmedSchedules(runtime.daouOffice);
+      runtime.db.setCursor("sync:daou_calendar:last_success", new Date().toISOString());
+      return `오늘 이후 인터뷰 일정 ${result.recordedEvents}건을 확인했습니다.`;
+    });
+    await runStep("DAOU_ROOMS", "다우오피스 회의실 예약", async () => {
+      const dates = upcomingKoreanDates(new Date(), DAOU_ROOM_SYNC_WINDOW_DAYS);
+      const blocks = await runtime.daouOffice.listMeetingRoomBlocks(dates);
+      runtime.db.syncMeetingRoomBlocks(dates, blocks);
+      runtime.db.setCursor("sync:daou_rooms:last_success", new Date().toISOString());
+      return `${dates.length}일 범위의 회의실 예약 ${blocks.length}건을 확인했습니다.`;
+    });
+    await runStep("SCHEDULING", "일정 추천 준비", async () => {
+      const preparation = new AutomaticSchedulingPreparationService(
+        runtime.db,
+        runtime.daouOffice,
+        runtime.skills,
+      );
+      const prepared = await preparation.prepareReadyCases();
+      return prepared.length > 0
+        ? `일정 선택이 가능한 인터뷰 ${prepared.length}건을 준비했습니다.`
+        : "새로 준비할 일정 선택 건이 없습니다.";
+    });
+    return { completedAt: new Date().toISOString(), steps };
   } finally {
     runtime.db.close();
   }
@@ -579,6 +776,17 @@ export async function setDashboardCaseInterviewPlan(input: {
       caseId: input.caseId,
       sessions: input.sessions,
     });
+  } finally {
+    runtime.db.close();
+  }
+}
+
+export async function resetDashboardCaseInterviewPlanToTemplate(input: {
+  caseId: string;
+}) {
+  const runtime = createRuntime();
+  try {
+    return runtime.workflow.resetCaseInterviewPlanToTemplate(input.caseId);
   } finally {
     runtime.db.close();
   }

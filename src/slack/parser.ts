@@ -21,6 +21,7 @@ export interface ParsedSlackNotification extends CandidateContext {
   scheduledStartTime?: string;
   scheduledEndTime?: string;
   location?: string;
+  candidateMessage?: string;
 }
 
 function collectText(value: unknown, output: Set<string>): void {
@@ -115,6 +116,17 @@ export function isCandidateInterviewAbsenceText(text: string): boolean {
   );
 }
 
+export function isCandidateScheduleRelatedMessage(text: string): boolean {
+  const value = cleanSlackText(text);
+  return [
+    /(?:\uBA74\uC811|\uC778\uD130\uBDF0).{0,16}(?:\uC77C\uC815|\uC2DC\uAC04|\uB0A0\uC9DC|\uC77C\uC790|\uCC38\uC11D|\uBD88\uCC38|\uBCC0\uACBD|\uC870\uC728|\uC5F0\uAE30|\uCDE8\uC18C|\uAC00\uB2A5|\uBD88\uAC00|\uC5B4\uB835|\uD798\uB4E4|\uC548\s*\uB418|\uC548\uB3FC)/u,
+    /(?:\uC77C\uC815|\uC2DC\uAC04|\uB0A0\uC9DC|\uC77C\uC790).{0,12}(?:\uBA74\uC811|\uC778\uD130\uBDF0|\uC5B4\uB835|\uD798\uB4E4|\uBD88\uAC00|\uBD88\uAC00\uB2A5|\uAC00\uB2A5|\uC548\s*\uB418|\uC548\uB3FC|\uBCC0\uACBD|\uC870\uC728|\uC7AC\uC870\uC728|\uC5F0\uAE30|\uCDE8\uC18C|\uBD88\uCC38|\uCC38\uC11D)/u,
+    /(?:\uB2E4\uC74C\s*\uC8FC|\uC774\uBC88\s*\uC8FC|\uAE08\uC8FC|\uCC28\uC8FC).{0,20}(?:\uBA74\uC811|\uC778\uD130\uBDF0|\uC77C\uC815|\uC2DC\uAC04|\uB0A0\uC9DC|\uC77C\uC790)/u,
+    /(?:\d{1,2}\s*\uC6D4\s*\d{1,2}\s*\uC77C|\d{1,2}\s*\uC77C|\d{1,2}:\d{2}).{0,20}(?:\uBA74\uC811|\uC778\uD130\uBDF0|\uC77C\uC815|\uC2DC\uAC04|\uB0A0\uC9DC|\uC77C\uC790)/u,
+    /(?:schedule|reschedule|proposed\s+time|interview\s+time|unavailable|cannot\s+attend|cancel)/iu,
+  ].some((pattern) => pattern.test(value));
+}
+
 function classify(text: string): ParsedSlackNotification["eventType"] {
   if (text.includes("일정이 확정되었습니다")) {
     return "SCHEDULE_CONFIRMED";
@@ -172,6 +184,8 @@ export function parseNinehireSlackMessage(
   const links = linksFrom(payload);
   const candidateName = attachmentField(payload, "지원자") ?? field(text, "지원자");
   const recruitmentName = attachmentField(payload, "채용") ?? field(text, "채용");
+  const candidateMessage =
+    attachmentField(payload, "메시지") ?? field(text, "메시지");
   const candidateLink = links.find(
     (link) => candidateName && link.label?.trim() === candidateName,
   );
@@ -204,6 +218,7 @@ export function parseNinehireSlackMessage(
   const retainedPayload = {
     text,
     links,
+    ...(candidateMessage ? { candidateMessage } : {}),
   };
   const payloadJson = JSON.stringify(retainedPayload);
   return {
@@ -225,5 +240,6 @@ export function parseNinehireSlackMessage(
         }
       : {}),
     ...(location ? { location } : {}),
+    ...(candidateMessage ? { candidateMessage } : {}),
   };
 }

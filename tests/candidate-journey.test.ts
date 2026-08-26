@@ -88,6 +88,26 @@ describe("candidate journey", () => {
     expect(journey?.currentStageDetail).toBe("평가 완료");
   });
 
+  it("distinguishes an unsent schedule proposal from waiting for the candidate response", () => {
+    const interviewCase = {
+      ...confirmedCase("2099-01-01"),
+      status: "AWAITING_CANDIDATE_CONFIRMATION" as const,
+    };
+
+    expect(buildCandidateJourney({
+      template,
+      interviewCase,
+      plannedStepIds: ["S1"],
+      candidateScheduleProposalSent: false,
+    })?.currentStageDetail).toBe("일정 제안 보내기 전");
+    expect(buildCandidateJourney({
+      template,
+      interviewCase,
+      plannedStepIds: ["S1"],
+      candidateScheduleProposalSent: true,
+    })?.currentStageDetail).toBe("후보자 응답 대기");
+  });
+
   it("shows a confirmed final interview in green while keeping the final result pending", () => {
     const journey = buildCandidateJourney({
       template: multiStageTemplate,

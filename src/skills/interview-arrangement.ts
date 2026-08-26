@@ -5,6 +5,7 @@ import type {
   ReviewRow,
 } from "../db/database.js";
 import type { InterviewSkillDecisionOption } from "../domain/skills.js";
+import { suggestCommonSlots } from "../domain/availability.js";
 import { suggestInterviewSlotsWithRooms } from "../services/room-scheduling.js";
 import { suggestSequentialInterviewSlotsWithRooms } from "../services/sequential-scheduling.js";
 import type { OperationalReadinessService } from "../services/operational-readiness.js";
@@ -19,6 +20,7 @@ type WorkflowActions = Pick<
   | "resolveCandidateInterviewAbsenceReview"
   | "syncCaseInterviewers"
   | "createAvailabilityRecoveryDraft"
+  | "createAvailabilityReminderDraft"
 >;
 
 type ReadinessActions = Pick<OperationalReadinessService, "inspect">;
@@ -55,6 +57,26 @@ interface ReconciledNinehireScheduleChoice {
   roomName: string;
 }
 
+interface SchedulingComparisonContext {
+  interviewerAvailability: Array<{
+    displayName: string;
+    required: boolean;
+    submitted: boolean;
+    slots: Array<{ date: string; startTime: string; endTime: string }>;
+  }>;
+  commonSlots: Array<{
+    date: string;
+    startTime: string;
+    endTime: string;
+  }>;
+  roomMatchedSlots: Array<{
+    date: string;
+    startTime: string;
+    endTime: string;
+    roomName: string;
+  }>;
+}
+
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -88,10 +110,65 @@ function caseContext(
   };
 }
 
+function schedulingComparisonContext(
+  db: BridgeDatabase,
+  caseId: string,
+  roomMatchedSlots: SchedulingComparisonContext["roomMatchedSlots"],
+): SchedulingComparisonContext {
+  const bundle = db.getCaseBundle(caseId);
+  if (!bundle) throw new Error(`Case not found: ${caseId}`);
+  const availabilityByInterviewer = new Map<string, Array<{ date: string; startTime: string; endTime: string }>>();
+  for (const slot of bundle.availability) {
+    const slots = availabilityByInterviewer.get(slot.interviewerId) ?? [];
+    slots.push({ date: slot.date, startTime: slot.start, endTime: slot.end });
+    availabilityByInterviewer.set(slot.interviewerId, slots);
+  }
+  const common = suggestCommonSlots(bundle);
+  return {
+    interviewerAvailability: bundle.interviewers
+      .filter((interviewer) => interviewer.active)
+      .map((interviewer) => ({
+        displayName: interviewer.displayName,
+        required: interviewer.required,
+        submitted: interviewer.status === "SUBMITTED",
+        slots: (availabilityByInterviewer.get(interviewer.id) ?? [])
+          .sort((left, right) => `${left.date}|${left.startTime}`.localeCompare(`${right.date}|${right.startTime}`)),
+      })),
+    commonSlots: common.suggestions.map((slot) => ({
+      date: slot.date,
+      startTime: slot.start,
+      endTime: slot.end,
+    })),
+    roomMatchedSlots,
+  };
+}
+
 function decisionOptions(
   options: Array<[string, string, string]>,
 ): InterviewSkillDecisionOption[] {
   return options.map(([id, label, description]) => ({ id, label, description }));
+}
+
+const manualCandidateScheduleProposalOption = [
+  "MARK_MANUAL_CANDIDATE_SCHEDULE_PROPOSAL_SENT",
+  "직접 발송 완료로 기록",
+  "나인하이어에서 직접 메일 발송을 완료한 뒤에만 선택하세요. 외부 발송 없이 로컬 상태만 후보자 응답 대기로 바꿉니다.",
+] as const;
+
+function candidateScheduleProposalOptions(): InterviewSkillDecisionOption[] {
+  return decisionOptions([
+    ["SEND_NINEHIRE_SCHEDULE_PROPOSAL", "나인하이어 메일 자동 발송", "전용 나인하이어 Chrome에서 후보일을 입력하고 저장된 이메일 템플릿으로 실제 메일을 발송합니다."],
+    [...manualCandidateScheduleProposalOption],
+  ]);
+}
+
+function isCandidateScheduleProposalOption(
+  decision: InterviewSkillDecisionRow,
+  optionId: string,
+): boolean {
+  return decision.options.some((option) => option.id === optionId)
+    || (decision.decisionType === "CANDIDATE_SCHEDULE_PROPOSAL_SENT"
+      && optionId === manualCandidateScheduleProposalOption[0]);
 }
 
 function requiredDecisionContext(
@@ -369,7 +446,6 @@ export class InterviewArrangementSkills {
         selectionMode: "SINGLE",
         options: decisionOptions([
           ["WAIT", "제출 대기", "리마인드 정책에 따라 제출을 기다립니다."],
-          ["OPEN_RECOVERY", "재요청 검토", "일정 재제출 요청을 위한 기존 검토 도구로 이동합니다."],
         ]),
         context: baseContext,
       });
@@ -457,6 +533,12 @@ export class InterviewArrangementSkills {
         context: { ...context, meetingRoomCheck: result.meetingRoomCheck },
       });
     }
+    const roomMatchedSlots = choices.map((choice) => ({
+      date: choice.date,
+      startTime: choice.startTime,
+      endTime: choice.endTime,
+      roomName: choice.roomName,
+    }));
     return pendingDecision(this.db, {
       skillKey: "INTERVIEW_SCHEDULING",
       decisionType: "CONFIRM_STANDARD_SCHEDULE",
@@ -469,14 +551,19 @@ export class InterviewArrangementSkills {
       ].join(":")).join("|")}`,
       caseId,
       title: "인터뷰 시간과 회의실 선택",
-      prompt: "추천 시간과 회의실 중 하나를 내부 확정하세요. 이 단계에서는 Slack 메시지를 발송하지 않습니다.",
+      prompt: "모든 면접관이 일정을 제출하였습니다. 인터뷰 진행할 일정을 선택해주세요.",
       selectionMode: "MULTIPLE",
       options: choices.map((choice) => ({
         id: choice.optionId,
         label: `${choice.date} ${choice.startTime}~${choice.endTime} · ${choice.roomName}`,
         description: "회의실 블록 안에 로컬 인터뷰 일정을 배정하고 내부 확정으로 기록합니다.",
       })),
-      context: { ...context, scheduleKind: "STANDARD", choices },
+      context: {
+        ...context,
+        scheduleKind: "STANDARD",
+        choices,
+        ...schedulingComparisonContext(this.db, caseId, roomMatchedSlots),
+      },
     });
   }
 
@@ -488,8 +575,7 @@ export class InterviewArrangementSkills {
     if (this.db.hasCandidateScheduleProposalSent(caseId)) {
       throw new Error("The candidate schedule proposal is already recorded as sent.");
     }
-    const proposalOptions = this.db.listCandidateScheduleOptions(caseId)
-      .filter((option) => option.status === "PROPOSED");
+    const proposalOptions = this.db.listCurrentCandidateScheduleOptions(caseId);
     const bundle = this.db.getCaseBundle(caseId);
     if (!bundle) throw new Error("인터뷰 조율 건을 찾지 못했습니다.");
     const proposal = buildCandidateScheduleProposalDraft({
@@ -528,9 +614,7 @@ export class InterviewArrangementSkills {
       prompt:
         `후보자에게 제안할 일정은 ${proposalSummary || "확인 필요"}입니다. 제목·장소·면접관·메일 템플릿을 확인한 뒤 명시적으로 발송하세요.`,
       selectionMode: "SINGLE",
-      options: decisionOptions([
-        ["SEND_NINEHIRE_SCHEDULE_PROPOSAL", "나인하이어 메일 발송", "전용 나인하이어 Chrome에서 후보일을 입력하고 저장된 이메일 템플릿으로 실제 메일을 발송합니다."],
-      ]),
+      options: candidateScheduleProposalOptions(),
       context: {
         ...caseContext(this.db, caseId),
         candidateScheduleProposal: proposal,
@@ -604,6 +688,43 @@ export class InterviewArrangementSkills {
     });
   }
 
+  createInterviewerNoResponseDecision(reviewId: string): InterviewSkillDecisionRow {
+    const review = this.db.getReview(reviewId);
+    if (
+      !review
+      || review.status !== "OPEN"
+      || !review.caseId
+      || review.reviewType !== "INTERVIEWER_NO_RESPONSE"
+    ) {
+      throw new Error(`Open interviewer no-response review not found: ${reviewId}`);
+    }
+
+    const pendingInterviewers = this.db
+      .listInterviewers(review.caseId)
+      .filter((interviewer) => interviewer.active && interviewer.status === "PENDING")
+      .map((interviewer) => interviewer.displayName);
+
+    return pendingDecision(this.db, {
+      skillKey: "AVAILABILITY_COLLECTION",
+      decisionType: "INTERVIEWER_NO_RESPONSE_ACTION",
+      fingerprint: `review:${review.id}:interviewer-no-response`,
+      reviewId: review.id,
+      caseId: review.caseId,
+      title: "면접관 일정 추가 요청 검토",
+      prompt: "자동 리마인드 2회 후에도 일정을 제출하지 않은 면접관이 있습니다. 추가 요청이 필요한 경우에만 초안을 만드세요.",
+      selectionMode: "SINGLE",
+      options: decisionOptions([
+        ["CREATE_ADDITIONAL_REMINDER_DRAFT", "추가 재요청 초안 만들기", "미제출 면접관에게 보낼 추가 Slack 요청 초안을 만듭니다. 아직 발송하지 않습니다."],
+        ["WAIT", "계속 기다리기", "추가 요청 없이 현재 제출 상태를 유지합니다."],
+      ]),
+      context: {
+        ...caseContext(this.db, review.caseId),
+        reviewId: review.id,
+        pendingInterviewers,
+      },
+    });
+  }
+
   createCandidateScheduleResponseDecision(reviewId: string): InterviewSkillDecisionRow {
     const review = this.db.getReview(reviewId);
     if (
@@ -612,6 +733,7 @@ export class InterviewArrangementSkills {
       ![
         "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED",
         "CANDIDATE_MESSAGE_REVIEW_REQUIRED",
+        "NINEHIRE_SCHEDULE_DELETION_DETECTED",
       ].includes(review.reviewType) ||
       !review.caseId
     ) {
@@ -619,20 +741,72 @@ export class InterviewArrangementSkills {
     }
     const summary = review.summary ?? {};
     const interviewCase = this.db.getCase(review.caseId)!;
+    const scheduleDeletionDetected = review.reviewType === "NINEHIRE_SCHEDULE_DELETION_DETECTED";
     return pendingDecision(this.db, {
       skillKey: "CANDIDATE_SCHEDULE_RESPONSE",
-      decisionType: "CANDIDATE_INTERVIEW_ABSENCE",
+      decisionType: scheduleDeletionDetected
+        ? "NINEHIRE_SCHEDULE_DELETION_ACTION"
+        : "CANDIDATE_SCHEDULE_RESPONSE_ACTION",
       fingerprint: `review:${review.id}:candidate-response`,
       caseId: review.caseId,
       reviewId: review.id,
-      title: "후보자 불참 또는 일정 변경 요청",
-      prompt: "후보자의 의도를 자동으로 단정하지 않고 다음 조치를 선택하세요.",
+      title: scheduleDeletionDetected ? "일정 삭제 감지" : "후보자 일정 요청 처리",
+      prompt: scheduleDeletionDetected
+        ? "나인하이어 일정 삭제가 확인되었습니다. 기존 일정을 다시 조율할지, 인터뷰를 종료할지, 기록을 보류할지 선택하세요."
+        : "후보자의 메시지 또는 직접 확인한 내용을 바탕으로 처리 방향을 선택하세요. 재조율을 선택하면 다음 화면에서 면접관 일정 처리 방법을 고릅니다.",
       selectionMode: "SINGLE",
       options: decisionOptions([
-        ["RESCHEDULE_REUSE", "기존 가능 시간으로 재조율", "기존 면접관 제출 일정을 재사용해 새 일정을 찾습니다."],
-        ["RESCHEDULE_RECOLLECT", "가능 일정 다시 수집", "면접관에게 새 가능 일정을 받습니다."],
-        ["CANCEL", "인터뷰 조율 취소", "로컬 일정과 미발송 초안을 정리하고 안내 초안을 만듭니다."],
-        ["HOLD", "보류", "후보자 메시지와 기존 일정을 유지한 채 검토를 보류합니다."],
+        ["RESCHEDULE", "일정 재조율", "다음 단계에서 기존 면접관 일정을 재사용할지, 새로 받을지 선택합니다."],
+        [
+          "CANCEL",
+          scheduleDeletionDetected ? "인터뷰 종료" : "인터뷰 조율 취소",
+          scheduleDeletionDetected
+            ? "로컬 일정과 회의실 배정을 종료합니다. 다우오피스의 실제 회의실 예약은 유지합니다."
+            : "로컬 일정과 미발송 초안을 정리하고 안내 초안을 만듭니다.",
+        ],
+        ["HOLD", "보류", "기존 일정과 회의실 기록을 유지한 채 검토를 보류합니다."],
+      ]),
+      context: {
+        ...caseContext(this.db, review.caseId),
+        reviewId: review.id,
+        reason: review.reason,
+        candidateMessage: text(summary.messageText) ?? null,
+        scheduledDate: text(summary.scheduledDate) ?? interviewCase.scheduledDate,
+        scheduledStartTime: text(summary.scheduledStartTime) ?? interviewCase.scheduledStartTime,
+        scheduledEndTime: text(summary.scheduledEndTime) ?? interviewCase.scheduledEndTime,
+        scheduledRoomName: text(summary.scheduledRoomName) ?? interviewCase.scheduledRoomName,
+      },
+    });
+  }
+
+  createCandidateRescheduleMethodDecision(reviewId: string): InterviewSkillDecisionRow {
+    const review = this.db.getReview(reviewId);
+    if (
+      !review
+      || review.status !== "OPEN"
+      || ![
+        "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED",
+        "CANDIDATE_MESSAGE_REVIEW_REQUIRED",
+        "NINEHIRE_SCHEDULE_DELETION_DETECTED",
+      ].includes(review.reviewType)
+      || !review.caseId
+    ) {
+      throw new Error(`Open candidate-attendance review not found: ${reviewId}`);
+    }
+    const summary = review.summary ?? {};
+    const interviewCase = this.db.getCase(review.caseId)!;
+    return pendingDecision(this.db, {
+      skillKey: "CANDIDATE_SCHEDULE_RESPONSE",
+      decisionType: "CANDIDATE_SCHEDULE_RESCHEDULE_METHOD",
+      fingerprint: `review:${review.id}:candidate-reschedule-method`,
+      caseId: review.caseId,
+      reviewId: review.id,
+      title: "일정 재조율 방법 선택",
+      prompt: "면접관 일정을 다시 확인하는 방식을 선택하세요.",
+      selectionMode: "SINGLE",
+      options: decisionOptions([
+        ["RESCHEDULE_REUSE", "기존 면접관 일정으로 새 시간 찾기", "기존에 제출한 가능 시간을 재사용해 시간과 회의실을 다시 추천합니다."],
+        ["RESCHEDULE_RECOLLECT", "면접관 일정 다시 요청하기", "기존 제출 시간을 비우고 면접관에게 새 가능 일정 요청 초안을 만듭니다."],
       ]),
       context: {
         ...caseContext(this.db, review.caseId),
@@ -671,13 +845,20 @@ export class InterviewArrangementSkills {
     if (decision.selectionMode === "SINGLE" && optionIds.length !== 1) {
       throw new Error("This decision requires exactly one option.");
     }
-    if (optionIds.some((optionId) => !decision.options.some((option) => option.id === optionId))) {
+    if (optionIds.some((optionId) => !isCandidateScheduleProposalOption(decision, optionId))) {
       throw new Error("Invalid interview skill decision option.");
     }
+    const resolvedDecision = decision.decisionType === "CANDIDATE_SCHEDULE_PROPOSAL_SENT"
+      && optionIds.includes(manualCandidateScheduleProposalOption[0])
+      ? this.db.addPendingInterviewSkillDecisionOptions({
+        decisionId: decision.id,
+        options: decisionOptions([[...manualCandidateScheduleProposalOption]]),
+      })
+      : decision;
     const primaryOptionId = optionIds[0]!;
-    const outcome = await this.executeDecision(decision, primaryOptionId, input.note, optionIds);
+    const outcome = await this.executeDecision(resolvedDecision, primaryOptionId, input.note, optionIds);
     const resolved = this.db.resolveInterviewSkillDecision({
-      decisionId: decision.id,
+      decisionId: resolvedDecision.id,
       optionId: primaryOptionId,
       resolution: { ...outcome, selectedOptionIds: optionIds },
     });
@@ -779,6 +960,7 @@ export class InterviewArrangementSkills {
     if (
       [
         "WAIT_FOR_AVAILABILITY",
+        "INTERVIEWER_NO_RESPONSE_ACTION",
         "OPEN_SCHEDULING",
         "COLLECT_AVAILABILITY_BEFORE_SCHEDULING",
         "SYNC_MEETING_ROOMS",
@@ -788,7 +970,7 @@ export class InterviewArrangementSkills {
       const nextAction = {
         OPEN_SCHEDULING: "CREATE_INTERVIEW_SCHEDULING_DECISION",
         OPEN_ROOM_SYNC: "SYNC_DAOU_MEETING_ROOM_BLOCKS",
-        OPEN_RECOVERY: "CREATE_AVAILABILITY_RECOVERY_DRAFT",
+        CREATE_ADDITIONAL_REMINDER_DRAFT: "CREATE_AVAILABILITY_REMINDER_DRAFT",
         OPEN_AVAILABILITY: "CREATE_AVAILABILITY_COLLECTION_DECISION",
       }[optionId] ?? "NONE";
       return {
@@ -831,13 +1013,20 @@ export class InterviewArrangementSkills {
       };
     }
     if (decision.decisionType === "CANDIDATE_SCHEDULE_PROPOSAL_SENT") {
-      if (optionId !== "SEND_NINEHIRE_SCHEDULE_PROPOSAL") {
-        throw new Error(`Unsupported candidate proposal option: ${optionId}`);
+      if (optionId === "SEND_NINEHIRE_SCHEDULE_PROPOSAL") {
+        return {
+          action: optionId,
+          nextAction: "SEND_NINEHIRE_CANDIDATE_SCHEDULE_PROPOSAL",
+        };
       }
-      return {
-        action: optionId,
-        nextAction: "SEND_NINEHIRE_CANDIDATE_SCHEDULE_PROPOSAL",
-      };
+      if (optionId === manualCandidateScheduleProposalOption[0]) {
+        return {
+          action: optionId,
+          result: this.db.recordCandidateScheduleProposalSent(requiredCaseId(decision)),
+          nextAction: "NONE",
+        };
+      }
+      throw new Error(`Unsupported candidate proposal option: ${optionId}`);
     }
     if (decision.decisionType === "RECONCILE_NINEHIRE_SCHEDULE_PROPOSAL") {
       const caseId = requiredCaseId(decision);
@@ -978,6 +1167,57 @@ export class InterviewArrangementSkills {
         candidateScheduleOptions,
         schedule,
         nextAction: "CREATE_CANDIDATE_SCHEDULE_PROPOSAL_DECISION",
+      };
+    }
+    if (
+      [
+        "CANDIDATE_SCHEDULE_RESPONSE_ACTION",
+        "NINEHIRE_SCHEDULE_DELETION_ACTION",
+      ].includes(decision.decisionType)
+    ) {
+      if (optionId === "RESCHEDULE") {
+        return {
+          action: optionId,
+          nextAction: "CHOOSE_CANDIDATE_RESCHEDULE_METHOD",
+        };
+      }
+      const action = optionId === "CANCEL"
+        ? "CANCEL"
+        : optionId === "HOLD"
+          ? "HOLD"
+          : undefined;
+      if (!action) {
+        throw new Error(`Unsupported candidate response option: ${optionId}`);
+      }
+      return {
+        action: optionId,
+        result: await this.workflow.resolveCandidateInterviewAbsenceReview({
+          reviewId: requiredReviewId(decision),
+          action,
+          ...(note?.trim() ? { note: note.trim() } : {}),
+        }),
+      };
+    }
+    if (decision.decisionType === "CANDIDATE_SCHEDULE_RESCHEDULE_METHOD") {
+      const action = optionId === "RESCHEDULE_REUSE"
+        ? "RESCHEDULE_USING_EXISTING_AVAILABILITY"
+        : optionId === "RESCHEDULE_RECOLLECT"
+          ? "RESCHEDULE_WITH_NEW_AVAILABILITY"
+          : undefined;
+      if (!action) {
+        throw new Error(`Unsupported candidate reschedule option: ${optionId}`);
+      }
+      const result = await this.workflow.resolveCandidateInterviewAbsenceReview({
+        reviewId: requiredReviewId(decision),
+        action,
+        ...(note?.trim() ? { note: note.trim() } : {}),
+      });
+      return {
+        action: optionId,
+        result,
+        nextAction: optionId === "RESCHEDULE_REUSE"
+          ? "CREATE_INTERVIEW_SCHEDULING_DECISION"
+          : "CREATE_AVAILABILITY_COLLECTION_DECISION",
       };
     }
     if (decision.decisionType === "CANDIDATE_INTERVIEW_ABSENCE") {

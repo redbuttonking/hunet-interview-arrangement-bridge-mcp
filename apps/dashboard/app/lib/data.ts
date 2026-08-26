@@ -41,6 +41,9 @@ export function loadCaseDetail(caseId: string) {
       ? db.getRecruitmentInterviewTemplate(bundle.interviewCase.recruitmentRef) ?? null
       : null;
     const plan = db.getCaseInterviewPlan(caseId) ?? null;
+    const scheduleDeletionReview = db.listOpenReviews(1_000)
+      .filter((review) => review.caseId === caseId && review.reviewType === "NINEHIRE_SCHEDULE_DELETION_DETECTED")
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0] ?? null;
     return {
       bundle: {
         ...bundle,
@@ -51,6 +54,9 @@ export function loadCaseDetail(caseId: string) {
       },
       plan,
       template,
+      scheduleDeletionReview: scheduleDeletionReview
+        ? { id: scheduleDeletionReview.id }
+        : null,
       candidateJourney: getCandidateJourneyForCase(db, bundle.interviewCase, plan ?? undefined),
       ninehireCandidateUrl: buildNinehireCandidateUrl({
         appUrl: config.ninehire.appUrl,

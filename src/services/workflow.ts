@@ -2,6 +2,10 @@ import { createHash } from "node:crypto";
 import type { WebClient } from "@slack/web-api";
 import type { AppConfig } from "../config.js";
 import {
+  isNinehireEvaluationRateLimitError,
+  NINEHIRE_RATE_LIMIT_UNTIL_CURSOR,
+} from "../domain/integration-retry.js";
+import {
   BridgeDatabase,
   type CaseBundle,
   type ConfirmedInterviewScheduleRow,
@@ -36,9 +40,15 @@ import {
 } from "../slack/blocks.js";
 import {
   isCandidateInterviewAbsenceText,
+  isCandidateScheduleRelatedMessage,
   parseConfirmedScheduleDateTime,
   type ParsedSlackNotification,
 } from "../slack/parser.js";
+
+const INTERVIEW_ARRANGEMENT_REVIEW_REFRESH_CURSOR =
+  "ninehire:interview_arrangement_review_refresh:last_review_id";
+const NINEHIRE_EVALUATION_REFRESH_LAST_STARTED_AT_CURSOR =
+  "ninehire:evaluation_refresh:last_started_at";
 
 function todayInKorea(now = new Date()): string {
   const parts = new Intl.DateTimeFormat("en-CA", {
@@ -112,10 +122,23 @@ function suggestedInterviewDuration(step: { title: string; name: string }): numb
   return normalized.includes("시강") ? 30 : 60;
 }
 
+function isContractRecruitment(recruitmentName: string): boolean {
+  return /계약직/iu.test(recruitmentName);
+}
+
+function normalizedScoreSheetTitle(value: string): string {
+  return value.replace(/\s/gu, "").toLocaleLowerCase("ko-KR");
+}
+
 type RecruitmentInterviewRouteSelection = {
   triggerStepId: string;
   mode: InterviewPlanMode;
   stepIds: string[];
+  sessions?: Array<{
+    sessionId: string;
+    sessionName: string;
+    scoreSheetTitleIncludes?: string;
+  }>;
 };
 
 function defaultRoutes(
@@ -152,14 +175,33 @@ function resolveTemplateRoutes(
     if (orderedStepIds[0] !== selection.triggerStepId) {
       throw new Error("An interview route must start with its trigger step.");
     }
+    const customSessions = selection.sessions?.map((session) => ({
+      sessionId: session.sessionId.trim(),
+      sessionName: session.sessionName.trim(),
+      ...(session.scoreSheetTitleIncludes?.trim()
+        ? { scoreSheetTitleIncludes: session.scoreSheetTitleIncludes.trim() }
+        : {}),
+    }));
+    if (customSessions && selection.mode !== "SEQUENTIAL") {
+      throw new Error("Custom interview sessions are only supported for sequential interviews.");
+    }
+    if (
+      customSessions &&
+      (customSessions.length < 2 ||
+        new Set(customSessions.map((session) => session.sessionId)).size !== customSessions.length ||
+        customSessions.some((session) => !session.sessionId || !session.sessionName))
+    ) {
+      throw new Error("Sequential interviews need at least two uniquely named sessions.");
+    }
     if (selection.mode === "STANDARD" && orderedStepIds.length !== 1) {
       throw new Error("A standard interview route must contain exactly one step.");
     }
-    if (selection.mode === "SEQUENTIAL" && orderedStepIds.length < 2) {
+    if (selection.mode === "SEQUENTIAL" && orderedStepIds.length < 2 && !customSessions) {
       throw new Error("A sequential interview route needs at least two stages.");
     }
     if (
       selection.mode === "SEQUENTIAL" &&
+      !customSessions &&
       orderedStepIds.some((stepId) => byId.get(stepId)!.durationMinutes !== 60)
     ) {
       throw new Error("Every sequential interview stage must be 60 minutes.");
@@ -168,6 +210,7 @@ function resolveTemplateRoutes(
       triggerStepId: selection.triggerStepId,
       mode: selection.mode,
       stepIds: orderedStepIds,
+      ...(customSessions ? { sessions: customSessions } : {}),
     };
   });
   const coveredStepIds = new Set(explicitRoutes.flatMap((route) => route.stepIds));
@@ -378,12 +421,29 @@ export class WorkflowService {
     private readonly identityResolver?: SlackIdentityResolver,
   ) {}
 
+  getNinehireRateLimitUntil(now = new Date()): Date | undefined {
+    const until = Date.parse(this.db.getCursor(NINEHIRE_RATE_LIMIT_UNTIL_CURSOR) ?? "");
+    return Number.isFinite(until) && until > now.getTime() ? new Date(until) : undefined;
+  }
+
+  deferNinehireRequestsAfterRateLimit(now = new Date()): Date {
+    const configuredCooldownMs = this.config.ninehire.evaluationRateLimitCooldownMs ?? 15 * 60_000;
+    const existingUntil = this.getNinehireRateLimitUntil(now);
+    const until = existingUntil && existingUntil.getTime() > now.getTime() + configuredCooldownMs
+      ? existingUntil
+      : new Date(now.getTime() + configuredCooldownMs);
+    this.db.setCursor(NINEHIRE_RATE_LIMIT_UNTIL_CURSOR, until.toISOString());
+    for (const jobType of ["NINEHIRE_EVALUATION_LOOKUP", "NINEHIRE_SCHEDULE_RECONCILIATION"] as const) {
+      this.db.deferPendingIntegrationRetries({ jobType, nextAttemptAt: until, now });
+    }
+    return until;
+  }
+
   private requestChannelIdForCase(caseId: string): string {
     const mappedChannelId = this.db.getRequestChannelForCase(caseId);
     if (mappedChannelId) return mappedChannelId;
-    if (this.config.slack.requestChannelId) return this.config.slack.requestChannelId;
     throw new Error(
-      "No Slack request channel is configured for this recruitment or as a default.",
+      "이 채용에는 면접관 일정 요청 Slack 채널이 연결되지 않았습니다. 관리 페이지에서 채용별 채널을 연결한 뒤 다시 시도해 주세요.",
     );
   }
 
@@ -415,6 +475,37 @@ export class WorkflowService {
     });
   }
 
+  private findActiveCaseForInterviewRoute(
+    context: CandidateContext,
+    route: RecruitmentInterviewRoute,
+  ): InterviewCaseRow | undefined {
+    const routeStepIds = [
+      ...(route.mode === "SEQUENTIAL" && route.sessions
+        ? route.sessions.map((session) => session.sessionId)
+        : route.stepIds),
+    ].sort();
+    const normalized = (value: string | undefined | null) =>
+      value?.replace(/\s+/gu, "").toLocaleLowerCase("ko-KR") ?? "";
+
+    return this.db.listCases(undefined, 1_000).find((interviewCase) => {
+      if (["CANCELLED", "CLOSED", "ON_HOLD"].includes(interviewCase.status)) {
+        return false;
+      }
+      const sameCandidate = context.candidateRef && interviewCase.candidateRef
+        ? context.candidateRef === interviewCase.candidateRef
+        : normalized(context.candidateName) === normalized(interviewCase.candidateName);
+      const sameRecruitment = context.recruitmentRef && interviewCase.recruitmentRef
+        ? context.recruitmentRef === interviewCase.recruitmentRef
+        : normalized(context.recruitmentName) === normalized(interviewCase.recruitmentName);
+      if (!sameCandidate || !sameRecruitment) return false;
+
+      const plan = this.db.getCaseInterviewPlan(interviewCase.id);
+      return plan !== undefined
+        && plan.stepIds.length === routeStepIds.length
+        && [...plan.stepIds].sort().every((stepId, index) => stepId === routeStepIds[index]);
+    });
+  }
+
   async previewRecruitmentInterviewTemplate(recruitmentId: string) {
     if (!this.ninehire.getRecruitmentPipeline) {
       throw new Error("NineHire recruitment pipeline lookup is not available.");
@@ -422,24 +513,30 @@ export class WorkflowService {
     const pipeline = await this.ninehire.getRecruitmentPipeline(recruitmentId);
     const hash = pipelineHash(pipeline.steps);
     const approved = this.db.getRecruitmentInterviewTemplate(pipeline.recruitmentId);
+    const suggestedInterviewSteps = pipeline.steps
+      .filter((step) => isSuggestedInterviewStep(step));
+    const contractRecruitment = isContractRecruitment(pipeline.recruitmentName);
+    const suggestedTemplateSteps = (contractRecruitment
+      ? suggestedInterviewSteps.slice(0, 1)
+      : suggestedInterviewSteps
+    ).map((step) => ({
+      ...step,
+      mode: suggestedInterviewMode(step),
+      durationMinutes: suggestedInterviewDuration(step),
+    }));
     return {
       recruitmentId: pipeline.recruitmentId,
       recruitmentName: pipeline.recruitmentName,
       pipelineHash: hash,
+      employmentType: contractRecruitment ? "CONTRACT" : "REGULAR",
       requiresApproval: !approved || approved.pipelineHash !== hash,
       approvedTemplate: approved ?? null,
-      suggestedRoutes: defaultRoutes(
-        pipeline.steps
-          .filter((step) => isSuggestedInterviewStep(step))
-          .map((step) => ({
-            ...step,
-            mode: suggestedInterviewMode(step),
-            durationMinutes: suggestedInterviewDuration(step),
-          })),
-      ),
+      suggestedRoutes: defaultRoutes(suggestedTemplateSteps),
       steps: pipeline.steps.map((step) => ({
         ...step,
-        suggestedAsInterview: isSuggestedInterviewStep(step),
+        suggestedAsInterview: contractRecruitment
+          ? suggestedTemplateSteps.some((item) => item.stepId === step.stepId)
+          : isSuggestedInterviewStep(step),
         suggestedMode: isSuggestedInterviewStep(step)
           ? suggestedInterviewMode(step)
           : null,
@@ -499,6 +596,18 @@ export class WorkflowService {
         };
       })
       .sort((left, right) => left.order - right.order);
+    if (isContractRecruitment(pipeline.recruitmentName)) {
+      const firstInterviewStep = pipeline.steps
+        .filter((step) => isSuggestedInterviewStep(step))
+        .sort((left, right) => left.order - right.order)[0];
+      if (
+        !firstInterviewStep ||
+        steps.length !== 1 ||
+        steps[0]!.stepId !== firstInterviewStep.stepId
+      ) {
+        throw new Error("Contract recruitments may only use the first interview stage.");
+      }
+    }
     const routes = resolveTemplateRoutes(steps, input.routes);
     return this.db.upsertRecruitmentInterviewTemplate({
       recruitmentId: pipeline.recruitmentId,
@@ -645,6 +754,8 @@ export class WorkflowService {
     messageTs: string;
     sourceBotId?: string;
     parsed: ParsedSlackNotification;
+  }, options?: {
+    deferEvaluationLookup?: boolean;
   }): Promise<{ notificationId: string; result: string; caseId?: string }> {
     const notification: SlackNotificationInput = {
       channelId: input.channelId,
@@ -696,6 +807,9 @@ export class WorkflowService {
           return this.processCandidateScheduleMessage(stored.id, input.parsed);
         }
         if (input.parsed.eventType === "EVALUATION_COMPLETED") {
+          if (options?.deferEvaluationLookup) {
+            return { notificationId: stored.id, result: "DUPLICATE_PENDING" };
+          }
           return await this.processEvaluationLookup(stored.id, input.parsed);
         }
       } catch (error) {
@@ -736,6 +850,10 @@ export class WorkflowService {
       return { notificationId: stored.id, result: "IGNORED" };
     }
 
+    if (options?.deferEvaluationLookup) {
+      return this.queueEvaluationLookup(stored.id, input.parsed);
+    }
+
     try {
       return await this.processEvaluationLookup(stored.id, input.parsed);
     } catch (error) {
@@ -753,8 +871,22 @@ export class WorkflowService {
     }
   }
 
+  private queueEvaluationLookup(
+    notificationId: string,
+    parsed: ParsedSlackNotification,
+  ): { notificationId: string; result: string } {
+    this.db.updateNotificationStatus(notificationId, "EVALUATION_LOOKUP_QUEUED");
+    this.db.enqueueIntegrationRetry({
+      jobType: "NINEHIRE_EVALUATION_LOOKUP",
+      dedupeKey: notificationId,
+      payload: { notificationId, parsed },
+    });
+    return { notificationId, result: "EVALUATION_RETRY_SCHEDULED" };
+  }
+
   async reconcileReceiptEvaluationCompletions(): Promise<{
     scanned: number;
+    queuedForLookup: number;
     queuedForApproval: number;
     excluded: number;
     reviewRequired: number;
@@ -763,6 +895,7 @@ export class WorkflowService {
     if (!this.ninehire.listReceiptCandidatesWithCompletedScoreSheets) {
       return {
         scanned: 0,
+        queuedForLookup: 0,
         queuedForApproval: 0,
         excluded: 0,
         reviewRequired: 0,
@@ -777,6 +910,7 @@ export class WorkflowService {
     if (recruitments.length === 0) {
       return {
         scanned: 0,
+        queuedForLookup: 0,
         queuedForApproval: 0,
         excluded: 0,
         reviewRequired: 0,
@@ -789,6 +923,7 @@ export class WorkflowService {
     });
     const summary = {
       scanned: candidates.length,
+      queuedForLookup: 0,
       queuedForApproval: 0,
       excluded: 0,
       reviewRequired: 0,
@@ -816,16 +951,21 @@ export class WorkflowService {
           }),
           ...candidate,
         },
-      });
+      }, { deferEvaluationLookup: true });
 
-      if (reconciliation.result === "EVALUATION_READY_FOR_APPROVAL") {
+      if (reconciliation.result === "EVALUATION_RETRY_SCHEDULED") {
+        summary.queuedForLookup += 1;
+      } else if (reconciliation.result === "EVALUATION_READY_FOR_APPROVAL") {
         summary.queuedForApproval += 1;
       } else if (
         reconciliation.result === "EVALUATION_NOT_ELIGIBLE" ||
         reconciliation.result === "EVALUATION_IGNORED_FINALIZED_CANDIDATE"
       ) {
         summary.excluded += 1;
-      } else if (reconciliation.result === "DUPLICATE") {
+      } else if (
+        reconciliation.result === "DUPLICATE"
+        || reconciliation.result === "DUPLICATE_PENDING"
+      ) {
         summary.skipped += 1;
       } else {
         summary.reviewRequired += 1;
@@ -872,6 +1012,9 @@ export class WorkflowService {
     }
     const payload = evaluationRetryPayload(job.payload);
     if (!payload) return;
+    if (isNinehireEvaluationRateLimitError(job.lastError ?? "")) {
+      return;
+    }
     const reason =
       job.lastError ?? "평가표 조회 재시도 횟수를 모두 사용했습니다.";
     this.db.updateNotificationStatus(payload.notificationId, "ERROR", reason);
@@ -880,6 +1023,42 @@ export class WorkflowService {
       reviewType: "EVALUATION_LOOKUP_FAILED",
       reason,
     });
+  }
+
+  recoverRateLimitedEvaluationRetries(input: {
+    cooldownMs: number;
+    intervalMs: number;
+    now?: Date;
+  }): number {
+    const cursorKey = "migration:ninehire-evaluation-rate-limit-recovery-v1";
+    if (this.db.getCursor(cursorKey)) return 0;
+    const now = input.now ?? new Date();
+    const jobs = this.db.listIntegrationRetryJobs({ status: "FAILED", limit: 1_000 })
+      .filter((job) => job.jobType === "NINEHIRE_EVALUATION_LOOKUP")
+      .filter((job) => isNinehireEvaluationRateLimitError(job.lastError ?? ""));
+    const openReviews = this.db.listOpenReviews(1_000);
+
+    for (const [index, job] of jobs.entries()) {
+      const requeued = this.db.requeueIntegrationRetryJob(job.id, now);
+      this.db.deferIntegrationRetryJob(
+        requeued.job.id,
+        new Date(now.getTime() + input.cooldownMs + index * input.intervalMs),
+        now,
+      );
+      const payload = evaluationRetryPayload(job.payload);
+      if (!payload) continue;
+      for (const review of openReviews) {
+        if (
+          review.notificationId === payload.notificationId
+          && review.reviewType === "EVALUATION_LOOKUP_FAILED"
+          && review.status === "OPEN"
+        ) {
+          this.db.resolveReview(review.id, "RATE_LIMIT_AUTOMATIC_RECOVERY");
+        }
+      }
+    }
+    this.db.setCursor(cursorKey, now.toISOString());
+    return jobs.length;
   }
 
   requeueIntegrationRetryJob(jobId: string): IntegrationRetryRequeueResult {
@@ -1018,48 +1197,78 @@ export class WorkflowService {
     unavailable: number;
     discardedPendingDecisions: number;
   }> {
-    const reviews = this.db
+    const openReviews = this.db
       .listOpenReviews(1_000)
       .filter((review) => review.reviewType === "INTERVIEW_ARRANGEMENT_START_REQUIRED");
     const result = {
-      scanned: reviews.length,
+      scanned: 0,
       updated: 0,
       unchanged: 0,
       unavailable: 0,
       discardedPendingDecisions: 0,
     };
 
-    for (const review of reviews) {
-      const approval = evaluationApprovalPayload(review.summary);
-      if (!approval?.context.candidateName || !approval.context.recruitmentName) {
-        result.unavailable += 1;
-        continue;
-      }
-      const refreshed = await this.ninehire.lookupCompletedEvaluation(approval.context);
-      if (!refreshed.context || !refreshed.summary) {
-        result.unavailable += 1;
-        continue;
-      }
-      const summary = {
-        ...(review.summary ?? {}),
-        context: refreshed.context,
-        evaluation: refreshed.summary,
-      };
-      if (JSON.stringify(review.summary) === JSON.stringify(summary)) {
-        result.unchanged += 1;
-        continue;
-      }
-      const previousStepId = approval.evaluation.currentStep?.stepId;
-      const currentStepId = refreshed.summary.currentStep?.stepId;
-      this.db.transaction(() => {
-        this.db.updateOpenReviewSummary(review.id, summary);
-        if (previousStepId !== currentStepId) {
-          result.discardedPendingDecisions +=
-            this.db.discardPendingInterviewSkillDecisionsForReview(review.id);
-        }
-      });
-      result.updated += 1;
+    if (openReviews.length === 0 || this.getNinehireRateLimitUntil()) {
+      return result;
     }
+
+    const now = new Date();
+    const lastStartedAt = Date.parse(
+      this.db.getCursor(NINEHIRE_EVALUATION_REFRESH_LAST_STARTED_AT_CURSOR) ?? "",
+    );
+    const intervalMs = this.config.ninehire.evaluationLookupIntervalMs ?? 30_000;
+    if (Number.isFinite(lastStartedAt) && now.getTime() - lastStartedAt < intervalMs) {
+      return result;
+    }
+
+    const previousReviewId = this.db.getCursor(INTERVIEW_ARRANGEMENT_REVIEW_REFRESH_CURSOR);
+    const nextIndex = previousReviewId
+      ? openReviews.findIndex((review) => review.id === previousReviewId) + 1
+      : 0;
+    const review = openReviews[nextIndex >= openReviews.length ? 0 : nextIndex]!;
+    result.scanned = 1;
+    this.db.setCursor(INTERVIEW_ARRANGEMENT_REVIEW_REFRESH_CURSOR, review.id);
+
+    const approval = evaluationApprovalPayload(review.summary);
+    if (!approval?.context.candidateName || !approval.context.recruitmentName) {
+      result.unavailable += 1;
+      return result;
+    }
+    this.db.setCursor(NINEHIRE_EVALUATION_REFRESH_LAST_STARTED_AT_CURSOR, now.toISOString());
+    let refreshed;
+    try {
+      refreshed = await this.ninehire.lookupCompletedEvaluation(approval.context);
+    } catch (error) {
+      if (isNinehireEvaluationRateLimitError(error instanceof Error ? error.message : String(error))) {
+        this.deferNinehireRequestsAfterRateLimit(now);
+        result.unavailable += 1;
+        return result;
+      }
+      throw error;
+    }
+    if (!refreshed.context || !refreshed.summary) {
+      result.unavailable += 1;
+      return result;
+    }
+    const summary = {
+      ...(review.summary ?? {}),
+      context: refreshed.context,
+      evaluation: refreshed.summary,
+    };
+    if (JSON.stringify(review.summary) === JSON.stringify(summary)) {
+      result.unchanged += 1;
+      return result;
+    }
+    const previousStepId = approval.evaluation.currentStep?.stepId;
+    const currentStepId = refreshed.summary.currentStep?.stepId;
+    this.db.transaction(() => {
+      this.db.updateOpenReviewSummary(review.id, summary);
+      if (previousStepId !== currentStepId) {
+        result.discardedPendingDecisions +=
+          this.db.discardPendingInterviewSkillDecisionsForReview(review.id);
+      }
+    });
+    result.updated += 1;
     return result;
   }
 
@@ -1279,12 +1488,23 @@ export class WorkflowService {
     return draft;
   }
 
-  createAvailabilityReminderDraft(caseId: string): DraftRow {
+  createAvailabilityReminderDraft(caseId: string, reviewId?: string): DraftRow {
     const bundle = this.db.getCaseBundle(caseId);
-    if (!bundle || bundle.interviewCase.status !== "COLLECTING_AVAILABILITY") {
+    if (!bundle || !["REQUEST_SENT", "COLLECTING_AVAILABILITY"].includes(bundle.interviewCase.status)) {
       throw new Error(
         "일정 입력 재안내는 면접관 일정 회신을 수집 중인 건에만 만들 수 있습니다.",
       );
+    }
+    if (reviewId) {
+      const review = this.db.getReview(reviewId);
+      if (
+        !review
+        || review.status !== "OPEN"
+        || review.caseId !== caseId
+        || review.reviewType !== "INTERVIEWER_NO_RESPONSE"
+      ) {
+        throw new Error("자동 리마인드 완료 후 생성한 추가 요청 검토 건을 찾지 못했습니다.");
+      }
     }
     const pendingInterviewerIds = bundle.interviewers
       .filter(
@@ -1315,6 +1535,7 @@ export class WorkflowService {
     });
     const draft = this.db.createDraft({
       caseId,
+      workflowReviewId: reviewId,
       channelId: this.requestChannelIdForCase(caseId),
       previewText: payload.text,
       blocksJson: JSON.stringify(payload.blocks),
@@ -1324,6 +1545,7 @@ export class WorkflowService {
     });
     this.db.addEvent(caseId, "AVAILABILITY_REMINDER_DRAFT_CREATED", "USER", {
       draftId: draft.id,
+      reviewId: reviewId ?? null,
     });
     return draft;
   }
@@ -1425,6 +1647,78 @@ export class WorkflowService {
     return { scanned: notifications.length, reviewRequired };
   }
 
+  reconcileNonSchedulingCandidateMessageReviews(): {
+    scanned: number;
+    resolved: number;
+  } {
+    const reviews = this.db
+      .listOpenReviews(500)
+      .filter((review) => review.reviewType === "CANDIDATE_MESSAGE_REVIEW_REQUIRED");
+    let resolved = 0;
+
+    for (const review of reviews) {
+      const summary = review.summary ?? {};
+      const messageText =
+        typeof summary.messageText === "string" ? summary.messageText : "";
+      const interviewCase = review.caseId ? this.db.getCase(review.caseId) : undefined;
+
+      // 실제 후보자 메시지 없이 대시보드에서 만든 응답 조치 검토는 일정 확정 뒤 남아 있을 이유가 없다.
+      if (!messageText && interviewCase?.status === "CONFIRMED") {
+        this.db.transaction(() => {
+          this.db.discardPendingInterviewSkillDecisionsForReview(review.id);
+          this.db.resolveReview(review.id, "AUTO_RESOLVED_AFTER_CANDIDATE_CONFIRMATION");
+          this.db.addEvent(
+            interviewCase.id,
+            "STALE_CANDIDATE_RESPONSE_REVIEW_RESOLVED",
+            "SYSTEM",
+            { reviewId: review.id },
+          );
+        });
+        resolved += 1;
+        continue;
+      }
+
+      if (!messageText || isCandidateScheduleRelatedMessage(messageText)) {
+        continue;
+      }
+
+      const hasAnotherOpenReview = review.caseId
+        ? reviews.some((item) => item.caseId === review.caseId && item.id !== review.id)
+        : false;
+
+      this.db.transaction(() => {
+        if (
+          interviewCase &&
+          interviewCase.status === "REVIEW_REQUIRED" &&
+          !hasAnotherOpenReview
+        ) {
+          const restoredStatus = this.db.getConfirmedInterviewSchedule(interviewCase.id)
+            ? "CONFIRMED"
+            : this.db.hasCandidateScheduleProposalSent(interviewCase.id)
+              ? "AWAITING_CANDIDATE_CONFIRMATION"
+              : "READY_TO_SCHEDULE";
+          this.db.setCaseStatus(interviewCase.id, restoredStatus);
+          this.db.addEvent(
+            interviewCase.id,
+            "NON_SCHEDULING_CANDIDATE_MESSAGE_IGNORED",
+            "SYSTEM",
+            { reviewId: review.id, restoredStatus },
+          );
+        }
+        this.db.resolveReview(
+          review.id,
+          "AUTO_IGNORED_NON_SCHEDULING_CANDIDATE_MESSAGE",
+        );
+        if (review.notificationId) {
+          this.db.updateNotificationStatus(review.notificationId, "IGNORED");
+        }
+      });
+      resolved += 1;
+    }
+
+    return { scanned: reviews.length, resolved };
+  }
+
   async reconcileNinehireConfirmedSchedules(): Promise<{
     trackedCandidates: number;
     discoveredSchedules: number;
@@ -1432,6 +1726,7 @@ export class WorkflowService {
     manuallyRecorded: number;
     roomSelectionRequired: number;
     roomReviewRequired: number;
+    scheduleDeletionDetected: number;
   }> {
     if (!this.ninehire.listCandidateSchedules) {
       throw new Error("NineHire confirmed-schedule lookup is not available.");
@@ -1530,6 +1825,7 @@ export class WorkflowService {
     }
 
     if (targets.size === 0) {
+      this.resolveSupersededScheduleProposalConfirmationReviews();
       return {
         trackedCandidates: 0,
         discoveredSchedules: 0,
@@ -1537,6 +1833,7 @@ export class WorkflowService {
         manuallyRecorded: 0,
         roomSelectionRequired: 0,
         roomReviewRequired: 0,
+        scheduleDeletionDetected: 0,
       };
     }
 
@@ -1568,6 +1865,29 @@ export class WorkflowService {
     let manuallyRecorded = 0;
     let roomSelectionRequired = 0;
     let roomReviewRequired = 0;
+    let scheduleDeletionDetected = 0;
+
+    for (const [targetKey, target] of targets) {
+      if (
+        target.kind !== "CONFIRMED"
+        || !target.caseId
+        || schedulesByTarget.has(targetKey)
+      ) {
+        continue;
+      }
+      const interviewCase = this.db.getCase(target.caseId);
+      if (
+        !interviewCase
+        || !interviewCase.scheduledDate
+        || interviewCase.scheduledDate < today
+      ) {
+        continue;
+      }
+      if (this.markNinehireScheduleDeletionDetected(interviewCase.id)) {
+        scheduleDeletionDetected += 1;
+      }
+    }
+
     for (const [targetKey, schedule] of schedulesByTarget) {
       const target = targets.get(targetKey);
       if (!target) continue;
@@ -1664,6 +1984,8 @@ export class WorkflowService {
       if (roomResult === "REVIEW_REQUIRED") roomReviewRequired += 1;
     }
 
+    this.resolveSupersededScheduleProposalConfirmationReviews();
+
     return {
       trackedCandidates: targets.size,
       discoveredSchedules,
@@ -1671,6 +1993,7 @@ export class WorkflowService {
       manuallyRecorded,
       roomSelectionRequired,
       roomReviewRequired,
+      scheduleDeletionDetected,
     };
   }
 
@@ -1909,6 +2232,7 @@ export class WorkflowService {
         endTime: schedule.endTime,
         roomName: rooms[0]!.roomName,
         note: `나인하이어 직접 확정 일정 ${schedule.eventId}에서 자동 기록`,
+        source: "NINEHIRE_MCP",
       });
       return "RECORDED";
     }
@@ -1973,6 +2297,80 @@ export class WorkflowService {
       location: schedule.location ?? null,
       attendeeNames: schedule.attendeeNames,
     };
+  }
+
+  private markNinehireScheduleDeletionDetected(caseId: string): boolean {
+    const interviewCase = this.db.getCase(caseId);
+    if (
+      !interviewCase
+      || interviewCase.status !== "CONFIRMED"
+      || !interviewCase.scheduledDate
+      || !interviewCase.scheduledStartTime
+      || !interviewCase.scheduledEndTime
+    ) {
+      return false;
+    }
+    if (this.db.hasCaseReview(caseId, "NINEHIRE_SCHEDULE_DELETION_DETECTED")) {
+      return false;
+    }
+
+    this.db.transaction(() => {
+      this.db.setCaseStatus(caseId, "REVIEW_REQUIRED");
+      this.db.createReview({
+        caseId,
+        reviewType: "NINEHIRE_SCHEDULE_DELETION_DETECTED",
+        reason: "나인하이어 일정 삭제가 확인되었습니다.",
+        summary: {
+          candidateName: interviewCase.candidateName,
+          recruitmentName: interviewCase.recruitmentName,
+          candidateRef: interviewCase.candidateRef,
+          recruitmentRef: interviewCase.recruitmentRef,
+          scheduledDate: interviewCase.scheduledDate,
+          scheduledStartTime: interviewCase.scheduledStartTime,
+          scheduledEndTime: interviewCase.scheduledEndTime,
+          scheduledRoomName: interviewCase.scheduledRoomName,
+          detectedAt: new Date().toISOString(),
+          source: "NINEHIRE_MCP",
+        },
+      });
+      this.db.addEvent(caseId, "NINEHIRE_SCHEDULE_DELETION_DETECTED", "NINEHIRE_MCP", {
+        scheduledDate: interviewCase.scheduledDate,
+        scheduledStartTime: interviewCase.scheduledStartTime,
+        scheduledEndTime: interviewCase.scheduledEndTime,
+        scheduledRoomName: interviewCase.scheduledRoomName,
+      });
+    });
+    return true;
+  }
+
+  private resolveSupersededScheduleProposalConfirmationReviews(): void {
+    const openReviews = this.db.listOpenReviews(1_000);
+    const deletionDetectedCaseIds = new Set(
+      openReviews
+        .filter((review) => review.reviewType === "NINEHIRE_SCHEDULE_DELETION_DETECTED")
+        .flatMap((review) => review.caseId ? [review.caseId] : []),
+    );
+    if (deletionDetectedCaseIds.size === 0) return;
+
+    for (const review of openReviews) {
+      if (
+        review.reviewType !== "NINEHIRE_SCHEDULE_PROPOSAL_CONFIRMATION_REQUIRED"
+        || !review.caseId
+        || !deletionDetectedCaseIds.has(review.caseId)
+      ) {
+        continue;
+      }
+      this.db.transaction(() => {
+        this.db.discardPendingInterviewSkillDecisionsForReview(review.id);
+        this.db.resolveReview(review.id, "SUPERSEDED_BY_NINEHIRE_SCHEDULE_DELETION");
+        this.db.addEvent(
+          review.caseId!,
+          "NINEHIRE_SCHEDULE_PROPOSAL_CONFIRMATION_SUPERSEDED",
+          "SYSTEM",
+          { reviewId: review.id },
+        );
+      });
+    }
   }
 
   private processScheduleConfirmation(
@@ -2364,6 +2762,11 @@ export class WorkflowService {
       this.db.updateNotificationStatus(notificationId, "IGNORED");
       return { notificationId, result: "CANDIDATE_ABSENCE_REPROCESS_REQUIRED" };
     }
+    const candidateMessage = parsed.candidateMessage ?? parsed.text;
+    if (!isCandidateScheduleRelatedMessage(candidateMessage)) {
+      this.db.updateNotificationStatus(notificationId, "IGNORED");
+      return { notificationId, result: "CANDIDATE_MESSAGE_NOT_SCHEDULE_RELATED" };
+    }
     if (!parsed.candidateName || !parsed.recruitmentName) {
       this.db.updateNotificationStatus(notificationId, "IGNORED");
       return { notificationId, result: "CANDIDATE_MESSAGE_CONTEXT_MISSING" };
@@ -2385,11 +2788,11 @@ export class WorkflowService {
         notificationId,
         caseId: interviewCase.id,
         reviewType: "CANDIDATE_MESSAGE_REVIEW_REQUIRED",
-        reason: `The candidate sent a message after receiving an interview schedule proposal. Choose whether to reschedule, cancel, or hold the arrangement.\n\nCandidate message: ${parsed.text}`,
+        reason: `\uC9C0\uC6D0\uC790\uAC00 \uC77C\uC815 \uC81C\uC548 \uC774\uD6C4 \uC77C\uC815 \uAD00\uB828 \uBA54\uC2DC\uC9C0\uB97C \uBCF4\uB0C8\uC2B5\uB2C8\uB2E4. \uC7AC\uC870\uC728, \uCDE8\uC18C, \uBCF4\uB958 \uC911 \uCC98\uB9AC \uBC29\uBC95\uC744 \uC120\uD0DD\uD574 \uC8FC\uC138\uC694.\n\n\uC9C0\uC6D0\uC790 \uBA54\uC2DC\uC9C0: ${candidateMessage}`,
         summary: {
           candidateName: parsed.candidateName,
           recruitmentName: parsed.recruitmentName,
-          messageText: parsed.text,
+          messageText: candidateMessage,
           scheduledDate: interviewCase.scheduledDate,
           scheduledStartTime: interviewCase.scheduledStartTime,
           scheduledEndTime: interviewCase.scheduledEndTime,
@@ -2452,6 +2855,25 @@ export class WorkflowService {
       throw new Error("The selected interview route contains an unconfigured interview step.");
     }
     const resolvedSteps = steps as RecruitmentInterviewTemplateStep[];
+    const existingCase = this.findActiveCaseForInterviewRoute(approval.context, route);
+    if (existingCase) {
+      this.db.transaction(() => {
+        this.db.addEvent(
+          existingCase.id,
+          "DUPLICATE_INTERVIEW_ARRANGEMENT_APPROVAL_IGNORED",
+          "SYSTEM",
+          { reviewId: review.id, notificationId, routeTriggerStepId: input.routeTriggerStepId },
+        );
+        this.db.updateNotificationStatus(notificationId, "PROCESSED");
+        this.db.resolveReview(input.reviewId, "INTERVIEW_ARRANGEMENT_ALREADY_ACTIVE");
+      });
+      return {
+        notificationId,
+        result: "INTERVIEW_CASE_ALREADY_ACTIVE",
+        caseId: existingCase.id,
+        interviewPlan: this.db.getCaseInterviewPlan(existingCase.id),
+      };
+    }
     const interviewCase = this.db.transaction(() => {
       const created = this.db.createInterviewCase({
         notificationId,
@@ -2525,6 +2947,60 @@ export class WorkflowService {
     );
   }
 
+  async resetCaseInterviewPlanToTemplate(caseId: string) {
+    const interviewCase = this.db.getCase(caseId);
+    if (!interviewCase?.recruitmentRef) {
+      throw new Error("The case is missing its NineHire recruitment ID.");
+    }
+    if (!["READY_FOR_DRAFT", "DRAFT_CREATED"].includes(interviewCase.status)) {
+      throw new Error("Reset an exception plan before sending an interviewer request.");
+    }
+    const existingPlan = this.db.getCaseInterviewPlan(caseId);
+    if (!existingPlan || existingPlan.source !== "CANDIDATE_OVERRIDE") {
+      throw new Error("This case does not have a candidate-specific interview exception.");
+    }
+    const templateRouteEvent = this.db.listCaseEvents(caseId, 100).find(
+      (event) => event.eventType === "TEMPLATE_INTERVIEW_ROUTE_APPLIED",
+    );
+    const triggerStepId = templateRouteEvent?.detail.triggerStepId;
+    if (typeof triggerStepId !== "string" || !triggerStepId) {
+      throw new Error("The original recruitment interview route could not be identified.");
+    }
+    const template = await this.getCurrentRecruitmentInterviewTemplate(
+      interviewCase.recruitmentRef,
+    );
+    const route = template.routes.find((item) => item.triggerStepId === triggerStepId);
+    if (!route) {
+      throw new Error("The original recruitment interview route is no longer configured.");
+    }
+    const steps = route.stepIds.map((stepId) =>
+      template.steps.find((step) => step.stepId === stepId),
+    );
+    if (steps.some((step) => !step)) {
+      throw new Error("The original recruitment interview route contains an unconfigured step.");
+    }
+    return this.db.transaction(() => {
+      const cancelledDraftIds = this.db.getCaseBundle(caseId)?.drafts
+        .filter((draft) => ["DRAFT", "APPROVED"].includes(draft.status))
+        .map((draft) => {
+          this.db.cancelDraft(draft.id, "CANDIDATE_EXCEPTION_PLAN_RESET");
+          return draft.id;
+        }) ?? [];
+      this.db.setCaseStatus(caseId, "READY_FOR_DRAFT");
+      const plan = this.applyTemplateInterviewRoute({
+        caseId,
+        route,
+        steps: steps as RecruitmentInterviewTemplateStep[],
+        source: "USER",
+      });
+      this.db.addEvent(caseId, "CANDIDATE_EXCEPTION_PLAN_RESET", "USER", {
+        triggerStepId,
+        cancelledDraftIds,
+      });
+      return plan;
+    });
+  }
+
   private async getCurrentRecruitmentInterviewTemplate(recruitmentId: string) {
     const template = this.db.getRecruitmentInterviewTemplate(recruitmentId);
     if (!template) {
@@ -2553,27 +3029,38 @@ export class WorkflowService {
     source: "SYSTEM" | "USER";
   }) {
     const sessions = input.route.mode === "SEQUENTIAL"
-      ? input.steps.map((step) => ({
+      ? input.route.sessions?.map((session) => ({
+          stepId: session.sessionId,
+          stepName: session.sessionName,
+          interviewerIds: [],
+          ...(session.scoreSheetTitleIncludes
+            ? { scoreSheetTitleIncludes: session.scoreSheetTitleIncludes }
+            : {}),
+        })) ?? input.steps.map((step) => ({
           stepId: step.stepId,
           stepName: step.name,
           interviewerIds: [],
         }))
       : [];
+    const planSteps = input.route.mode === "SEQUENTIAL" && input.route.sessions
+      ? sessions
+      : input.steps.map((step) => ({ stepId: step.stepId, stepName: step.name }));
     const plan = this.db.upsertCaseInterviewPlan({
       caseId: input.caseId,
       source: "TEMPLATE",
       mode: input.route.mode,
-      stepIds: input.steps.map((step) => step.stepId),
-      stepNames: input.steps.map((step) => step.name),
+      stepIds: planSteps.map((step) => step.stepId),
+      stepNames: planSteps.map((step) => step.stepName),
       sessions,
       durationMinutes: input.route.mode === "SEQUENTIAL"
-        ? input.steps.reduce((total, step) => total + step.durationMinutes, 0)
+        ? sessions.length * 60
         : input.steps[0]!.durationMinutes,
     });
     this.db.addEvent(input.caseId, "TEMPLATE_INTERVIEW_ROUTE_APPLIED", input.source, {
       triggerStepId: input.route.triggerStepId,
       mode: input.route.mode,
       stepIds: input.route.stepIds,
+      ...(input.route.sessions ? { sessions: input.route.sessions } : {}),
     });
     return plan;
   }
@@ -2612,7 +3099,7 @@ export class WorkflowService {
     endTime: string;
     roomName: string;
     note?: string;
-    source?: "DAOU_OFFICE_CALENDAR";
+    source?: "DAOU_OFFICE_CALENDAR" | "NINEHIRE_MCP";
     sourceEventId?: string;
   }): {
     case: InterviewCaseRow;
@@ -2674,6 +3161,8 @@ export class WorkflowService {
       review.id,
       input.source === "DAOU_OFFICE_CALENDAR"
         ? "DAOU_OFFICE_CALENDAR_CONFIRMED"
+        : input.source === "NINEHIRE_MCP"
+          ? "NINEHIRE_MCP_SCHEDULE_CONFIRMED"
         : "MANUAL_INTERVIEW_CONFIRMED",
     );
     return {
@@ -2763,15 +3252,65 @@ export class WorkflowService {
       caseId,
       upstream.interviewers.map((person) => person.ninehireUserId),
     );
-    const plan = this.db.getCaseInterviewPlan(caseId);
+    let plan = this.db.getCaseInterviewPlan(caseId);
+    let hasUnmappedSequentialSessions = false;
+    if (
+      plan?.source === "TEMPLATE" &&
+      plan.mode === "SEQUENTIAL" &&
+      plan.sessions.some((session) => session.scoreSheetTitleIncludes)
+    ) {
+      const localInterviewerByNinehireId = new Map(
+        this.db.listInterviewers(caseId)
+          .filter((interviewer) => interviewer.active && interviewer.ninehireUserId)
+          .map((interviewer) => [interviewer.ninehireUserId!, interviewer.id]),
+      );
+      const groupedInterviewers = upstream.scoreSheetGroups ?? [];
+      const sessions = plan.sessions.map((session) => {
+        if (!session.scoreSheetTitleIncludes) return session;
+        const titleNeedle = normalizedScoreSheetTitle(session.scoreSheetTitleIncludes);
+        const interviewerIds = groupedInterviewers
+          .filter((group) => normalizedScoreSheetTitle(group.title).includes(titleNeedle))
+          .flatMap((group) => group.interviewerIds)
+          .map((ninehireUserId) => localInterviewerByNinehireId.get(ninehireUserId))
+          .filter((interviewerId): interviewerId is string => Boolean(interviewerId));
+        return {
+          ...session,
+          interviewerIds: [...new Set(interviewerIds)],
+        };
+      });
+      hasUnmappedSequentialSessions = sessions.some(
+        (session) => session.interviewerIds.length === 0,
+      );
+      plan = this.db.upsertCaseInterviewPlan({
+        caseId,
+        source: plan.source,
+        mode: plan.mode,
+        stepIds: plan.stepIds,
+        stepNames: plan.stepNames,
+        interviewerIds: [...new Set(sessions.flatMap((session) => session.interviewerIds))],
+        sessions,
+        durationMinutes: plan.durationMinutes,
+      });
+      if (hasUnmappedSequentialSessions) {
+        this.db.createReview({
+          caseId,
+          reviewType: "INTERVIEWER_LOOKUP_REQUIRED",
+          reason: "The configured interview score sheets could not be matched to every sequential interview stage.",
+        });
+      } else {
+        this.db.setRequiredInterviewers(caseId, plan.interviewerIds);
+      }
+    }
     if (plan?.source === "CANDIDATE_OVERRIDE") {
       this.db.setRequiredInterviewers(caseId, plan.interviewerIds);
     }
-    const resolvedLookupReviews = this.db.resolveOpenCaseReviewsByType(
-      caseId,
-      "INTERVIEWER_LOOKUP_REQUIRED",
-      "AUTO_RESOLVED_INTERVIEWERS_SYNCED",
-    );
+    const resolvedLookupReviews = hasUnmappedSequentialSessions
+      ? 0
+      : this.db.resolveOpenCaseReviewsByType(
+          caseId,
+          "INTERVIEWER_LOOKUP_REQUIRED",
+          "AUTO_RESOLVED_INTERVIEWERS_SYNCED",
+        );
     if (resolvedLookupReviews > 0) {
       this.db.addEvent(
         caseId,
@@ -2790,13 +3329,183 @@ export class WorkflowService {
 
   async createRequestDraft(caseId: string): Promise<DraftRow> {
     await this.syncCaseInterviewers(caseId);
-    const bundle = this.db.getCaseBundle(caseId);
+    let bundle = this.db.getCaseBundle(caseId);
     if (!bundle) throw new Error(`Case not found: ${caseId}`);
     if (!["READY_FOR_DRAFT", "DRAFT_CREATED"].includes(bundle.interviewCase.status)) {
       throw new Error(
         "Interviewer request drafts can only be created before availability collection starts.",
       );
     }
+    if (bundle.interviewCase.proposalDates.every((date) => date <= todayInKorea())) {
+      this.db.refreshExpiredProposalDatesForUnsentRequest({
+        caseId,
+        proposalDates: proposalDates(todayInKorea()),
+        referenceDate: todayInKorea(),
+      });
+      bundle = this.db.getCaseBundle(caseId);
+      if (!bundle) throw new Error(`Case not found: ${caseId}`);
+    }
+    return this.createInterviewerRequestDraft(bundle);
+  }
+
+  refreshExpiredUnsentAvailabilityRequestDrafts(): {
+    refreshedCaseIds: string[];
+  } {
+    const referenceDate = todayInKorea();
+    const refreshedCaseIds: string[] = [];
+    const candidates = this.db.listCases(undefined, 1_000).filter(
+      (interviewCase) =>
+        ["READY_FOR_DRAFT", "DRAFT_CREATED"].includes(interviewCase.status)
+        && interviewCase.proposalDates.length > 0
+        && interviewCase.proposalDates.every((date) => date <= referenceDate),
+    );
+
+    for (const interviewCase of candidates) {
+      const bundle = this.db.getCaseBundle(interviewCase.id);
+      const hasUnsentAvailabilityRequest = bundle?.drafts.some(
+        (draft) =>
+          draft.messageType === "INTERVIEWER_REQUEST"
+          && ["DRAFT", "APPROVED"].includes(draft.status),
+      );
+      if (!bundle || !hasUnsentAvailabilityRequest) continue;
+
+      this.db.refreshExpiredProposalDatesForUnsentRequest({
+        caseId: interviewCase.id,
+        proposalDates: proposalDates(referenceDate),
+        referenceDate,
+      });
+      const refreshedBundle = this.db.getCaseBundle(interviewCase.id);
+      if (!refreshedBundle) continue;
+      const draft = this.createInterviewerRequestDraft(refreshedBundle);
+      this.db.addEvent(interviewCase.id, "PROPOSAL_DATES_AUTO_REFRESHED_DRAFT_RECREATED", "SYSTEM", {
+        draftId: draft.id,
+        referenceDate,
+        proposalDates: refreshedBundle.interviewCase.proposalDates,
+      });
+      refreshedCaseIds.push(interviewCase.id);
+    }
+    return { refreshedCaseIds };
+  }
+
+  refreshLegacyRecollectionAvailabilityRequestDrafts(): {
+    refreshedCaseIds: string[];
+  } {
+    const referenceDate = todayInKorea();
+    const refreshedCaseIds: string[] = [];
+    const candidates = this.db.listCases(undefined, 1_000).filter(
+      (interviewCase) =>
+        ["READY_FOR_DRAFT", "DRAFT_CREATED"].includes(interviewCase.status),
+    );
+
+    for (const interviewCase of candidates) {
+      const events = this.db.listCaseEvents(interviewCase.id);
+      const latestReopen = events.find(
+        (event) => event.eventType === "SCHEDULE_REOPENED",
+      );
+      if (
+        !latestReopen ||
+        latestReopen.detail.availabilityPolicy !== "RECOLLECT" ||
+        Array.isArray(latestReopen.detail.proposalDates)
+      ) {
+        continue;
+      }
+      const legacyRefreshes = events
+        .filter(
+          (event) =>
+            event.eventType === "LEGACY_RECOLLECTION_PROPOSAL_DATES_REFRESHED" &&
+            event.detail.sourceEventId === latestReopen.id,
+        )
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+      const alreadyRecovered = events.some(
+        (event) =>
+          event.eventType === "LEGACY_RECOLLECTION_PROPOSAL_DATES_REPEAT_RECOVERED" &&
+          event.detail.sourceEventId === latestReopen.id,
+      );
+      const alreadyRefreshed = legacyRefreshes.length > 0;
+      if (legacyRefreshes.length > 1 && !alreadyRecovered) {
+        const originalProposalDates = legacyRefreshes[0]!.detail.proposalDates;
+        if (
+          !Array.isArray(originalProposalDates) ||
+          originalProposalDates.length === 0 ||
+          originalProposalDates.some(
+            (date) =>
+              typeof date !== "string" ||
+              !/^\d{4}-\d{2}-\d{2}$/.test(date),
+          )
+        ) {
+          continue;
+        }
+        const bundle = this.db.getCaseBundle(interviewCase.id);
+        const hasUnsentAvailabilityRequest = bundle?.drafts.some(
+          (draft) =>
+            draft.messageType === "INTERVIEWER_REQUEST" &&
+            ["DRAFT", "APPROVED"].includes(draft.status),
+        );
+        if (!bundle || !hasUnsentAvailabilityRequest) continue;
+
+        const recovered = this.db.refreshExpiredProposalDatesForUnsentRequest({
+          caseId: interviewCase.id,
+          proposalDates: originalProposalDates,
+          referenceDate,
+        });
+        const recoveredBundle = this.db.getCaseBundle(interviewCase.id);
+        if (!recoveredBundle) continue;
+        const draft = this.createInterviewerRequestDraft(recoveredBundle);
+        this.db.addEvent(
+          interviewCase.id,
+          "LEGACY_RECOLLECTION_PROPOSAL_DATES_REPEAT_RECOVERED",
+          "SYSTEM",
+          {
+            sourceEventId: latestReopen.id,
+            proposalDates: recovered.interviewCase.proposalDates,
+            cancelledDraftIds: recovered.cancelledDraftIds,
+            draftId: draft.id,
+          },
+        );
+        refreshedCaseIds.push(interviewCase.id);
+        continue;
+      }
+      if (alreadyRefreshed) continue;
+
+      const bundle = this.db.getCaseBundle(interviewCase.id);
+      const hasUnsentAvailabilityRequest = bundle?.drafts.some(
+        (draft) =>
+          draft.messageType === "INTERVIEWER_REQUEST" &&
+          ["DRAFT", "APPROVED"].includes(draft.status),
+      );
+      if (!bundle || !hasUnsentAvailabilityRequest) continue;
+
+      const nextDates = nextProposalWeekDates(
+        interviewCase.proposalDates,
+        referenceDate,
+      );
+      const refreshed = this.db.refreshExpiredProposalDatesForUnsentRequest({
+        caseId: interviewCase.id,
+        proposalDates: nextDates,
+        referenceDate,
+      });
+      const refreshedBundle = this.db.getCaseBundle(interviewCase.id);
+      if (!refreshedBundle) continue;
+      const draft = this.createInterviewerRequestDraft(refreshedBundle);
+      this.db.addEvent(
+        interviewCase.id,
+        "LEGACY_RECOLLECTION_PROPOSAL_DATES_REFRESHED",
+        "SYSTEM",
+        {
+          previousProposalDates: interviewCase.proposalDates,
+          proposalDates: refreshed.interviewCase.proposalDates,
+          cancelledDraftIds: refreshed.cancelledDraftIds,
+          draftId: draft.id,
+          sourceEventId: latestReopen.id,
+        },
+      );
+      refreshedCaseIds.push(interviewCase.id);
+    }
+    return { refreshedCaseIds };
+  }
+
+  private createInterviewerRequestDraft(bundle: CaseBundle): DraftRow {
+    const caseId = bundle.interviewCase.id;
     const plan = this.db.getCaseInterviewPlan(caseId);
     if (
       plan?.mode === "SEQUENTIAL" &&
@@ -2862,7 +3571,16 @@ export class WorkflowService {
     availabilityPolicy: RescheduleAvailabilityPolicy;
     reason: string;
   }): ScheduleTransitionResult & { scheduleUpdateDraft: DraftRow | null } {
-    const transition = this.db.reopenScheduleForReschedule(input);
+    const interviewCase = this.db.getCase(input.caseId);
+    if (!interviewCase) throw new Error(`Case not found: ${input.caseId}`);
+    const nextDates =
+      input.availabilityPolicy === "RECOLLECT"
+        ? nextProposalWeekDates(interviewCase.proposalDates, todayInKorea())
+        : undefined;
+    const transition = this.db.reopenScheduleForReschedule({
+      ...input,
+      ...(nextDates ? { proposalDates: nextDates } : {}),
+    });
     return { ...transition, scheduleUpdateDraft: null };
   }
 
@@ -2915,16 +3633,23 @@ export class WorkflowService {
       ![
         "CANDIDATE_INTERVIEW_ABSENCE_REVIEW_REQUIRED",
         "CANDIDATE_MESSAGE_REVIEW_REQUIRED",
+        "NINEHIRE_SCHEDULE_DELETION_DETECTED",
       ].includes(review.reviewType)
     ) {
       throw new Error(`Open candidate-attendance review not found: ${input.reviewId}`);
     }
 
-    const reason = input.note?.trim() || "Candidate reported interview absence.";
+    const scheduleDeletionDetected = review.reviewType === "NINEHIRE_SCHEDULE_DELETION_DETECTED";
+    const reason = input.note?.trim()
+      || (scheduleDeletionDetected
+        ? "NineHire confirmed interview schedule was deleted."
+        : "Candidate reported interview absence.");
     if (input.action === "HOLD") {
       this.db.addEvent(
         review.caseId,
-        "CANDIDATE_INTERVIEW_ABSENCE_HELD",
+        scheduleDeletionDetected
+          ? "NINEHIRE_SCHEDULE_DELETION_HELD"
+          : "CANDIDATE_INTERVIEW_ABSENCE_HELD",
         "USER",
         { reviewId: review.id, note: input.note?.trim() || null },
       );
@@ -2938,7 +3663,9 @@ export class WorkflowService {
 
     const outcome =
       input.action === "CANCEL"
-        ? this.cancelInterviewArrangement({ caseId: review.caseId, reason })
+        ? scheduleDeletionDetected
+          ? this.db.cancelInterviewArrangement({ caseId: review.caseId, reason })
+          : this.cancelInterviewArrangement({ caseId: review.caseId, reason })
         : this.reopenInterviewSchedule({
             caseId: review.caseId,
             availabilityPolicy:
@@ -3072,6 +3799,21 @@ export class WorkflowService {
     if (existing.status === "SENT") return existing;
 
     if (messageType === "INTERVIEWER_REQUEST") {
+      const interviewCase = this.db.getCase(existing.caseId);
+      if (
+        interviewCase
+        && interviewCase.proposalDates.every((date) => date <= todayInKorea())
+      ) {
+        this.db.refreshExpiredProposalDatesForUnsentRequest({
+          caseId: existing.caseId,
+          proposalDates: proposalDates(todayInKorea()),
+          referenceDate: todayInKorea(),
+        });
+        await this.createRequestDraft(existing.caseId);
+        throw new Error(
+          "The proposal dates expired before sending. A new draft was created with upcoming business days; review and approve it before sending.",
+        );
+      }
       await this.syncCaseInterviewers(existing.caseId);
     }
     const currentBundle = this.db.getCaseBundle(existing.caseId);

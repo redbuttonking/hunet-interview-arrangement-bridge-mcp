@@ -156,6 +156,92 @@ describe("dashboard service", () => {
     ]));
   });
 
+  it("includes a pending interviewer request draft for queue-side approval", () => {
+    db = new BridgeDatabase(":memory:");
+    const interviewCase = db.createInterviewCase({
+      candidateName: "초안 확인 후보자",
+      recruitmentName: "초안 확인 채용",
+      proposalDates: ["2026-08-21"],
+    });
+    db.createDraft({
+      caseId: interviewCase.id,
+      channelId: "C-DRAFT",
+      previewText: "면접 가능 일정을 입력해 주세요.",
+      blocksJson: "[]",
+      payloadHash: "dashboard-pending-draft",
+      messageType: "INTERVIEWER_REQUEST",
+    });
+
+    const snapshot = getDashboardSnapshot(db);
+
+    expect(snapshot.dashboard.cases).toEqual([
+      expect.objectContaining({
+        id: interviewCase.id,
+        pendingDrafts: [expect.objectContaining({
+          messageType: "INTERVIEWER_REQUEST",
+          status: "DRAFT",
+        })],
+      }),
+    ]);
+  });
+
+  it("includes interviewer names and individual submission states for availability waiting", () => {
+    db = new BridgeDatabase(":memory:");
+    const interviewCase = db.createInterviewCase({
+      candidateName: "Availability candidate",
+      recruitmentName: "Availability recruitment",
+      proposalDates: ["2026-08-21"],
+    });
+    const submitted = db.addOrUpdateInterviewer({
+      caseId: interviewCase.id,
+      slackUserId: "U-SUBMITTED",
+      displayName: "Submitted interviewer",
+      source: "MANUAL",
+    });
+    db.addOrUpdateInterviewer({
+      caseId: interviewCase.id,
+      slackUserId: "U-PENDING",
+      displayName: "Pending interviewer",
+      source: "MANUAL",
+    });
+    db.setCaseStatus(interviewCase.id, "REQUEST_SENT");
+    db.replaceAvailabilityForInterviewer(interviewCase.id, submitted.id, [{
+      date: "2026-08-21",
+      start: "10:00",
+      end: "11:00",
+    }]);
+    db.createOrGetPendingInterviewSkillDecision({
+      skillKey: "AVAILABILITY_COLLECTION",
+      decisionType: "WAIT_FOR_AVAILABILITY",
+      fingerprint: `wait:${interviewCase.id}`,
+      caseId: interviewCase.id,
+      title: "Availability waiting",
+      prompt: "Wait for availability.",
+      selectionMode: "SINGLE",
+      options: [{ id: "WAIT", label: "Wait", description: "Keep waiting." }],
+      context: {},
+    });
+
+    const snapshot = getDashboardSnapshot(db);
+
+    expect(snapshot.dashboard.cases[0]).toMatchObject({
+      interviewerResponses: {
+        submitted: 1,
+        pending: 1,
+        interviewers: expect.arrayContaining([
+          { displayName: "Submitted interviewer", status: "SUBMITTED" },
+          { displayName: "Pending interviewer", status: "PENDING" },
+        ]),
+      },
+    });
+    expect(snapshot.decisions[0]).toMatchObject({
+      interviewerAvailability: expect.arrayContaining([
+        expect.objectContaining({ displayName: "Submitted interviewer", submitted: true }),
+        expect.objectContaining({ displayName: "Pending interviewer", submitted: false }),
+      ]),
+    });
+  });
+
   it("uses the linked case when an operational review has no candidate summary", () => {
     db = new BridgeDatabase(":memory:");
     const interviewCase = db.createInterviewCase({
@@ -205,6 +291,36 @@ describe("dashboard service", () => {
       expect.objectContaining({
         candidateName: "Direct schedule candidate",
         recruitmentName: "Direct schedule recruitment",
+      }),
+    ]);
+  });
+
+  it("shows the Slack candidate context when an evaluation lookup failed", () => {
+    db = new BridgeDatabase(":memory:");
+    const notification = db.insertNotification({
+      channelId: "C-DASHBOARD",
+      messageTs: "1724112000.000100",
+      eventType: "EVALUATION_COMPLETED",
+      title: "평가표 제출이 완료되었습니다.",
+      candidateName: "평가 조회 후보자",
+      candidateRef: "https://app.ninehire.com/applicant-progress/1",
+      recruitmentName: "평가 조회 채용",
+      recruitmentRef: "R-EVALUATION",
+      payloadHash: "evaluation-lookup-failed",
+      payloadJson: "{}",
+    }, "ERROR");
+    db.createReview({
+      notificationId: notification.id,
+      reviewType: "EVALUATION_LOOKUP_FAILED",
+      reason: "나인하이어 API 요청 한도를 초과했습니다.",
+    });
+
+    const snapshot = getDashboardSnapshot(db);
+
+    expect(snapshot.reviews).toEqual([
+      expect.objectContaining({
+        candidateName: "평가 조회 후보자",
+        recruitmentName: "평가 조회 채용",
       }),
     ]);
   });

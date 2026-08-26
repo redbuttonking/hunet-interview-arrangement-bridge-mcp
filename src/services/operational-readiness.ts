@@ -5,8 +5,12 @@ import {
   INTERVIEW_BRIDGE_WORKER_KEY,
   WORKER_DOWNTIME_THRESHOLD_MS,
 } from "../domain/worker-health.js";
+import {
+  isNinehireRateLimitError,
+  NINEHIRE_RATE_LIMIT_UNTIL_CURSOR,
+} from "../domain/integration-retry.js";
 
-interface DaouOfficeBrowserStatusProvider {
+interface BrowserStatusProvider {
   status(): Promise<{
     connected: boolean;
     profileDir: string;
@@ -28,6 +32,40 @@ interface NinehireGateway {
 type CheckStatus = "READY" | "ATTENTION" | "BLOCKED" | "NOT_RUN";
 
 const EXTERNAL_CHECK_TIMEOUT = "EXTERNAL_CHECK_TIMEOUT";
+
+function hasRecentWorkerSync(
+  sync: { value: string; updatedAt: string } | undefined,
+  workerState: ReturnType<typeof workerStatus>,
+  pollIntervalMs: number,
+): boolean {
+  if (!sync || workerState !== "RUNNING") return false;
+  const syncedAt = Date.parse(sync.updatedAt);
+  if (Number.isNaN(syncedAt)) return false;
+  return Date.now() - syncedAt <= Math.max(pollIntervalMs * 2, 120_000);
+}
+
+function useRecentWorkerSyncWhenDirectCheckFails(
+  check: { status: string; reason?: string },
+  sync: { value: string; updatedAt: string } | undefined,
+  workerState: ReturnType<typeof workerStatus>,
+  pollIntervalMs: number,
+) {
+  if (check.reason === "RATE_LIMIT_COOLDOWN") return check;
+  if (
+    check.status !== "ATTENTION"
+    || !hasRecentWorkerSync(sync, workerState, pollIntervalMs)
+  ) {
+    return check;
+  }
+  return {
+    ...check,
+    status: "READY" satisfies CheckStatus,
+    verification: "RECENT_WORKER_SYNC",
+    lastSuccessfulSyncAt: sync!.updatedAt,
+    directCheckStatus: check.status,
+    directCheckReason: check.reason,
+  };
+}
 
 async function withExternalCheckTimeout<T>(
   operation: Promise<T>,
@@ -69,7 +107,8 @@ export class OperationalReadinessService {
     private readonly config: AppConfig,
     private readonly db: BridgeDatabase,
     private readonly ninehire: NinehireGateway,
-    private readonly daouOfficeBrowser: DaouOfficeBrowserStatusProvider,
+    private readonly daouOfficeBrowser: BrowserStatusProvider,
+    private readonly ninehireBrowser: BrowserStatusProvider,
     private readonly slackClient?: SlackAuthClient,
     private readonly externalCheckTimeoutMs = 8_000,
   ) {}
@@ -80,7 +119,6 @@ export class OperationalReadinessService {
       ["SLACK_APP_TOKEN", this.config.slack.appToken],
       ["SLACK_BOT_TOKEN", this.config.slack.botToken],
       ["SLACK_SOURCE_CHANNEL_ID", this.config.slack.sourceChannelId],
-      ["SLACK_REQUEST_CHANNEL_ID", this.config.slack.requestChannelId],
     ]
       .filter(([, value]) => !value)
       .map(([name]) => name);
@@ -90,6 +128,16 @@ export class OperationalReadinessService {
       ? this.db.getCursorInfo(`slack:${this.config.slack.sourceChannelId}:latest_ts`)
       : undefined;
     const daouOffice = await this.daouOfficeBrowser.status();
+    const ninehireBrowser = await this.ninehireBrowser.status();
+    const slackSync = this.db.getCursorInfo("sync:slack:last_success");
+    const ninehireSync = this.db.getCursorInfo("sync:ninehire:last_success");
+    const ninehireRateLimitUntilTimestamp = Date.parse(
+      this.db.getCursor(NINEHIRE_RATE_LIMIT_UNTIL_CURSOR) ?? "",
+    );
+    const ninehireRateLimitUntil = Number.isFinite(ninehireRateLimitUntilTimestamp)
+      && ninehireRateLimitUntilTimestamp > Date.now()
+      ? new Date(ninehireRateLimitUntilTimestamp)
+      : undefined;
     const checks: Record<string, Record<string, unknown>> = {
       localDatabase: {
         status: "READY" satisfies CheckStatus,
@@ -104,6 +152,7 @@ export class OperationalReadinessService {
       ninehire: {
         status: this.ninehire.isConfigured() ? "READY" : "BLOCKED",
         configured: this.ninehire.isConfigured(),
+        rateLimitUntil: ninehireRateLimitUntil?.toISOString() ?? null,
       },
       worker: {
         status: currentWorkerStatus,
@@ -119,6 +168,13 @@ export class OperationalReadinessService {
         profileDir: daouOffice.profileDir,
         debugUrl: daouOffice.debugUrl,
         latestMeetingRoomSyncAt: this.db.getLatestMeetingRoomSyncAt() ?? null,
+        loginVerified: false,
+      },
+      ninehireBrowser: {
+        status: ninehireBrowser.connected ? "READY" : "ATTENTION",
+        connected: ninehireBrowser.connected,
+        profileDir: ninehireBrowser.profileDir,
+        debugUrl: ninehireBrowser.debugUrl,
         loginVerified: false,
       },
     };
@@ -153,6 +209,13 @@ export class OperationalReadinessService {
           if (!this.ninehire.isConfigured()) {
             return { status: "BLOCKED" satisfies CheckStatus, reason: "MISSING_CONFIGURATION" };
           }
+          if (ninehireRateLimitUntil) {
+            return {
+              status: "ATTENTION" satisfies CheckStatus,
+              reason: "RATE_LIMIT_COOLDOWN",
+              retryAfter: ninehireRateLimitUntil.toISOString(),
+            };
+          }
           try {
             const tools = await withExternalCheckTimeout(
               this.ninehire.listTools({ timeoutMs: this.externalCheckTimeoutMs }),
@@ -163,6 +226,18 @@ export class OperationalReadinessService {
               availableToolCount: tools.length,
             };
           } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (isNinehireRateLimitError(message)) {
+              const retryAfter = new Date(
+                Date.now() + (this.config.ninehire.evaluationRateLimitCooldownMs ?? 15 * 60_000),
+              );
+              this.db.setCursor(NINEHIRE_RATE_LIMIT_UNTIL_CURSOR, retryAfter.toISOString());
+              return {
+                status: "ATTENTION" satisfies CheckStatus,
+                reason: "RATE_LIMIT_COOLDOWN",
+                retryAfter: retryAfter.toISOString(),
+              };
+            }
             return {
               status: "ATTENTION" satisfies CheckStatus,
               reason:
@@ -173,8 +248,18 @@ export class OperationalReadinessService {
           }
         })(),
       ]);
-      external.slack = slackCheck;
-      external.ninehire = ninehireCheck;
+      external.slack = useRecentWorkerSyncWhenDirectCheckFails(
+        slackCheck,
+        slackSync,
+        currentWorkerStatus,
+        this.config.pollIntervalMs,
+      );
+      external.ninehire = useRecentWorkerSyncWhenDirectCheckFails(
+        ninehireCheck,
+        ninehireSync,
+        currentWorkerStatus,
+        this.config.pollIntervalMs,
+      );
     }
 
     const nextActions: string[] = [];
@@ -182,13 +267,22 @@ export class OperationalReadinessService {
     if (!this.ninehire.isConfigured()) nextActions.push("CONFIGURE_NINEHIRE");
     if (currentWorkerStatus !== "RUNNING") nextActions.push("RESTART_OR_INSPECT_WORKER");
     if (!daouOffice.connected) nextActions.push("OPEN_DAOU_OFFICE_LOGIN");
+    if (!ninehireBrowser.connected) nextActions.push("OPEN_NINEHIRE_LOGIN");
     if (checkExternal && external.slack?.status !== "READY") nextActions.push("CHECK_SLACK_CONNECTION");
-    if (checkExternal && external.ninehire?.status !== "READY") nextActions.push("CHECK_NINEHIRE_CONNECTION");
+    if (
+      checkExternal
+      && external.ninehire?.status !== "READY"
+      && external.ninehire?.reason !== "RATE_LIMIT_COOLDOWN"
+    ) {
+      nextActions.push("CHECK_NINEHIRE_CONNECTION");
+    }
     const hasBlocked =
       missingSlackConfiguration.length > 0 ||
       !this.ninehire.isConfigured();
     const hasAttention =
       currentWorkerStatus !== "RUNNING" ||
+      !daouOffice.connected ||
+      !ninehireBrowser.connected ||
       (checkExternal && Object.values(external).some((check) => check.status === "ATTENTION"));
 
     return {

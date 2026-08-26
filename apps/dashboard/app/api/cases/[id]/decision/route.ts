@@ -9,6 +9,7 @@ const bodySchema = z.object({
     "AVAILABILITY_COLLECTION",
     "INTERVIEW_SCHEDULING",
     "CANDIDATE_SCHEDULE_PROPOSAL",
+    "CANDIDATE_SCHEDULE_RESPONSE",
   ]),
 });
 

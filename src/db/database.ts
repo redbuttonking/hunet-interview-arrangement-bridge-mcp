@@ -248,6 +248,19 @@ export interface RecruitmentSlackChannelRow {
   updatedAt: string;
 }
 
+export interface DashboardAuthSettingsRow {
+  email: string;
+  passwordHash: string;
+  passwordUpdatedAt: string;
+}
+
+export interface DashboardAuthSessionRow {
+  tokenHash: string;
+  createdAt: string;
+  expiresAt: string;
+  lastSeenAt: string;
+}
+
 export interface RoomAllocationRow {
   id: string;
   caseId: string;
@@ -336,6 +349,7 @@ export interface SequentialInterviewSession {
   stepId: string;
   stepName: string;
   interviewerIds: string[];
+  scoreSheetTitleIncludes?: string;
 }
 
 export interface RecruitmentInterviewTemplateStep {
@@ -351,6 +365,11 @@ export interface RecruitmentInterviewRoute {
   triggerStepId: string;
   mode: InterviewPlanMode;
   stepIds: string[];
+  sessions?: Array<{
+    sessionId: string;
+    sessionName: string;
+    scoreSheetTitleIncludes?: string;
+  }>;
 }
 
 export interface RecruitmentInterviewTemplateRow {
@@ -1627,6 +1646,33 @@ export class BridgeDatabase {
         )
         .run();
     }
+
+    const versionTwentyFive = this.connection
+      .prepare("SELECT 1 FROM schema_migrations WHERE version = 25")
+      .get();
+    if (!versionTwentyFive) {
+      this.connection.exec(`
+        CREATE TABLE IF NOT EXISTS dashboard_auth_settings (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          email TEXT NOT NULL,
+          password_hash TEXT NOT NULL,
+          password_updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS dashboard_auth_sessions (
+          token_hash TEXT PRIMARY KEY,
+          created_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          last_seen_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS dashboard_auth_sessions_expires
+          ON dashboard_auth_sessions(expires_at);
+      `);
+      this.connection
+        .prepare(
+          "INSERT INTO schema_migrations(version, applied_at) VALUES (25, datetime('now'))",
+        )
+        .run();
+    }
   }
 
   transaction<T>(operation: () => T): T {
@@ -2062,6 +2108,7 @@ export class BridgeDatabase {
     id: string,
     errorMessage: string,
     now = new Date(),
+    retryDelayOverrideMs?: number,
   ): IntegrationRetryJobRow {
     const job = this.getIntegrationRetryJob(id);
     if (!job || job.status !== "PENDING") {
@@ -2071,7 +2118,7 @@ export class BridgeDatabase {
     const safeMessage = safeErrorSummary(errorMessage);
     const exhausted = attemptCount >= job.maxAttempts;
     const nextAttemptAt = new Date(
-      now.getTime() + retryDelayMs(attemptCount + 1),
+      now.getTime() + (retryDelayOverrideMs ?? retryDelayMs(attemptCount + 1)),
     ).toISOString();
     this.connection
       .prepare(`
@@ -2090,6 +2137,50 @@ export class BridgeDatabase {
         id,
       );
     return this.getIntegrationRetryJob(id)!;
+  }
+
+  deferIntegrationRetryJob(
+    id: string,
+    nextAttemptAt: Date,
+    now = new Date(),
+  ): IntegrationRetryJobRow {
+    this.connection
+      .prepare(`
+        UPDATE integration_retry_jobs
+        SET next_attempt_at = ?, updated_at = ?
+        WHERE id = ? AND status = 'PENDING'
+      `)
+      .run(nextAttemptAt.toISOString(), now.toISOString(), id);
+    const job = this.getIntegrationRetryJob(id);
+    if (!job) throw new Error(`Integration retry job not found: ${id}`);
+    return job;
+  }
+
+  deferPendingIntegrationRetries(input: {
+    jobType: IntegrationRetryJobType;
+    nextAttemptAt: Date;
+    excludeId?: string;
+    now?: Date;
+  }): number {
+    const now = input.now ?? new Date();
+    const result = this.connection
+      .prepare(`
+        UPDATE integration_retry_jobs
+        SET next_attempt_at = ?, updated_at = ?
+        WHERE job_type = ?
+          AND status = 'PENDING'
+          AND (? IS NULL OR id <> ?)
+          AND next_attempt_at < ?
+      `)
+      .run(
+        input.nextAttemptAt.toISOString(),
+        now.toISOString(),
+        input.jobType,
+        input.excludeId ?? null,
+        input.excludeId ?? null,
+        input.nextAttemptAt.toISOString(),
+      );
+    return Number(result.changes);
   }
 
   requeueIntegrationRetryJob(
@@ -2177,6 +2268,11 @@ export class BridgeDatabase {
     return this.connection
       .prepare("SELECT * FROM slack_notifications WHERE id = ?")
       .get(id) as SqlRow | undefined;
+  }
+
+  getStoredSlackNotification(id: string): StoredSlackNotificationRow | undefined {
+    const row = this.getNotification(id);
+    return row ? toStoredSlackNotification(row) : undefined;
   }
 
   updateNotificationStatus(
@@ -2544,6 +2640,29 @@ export class BridgeDatabase {
     return this.getInterviewSkillDecision(input.decisionId)!;
   }
 
+  addPendingInterviewSkillDecisionOptions(input: {
+    decisionId: string;
+    options: InterviewSkillDecisionOption[];
+  }): InterviewSkillDecisionRow {
+    const decision = this.getInterviewSkillDecision(input.decisionId);
+    if (!decision || decision.status !== "PENDING") {
+      throw new Error(`Pending interview skill decision not found: ${input.decisionId}`);
+    }
+    const options = [
+      ...decision.options,
+      ...input.options.filter((option) => !decision.options.some((current) => current.id === option.id)),
+    ];
+    if (options.length === decision.options.length) return decision;
+    this.connection
+      .prepare(`
+        UPDATE interview_skill_decisions
+        SET options_json = ?, updated_at = ?
+        WHERE id = ? AND status = 'PENDING'
+      `)
+      .run(JSON.stringify(options), new Date().toISOString(), input.decisionId);
+    return this.getInterviewSkillDecision(input.decisionId)!;
+  }
+
   reopenResolvedInterviewSkillDecision(id: string, reason: string): InterviewSkillDecisionRow {
     const decision = this.getInterviewSkillDecision(id);
     if (!decision) throw new Error(`Interview skill decision not found: ${id}`);
@@ -2854,6 +2973,12 @@ export class BridgeDatabase {
       );
     }
     const followUps = this.listCancellationExternalFollowUps({ limit });
+    const pendingDraftsByCase = new Map<string, DraftRow[]>();
+    for (const draft of this.listDrafts("DRAFT")) {
+      const drafts = pendingDraftsByCase.get(draft.caseId) ?? [];
+      drafts.push(draft);
+      pendingDraftsByCase.set(draft.caseId, drafts);
+    }
     const integrationRetries = this.listIntegrationRetryJobs({ limit });
     const workerHealth = this.getWorkerHealth(INTERVIEW_BRIDGE_WORKER_KEY);
     const heartbeatTimestamp = workerHealth
@@ -3059,9 +3184,11 @@ export class BridgeDatabase {
       },
       cases: cases.map((interviewCase) => {
         const plan = this.getCaseInterviewPlan(interviewCase.id);
+        const caseInterviewers = this.listInterviewers(interviewCase.id, false);
         const requiredInterviewers = this.listInterviewers(interviewCase.id).filter(
           (interviewer) => interviewer.required,
         );
+        const pendingDrafts = pendingDraftsByCase.get(interviewCase.id) ?? [];
         const caseFollowUps = followUpsByCase.get(interviewCase.id) ?? [];
         const pendingInterviewerResponses = requiredInterviewers.filter(
           (interviewer) => interviewer.status === "PENDING",
@@ -3115,6 +3242,19 @@ export class BridgeDatabase {
           candidateScheduleProposalSent: this.hasCandidateScheduleProposalSent(
             interviewCase.id,
           ),
+          pendingDrafts: pendingDrafts.map((draft) => ({
+            id: draft.id,
+            messageType: draft.messageType,
+            status: draft.status,
+            previewText: draft.previewText,
+            blocksJson: draft.blocksJson,
+            createdAt: draft.createdAt,
+          })),
+          interviewerNames: Object.fromEntries(
+            caseInterviewers
+              .filter((interviewer) => interviewer.slackUserId)
+              .map((interviewer) => [interviewer.slackUserId!, interviewer.displayName]),
+          ),
           interviewPlan: plan
             ? {
                 mode: plan.mode,
@@ -3132,6 +3272,10 @@ export class BridgeDatabase {
               (interviewer) =>
                 interviewer.status === "DECLINED_PENDING_REVIEW",
             ).length,
+            interviewers: requiredInterviewers.map((interviewer) => ({
+              displayName: interviewer.displayName,
+              status: interviewer.status,
+            })),
           },
           cancellationExternalFollowUps: caseFollowUps,
           needsAttention:
@@ -3221,7 +3365,99 @@ export class BridgeDatabase {
 
   getRequestChannelForCase(caseId: string): string | undefined {
     const interviewCase = this.getCase(caseId);
-    return this.getRecruitmentSlackChannel(interviewCase?.recruitmentRef)?.channelId;
+    return this.getRecruitmentSlackChannel(interviewCase?.recruitmentRef)?.channelId
+      ?? this.getRecruitmentSlackChannelByName(interviewCase?.recruitmentName)?.channelId;
+  }
+
+  getDashboardAuthSettings(): DashboardAuthSettingsRow | undefined {
+    const row = this.connection
+      .prepare("SELECT email, password_hash, password_updated_at FROM dashboard_auth_settings WHERE id = 1")
+      .get() as SqlRow | undefined;
+    return row
+      ? {
+          email: asString(row.email),
+          passwordHash: asString(row.password_hash),
+          passwordUpdatedAt: asString(row.password_updated_at),
+        }
+      : undefined;
+  }
+
+  initializeDashboardAuthSettings(input: {
+    email: string;
+    passwordHash: string;
+    now?: Date;
+  }): DashboardAuthSettingsRow {
+    const now = (input.now ?? new Date()).toISOString();
+    this.connection
+      .prepare(`
+        INSERT OR IGNORE INTO dashboard_auth_settings(id, email, password_hash, password_updated_at)
+        VALUES (1, ?, ?, ?)
+      `)
+      .run(input.email, input.passwordHash, now);
+    return this.getDashboardAuthSettings()!;
+  }
+
+  replaceDashboardAuthPassword(input: {
+    passwordHash: string;
+    now?: Date;
+  }): DashboardAuthSettingsRow {
+    const now = (input.now ?? new Date()).toISOString();
+    this.connection
+      .prepare(`
+        UPDATE dashboard_auth_settings
+        SET password_hash = ?, password_updated_at = ?
+        WHERE id = 1
+      `)
+      .run(input.passwordHash, now);
+    this.connection.prepare("DELETE FROM dashboard_auth_sessions").run();
+    return this.getDashboardAuthSettings()!;
+  }
+
+  createDashboardAuthSession(input: {
+    tokenHash: string;
+    expiresAt: Date;
+    now?: Date;
+  }): DashboardAuthSessionRow {
+    const now = (input.now ?? new Date()).toISOString();
+    this.connection
+      .prepare(`
+        INSERT INTO dashboard_auth_sessions(token_hash, created_at, expires_at, last_seen_at)
+        VALUES (?, ?, ?, ?)
+      `)
+      .run(input.tokenHash, now, input.expiresAt.toISOString(), now);
+    return {
+      tokenHash: input.tokenHash,
+      createdAt: now,
+      expiresAt: input.expiresAt.toISOString(),
+      lastSeenAt: now,
+    };
+  }
+
+  findActiveDashboardAuthSession(tokenHash: string, now = new Date()): DashboardAuthSessionRow | undefined {
+    this.connection
+      .prepare("DELETE FROM dashboard_auth_sessions WHERE expires_at <= ?")
+      .run(now.toISOString());
+    const row = this.connection
+      .prepare(`
+        SELECT token_hash, created_at, expires_at, last_seen_at
+        FROM dashboard_auth_sessions
+        WHERE token_hash = ? AND expires_at > ?
+      `)
+      .get(tokenHash, now.toISOString()) as SqlRow | undefined;
+    if (!row) return undefined;
+    this.connection
+      .prepare("UPDATE dashboard_auth_sessions SET last_seen_at = ? WHERE token_hash = ?")
+      .run(now.toISOString(), tokenHash);
+    return {
+      tokenHash: asString(row.token_hash),
+      createdAt: asString(row.created_at),
+      expiresAt: asString(row.expires_at),
+      lastSeenAt: now.toISOString(),
+    };
+  }
+
+  deleteDashboardAuthSession(tokenHash: string): void {
+    this.connection.prepare("DELETE FROM dashboard_auth_sessions WHERE token_hash = ?").run(tokenHash);
   }
 
   upsertRecruitmentInterviewTemplate(input: {
@@ -3432,14 +3668,39 @@ export class BridgeDatabase {
   }
 
   hasCandidateScheduleProposalSent(caseId: string): boolean {
+    const interviewCase = this.getCase(caseId);
+    if (!interviewCase) return false;
+    const scheduleRound = interviewCase.scheduleRound;
     const row = this.connection
       .prepare(`
         SELECT 1
         FROM case_events
-        WHERE case_id = ? AND event_type = 'CANDIDATE_SCHEDULE_PROPOSAL_SENT'
+        WHERE case_id = ?
+          AND event_type = 'CANDIDATE_SCHEDULE_PROPOSAL_SENT'
+          AND (
+            detail_json LIKE ?
+            OR detail_json LIKE ?
+            OR (
+              detail_json NOT LIKE '%"scheduleRound"%'
+              AND created_at > COALESCE((
+                SELECT MAX(created_at)
+                FROM case_events
+                WHERE case_id = ?
+                  AND event_type IN (
+                    'SCHEDULE_REOPENED',
+                    'AVAILABILITY_RECOLLECTION_PREPARED'
+                  )
+              ), '')
+            )
+          )
         LIMIT 1
       `)
-      .get(caseId) as SqlRow | undefined;
+      .get(
+        caseId,
+        `%"scheduleRound":${scheduleRound},%`,
+        `%"scheduleRound":${scheduleRound}}%`,
+        caseId,
+      ) as SqlRow | undefined;
     return Boolean(row);
   }
 
@@ -3452,6 +3713,20 @@ export class BridgeDatabase {
       `)
       .all(caseId) as SqlRow[];
     return rows.map(toCandidateScheduleOption);
+  }
+
+  listCurrentCandidateScheduleOptions(caseId: string): CandidateScheduleOptionRow[] {
+    const activeAllocationIds = new Set(
+      this.listRoomAllocations(caseId)
+        .filter((allocation) => allocation.status === "ACTIVE")
+        .map((allocation) => allocation.id),
+    );
+    return this.listCandidateScheduleOptions(caseId).filter((option) => {
+      if (option.status !== "PROPOSED") return false;
+      const allocationIds = this.candidateScheduleOptionAllocationIds(option);
+      return allocationIds.length > 0
+        && allocationIds.every((allocationId) => activeAllocationIds.has(allocationId));
+    });
   }
 
   listCandidateScheduleOptionSegments(
@@ -3478,8 +3753,7 @@ export class BridgeDatabase {
   }
 
   ensureCandidateScheduleOption(caseId: string): CandidateScheduleOptionRow {
-    const existing = this.listCandidateScheduleOptions(caseId)
-      .find((option) => option.status !== "RELEASED");
+    const existing = this.listCurrentCandidateScheduleOptions(caseId)[0];
     if (existing) return existing;
     const schedule = this.getConfirmedInterviewSchedule(caseId);
     if (!schedule) throw new Error("An internally confirmed interview schedule is required.");
@@ -3695,7 +3969,7 @@ export class BridgeDatabase {
       throw new Error("Only an internally confirmed interview can be marked as proposed to the candidate.");
     }
     if (this.hasCandidateScheduleProposalSent(caseId)) return interviewCase;
-    const options = this.listCandidateScheduleOptions(caseId);
+    const options = this.listCurrentCandidateScheduleOptions(caseId);
     const schedule = this.getConfirmedInterviewSchedule(caseId);
     const plan = this.getCaseInterviewPlan(caseId);
     const proposalOptions = options.length > 0
@@ -3712,6 +3986,7 @@ export class BridgeDatabase {
           ? [this.ensureCandidateScheduleOption(caseId)]
           : [];
     this.addEvent(caseId, "CANDIDATE_SCHEDULE_PROPOSAL_SENT", "USER", {
+      scheduleRound: interviewCase.scheduleRound,
       options: proposalOptions.map((option) => ({
         date: option.date,
         startTime: option.startTime,
@@ -3753,10 +4028,9 @@ export class BridgeDatabase {
     if (!input.sourceEventId.trim()) {
       throw new Error("An external confirmation source event is required.");
     }
-    const matchingOption = this.listCandidateScheduleOptions(input.caseId).find(
+    const matchingOption = this.listCurrentCandidateScheduleOptions(input.caseId).find(
       (option) =>
-        option.status !== "RELEASED"
-        && option.date === input.date
+        option.date === input.date
         && option.startTime === input.startTime
         && option.endTime === input.endTime,
     );
@@ -4068,7 +4342,7 @@ export class BridgeDatabase {
     endTime: string;
     roomName: string;
     note?: string;
-    source?: "MANUAL" | "DAOU_OFFICE_CALENDAR";
+    source?: "MANUAL" | "DAOU_OFFICE_CALENDAR" | "NINEHIRE_MCP";
     sourceEventId?: string;
   }): ConfirmedInterviewScheduleRow {
     const interviewCase = this.getCase(input.caseId);
@@ -4124,11 +4398,18 @@ export class BridgeDatabase {
           now,
           input.caseId,
         );
-      const calendarConfirmed = input.source === "DAOU_OFFICE_CALENDAR";
+      const externallyConfirmed = ["DAOU_OFFICE_CALENDAR", "NINEHIRE_MCP"].includes(
+        input.source ?? "MANUAL",
+      );
+      const actor = input.source === "DAOU_OFFICE_CALENDAR"
+        ? "DAOU_OFFICE_CALENDAR"
+        : input.source === "NINEHIRE_MCP"
+          ? "NINEHIRE_MCP"
+          : "USER";
       this.addEvent(
         input.caseId,
-        calendarConfirmed ? "CANDIDATE_SCHEDULE_CONFIRMED" : "MANUAL_INTERVIEW_CONFIRMED",
-        calendarConfirmed ? "DAOU_OFFICE_CALENDAR" : "USER",
+        externallyConfirmed ? "CANDIDATE_SCHEDULE_CONFIRMED" : "MANUAL_INTERVIEW_CONFIRMED",
+        actor,
         {
           source: input.source ?? "MANUAL",
           sourceEventId: input.sourceEventId ?? null,
@@ -5070,6 +5351,7 @@ export class BridgeDatabase {
     caseId: string;
     availabilityPolicy: RescheduleAvailabilityPolicy;
     reason: string;
+    proposalDates?: string[];
   }): ScheduleTransitionResult {
     const interviewCase = this.getCase(input.caseId);
     if (!interviewCase) throw new Error(`Case not found: ${input.caseId}`);
@@ -5088,6 +5370,20 @@ export class BridgeDatabase {
     if (!previousSchedule) {
       throw new Error("The previous confirmed schedule record is missing.");
     }
+    if (
+      input.availabilityPolicy === "RECOLLECT" &&
+      (!input.proposalDates ||
+        input.proposalDates.length === 0 ||
+        input.proposalDates.some((date) => !/^\d{4}-\d{2}-\d{2}$/.test(date)))
+    ) {
+      throw new Error(
+        "New proposal dates are required when interviewer availability is recollected.",
+      );
+    }
+    const nextProposalDates =
+      input.availabilityPolicy === "RECOLLECT"
+        ? [...new Set(input.proposalDates!)].sort()
+        : interviewCase.proposalDates;
     const hadSentScheduleConfirmation = this.hasSentScheduleConfirmation(
       input.caseId,
     );
@@ -5112,6 +5408,14 @@ export class BridgeDatabase {
           reason: "SCHEDULE_REOPENED",
         });
       }
+
+      this.connection
+        .prepare(`
+          UPDATE candidate_schedule_options
+          SET status = 'RELEASED'
+          WHERE case_id = ? AND status != 'RELEASED'
+        `)
+        .run(input.caseId);
 
       cancelledDraftIds = this.cancelUnsentDrafts(
         input.caseId,
@@ -5155,6 +5459,7 @@ export class BridgeDatabase {
           `
             UPDATE interview_cases
             SET status = ?, schedule_round = schedule_round + 1,
+                proposal_dates_json = ?,
                 last_scheduled_room_allocation_id = scheduled_room_allocation_id,
                 last_scheduled_room_name = scheduled_room_name,
                 last_scheduled_date = scheduled_date,
@@ -5172,12 +5477,15 @@ export class BridgeDatabase {
           input.availabilityPolicy === "RECOLLECT"
             ? "READY_FOR_DRAFT"
             : "READY_TO_SCHEDULE",
+          JSON.stringify(nextProposalDates),
           now,
           input.caseId,
         );
       this.addEvent(input.caseId, "SCHEDULE_REOPENED", "USER", {
         reason: input.reason,
         availabilityPolicy: input.availabilityPolicy,
+        previousProposalDates: interviewCase.proposalDates,
+        proposalDates: nextProposalDates,
         previousSchedule: {
           date: previousSchedule.date,
           startTime: previousSchedule.startTime,
@@ -5494,6 +5802,62 @@ export class BridgeDatabase {
     this.addEvent(id, "PROPOSAL_DATES_CHANGED", "USER", { dates });
   }
 
+  refreshExpiredProposalDatesForUnsentRequest(input: {
+    caseId: string;
+    proposalDates: string[];
+    referenceDate: string;
+  }): { interviewCase: InterviewCaseRow; cancelledDraftIds: string[] } {
+    const interviewCase = this.getCase(input.caseId);
+    if (!interviewCase || !["READY_FOR_DRAFT", "DRAFT_CREATED"].includes(interviewCase.status)) {
+      throw new Error("Proposal dates can only be refreshed before an availability request is sent.");
+    }
+    if (
+      input.proposalDates.length === 0
+      || input.proposalDates.some((date) => !/^\d{4}-\d{2}-\d{2}$/.test(date))
+    ) {
+      throw new Error("At least one YYYY-MM-DD proposal date is required.");
+    }
+
+    const proposalDates = [...new Set(input.proposalDates)].sort();
+    const drafts = this.connection
+      .prepare(`
+        SELECT id FROM message_drafts
+        WHERE case_id = ? AND message_type = 'INTERVIEWER_REQUEST'
+          AND status IN ('DRAFT', 'APPROVED')
+        ORDER BY created_at ASC
+      `)
+      .all(input.caseId) as SqlRow[];
+    const cancelledDraftIds = drafts.map((draft) => asString(draft.id));
+
+    this.transaction(() => {
+      const now = new Date().toISOString();
+      if (cancelledDraftIds.length > 0) {
+        this.connection
+          .prepare(`
+            UPDATE message_drafts
+            SET status = 'CANCELLED'
+            WHERE case_id = ? AND message_type = 'INTERVIEWER_REQUEST'
+              AND status IN ('DRAFT', 'APPROVED')
+          `)
+          .run(input.caseId);
+      }
+      this.connection
+        .prepare(`
+          UPDATE interview_cases
+          SET proposal_dates_json = ?, updated_at = ?
+          WHERE id = ?
+        `)
+        .run(JSON.stringify(proposalDates), now, input.caseId);
+      this.addEvent(input.caseId, "PROPOSAL_DATES_AUTO_REFRESHED", "SYSTEM", {
+        referenceDate: input.referenceDate,
+        previousProposalDates: interviewCase.proposalDates,
+        proposalDates,
+        cancelledDraftIds,
+      });
+    });
+    return { interviewCase: this.getCase(input.caseId)!, cancelledDraftIds };
+  }
+
   prepareAvailabilityRecollection(input: {
     caseId: string;
     proposalDates: string[];
@@ -5534,6 +5898,13 @@ export class BridgeDatabase {
         .run(now, input.caseId);
       this.connection
         .prepare("DELETE FROM reminders WHERE case_id = ? AND sent_at IS NULL")
+        .run(input.caseId);
+      this.connection
+        .prepare(`
+          UPDATE candidate_schedule_options
+          SET status = 'RELEASED'
+          WHERE case_id = ? AND status != 'RELEASED'
+        `)
         .run(input.caseId);
       this.discardPendingInterviewSkillDecisionsForCase(
         input.caseId,
@@ -6249,6 +6620,21 @@ export class BridgeDatabase {
           draftId: id,
           slackMessageTs,
         });
+      } else if (draft.messageType === "AVAILABILITY_REMINDER") {
+        if (draft.workflowReviewId) {
+          this.connection
+            .prepare(`
+              UPDATE workflow_reviews
+              SET status = 'RESOLVED', resolution = 'ADDITIONAL_AVAILABILITY_REMINDER_SENT', resolved_at = ?
+              WHERE id = ? AND status = 'OPEN'
+            `)
+            .run(new Date().toISOString(), draft.workflowReviewId);
+        }
+        this.addEvent(draft.caseId, "ADDITIONAL_AVAILABILITY_REMINDER_SENT", "USER", {
+          draftId: id,
+          slackMessageTs,
+          workflowReviewId: draft.workflowReviewId,
+        });
       } else if (draft.messageType === "AVAILABILITY_RECOVERY") {
         if (draft.workflowReviewId) {
           this.connection
@@ -6381,15 +6767,22 @@ export class BridgeDatabase {
       .prepare("SELECT * FROM reminders WHERE id = ?")
       .get(id) as SqlRow | undefined;
     if (!row) throw new Error(`Reminder not found: ${id}`);
+    const sentAt = new Date();
     const updated = this.connection
       .prepare(
         "UPDATE reminders SET sent_at = ?, sending_started_at = NULL WHERE id = ? AND sent_at IS NULL",
       )
-      .run(new Date().toISOString(), id);
+      .run(sentAt.toISOString(), id);
     if (updated.changes === 0) return;
+    const caseId = asString(row.case_id);
+    const interviewer = this.getInterviewer(asString(row.interviewer_id));
+    this.addEvent(caseId, "AVAILABILITY_REMINDER_SENT", "SYSTEM", {
+      reminderNumber: Number(row.reminder_number),
+      interviewerName: interviewer?.displayName ?? "면접관",
+      dueAt: asString(row.due_at),
+      sentAt: sentAt.toISOString(),
+    });
     if (Number(row.reminder_number) === 2) {
-      const caseId = asString(row.case_id);
-      const interviewer = this.getInterviewer(asString(row.interviewer_id));
       this.createReview({
         caseId,
         reviewType: "INTERVIEWER_NO_RESPONSE",

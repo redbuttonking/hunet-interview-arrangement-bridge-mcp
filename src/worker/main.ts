@@ -5,6 +5,7 @@ import { getConfig, requireWorkerConfig } from "../config.js";
 import { BridgeDatabase } from "../db/database.js";
 import {
   INTEGRATION_RETRY_POLL_INTERVAL_MS,
+  isNinehireRateLimitError,
 } from "../domain/integration-retry.js";
 import {
   INTERVIEW_BRIDGE_WORKER_KEY,
@@ -20,6 +21,7 @@ import {
   NinehireRecruitmentWorkflowAdapter,
 } from "../ninehire/adapter.js";
 import { NinehireMcpGateway } from "../ninehire/gateway.js";
+import { NinehireBrowserController } from "../ninehire/browser.js";
 import { BrowserDaouOfficeReservationAdapter } from "../daou-office/adapter.js";
 import { DaouOfficeBrowserController } from "../daou-office/browser.js";
 import { WorkflowService, type SlackIdentityResolver } from "../services/workflow.js";
@@ -39,7 +41,6 @@ import { SlackReconciler } from "../slack/reconciler.js";
 
 const config = getConfig();
 requireWorkerConfig(config);
-const requestChannelId = config.slack.requestChannelId;
 const db = new BridgeDatabase(config.dbPath);
 const app = new App({
   token: config.slack.botToken,
@@ -52,6 +53,7 @@ const gateway = new NinehireMcpGateway(config.ninehire);
 const ninehire = new NinehireRecruitmentWorkflowAdapter(gateway);
 const daouOffice = new BrowserDaouOfficeReservationAdapter(config.daouOffice);
 const daouOfficeBrowser = new DaouOfficeBrowserController(config.daouOffice);
+const ninehireBrowser = new NinehireBrowserController(config.ninehire);
 
 class SlackEmailIdentityResolver implements SlackIdentityResolver {
   constructor(private readonly client: WebClient) {}
@@ -83,6 +85,7 @@ const readiness = new OperationalReadinessService(
   db,
   gateway,
   daouOfficeBrowser,
+  ninehireBrowser,
   app.client,
 );
 const skills = new InterviewArrangementSkills(db, workflow, readiness);
@@ -308,6 +311,11 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.stack ?? error.message : String(error);
 }
 
+function registerNinehireRateLimit(error: unknown): Date | undefined {
+  if (!isNinehireRateLimitError(errorMessage(error))) return undefined;
+  return workflow.deferNinehireRequestsAfterRateLimit();
+}
+
 function isDaouOfficeLoginUnavailable(error: unknown): boolean {
   const message = errorMessage(error);
   return /DaouOffice dedicated browser is not running|DaouOffice dedicated browser has no open page|DaouOffice login is required|DaouOffice request failed: (401|403)/.test(
@@ -360,6 +368,7 @@ async function reconcileNinehireConfirmedSchedules(): Promise<void> {
       dedupeKey: ninehireScheduleReconciliationDedupeKey,
       payload: {},
     });
+    registerNinehireRateLimit(error);
     throw new Error(`NineHire confirmed-schedule reconciliation failed: ${message}`);
   }
 }
@@ -425,10 +434,36 @@ async function runIntegrationRetryCycle(): Promise<void> {
   retryCycleRunning = true;
   let failure: string | undefined;
   try {
-    const jobs = db.listIntegrationRetryJobs({
+    const dueJobs = db.listIntegrationRetryJobs({
       status: "PENDING",
       dueBefore: new Date(),
       limit: 20,
+    });
+    const now = new Date();
+    const rateLimitUntil = workflow.getNinehireRateLimitUntil(now);
+    const lastEvaluationLookupAt = Date.parse(
+      db.getCursor("ninehire:evaluation_lookup:last_started_at") ?? "",
+    );
+    const minimumIntervalMs = config.ninehire.evaluationLookupIntervalMs ?? 30_000;
+    const nextEvaluationLookupAt = Number.isNaN(lastEvaluationLookupAt)
+      ? now
+      : new Date(lastEvaluationLookupAt + minimumIntervalMs);
+    let evaluationLookupSelected = false;
+    const jobs = dueJobs.flatMap((job) => {
+      if (!["NINEHIRE_EVALUATION_LOOKUP", "NINEHIRE_SCHEDULE_RECONCILIATION"].includes(job.jobType)) {
+        return [job];
+      }
+      if (rateLimitUntil) {
+        db.deferIntegrationRetryJob(job.id, rateLimitUntil, now);
+        return [];
+      }
+      if (job.jobType !== "NINEHIRE_EVALUATION_LOOKUP") return [job];
+      if (nextEvaluationLookupAt > now || evaluationLookupSelected) {
+        db.deferIntegrationRetryJob(job.id, nextEvaluationLookupAt, now);
+        return [];
+      }
+      evaluationLookupSelected = true;
+      return [job];
     });
     for (const job of jobs) {
       try {
@@ -441,12 +476,24 @@ async function runIntegrationRetryCycle(): Promise<void> {
         } else if (job.jobType === "DAOU_CALENDAR_RECONCILIATION") {
           await reconcileDaouCalendarConfirmedSchedules();
         } else {
+          db.setCursor("ninehire:evaluation_lookup:last_started_at", new Date().toISOString());
           await workflow.processIntegrationRetryJob(job);
         }
         db.completeIntegrationRetryJob(job.id);
       } catch (error) {
         const message = errorMessage(error);
-        const failed = db.failIntegrationRetryJob(job.id, message);
+        const rateLimited = isNinehireRateLimitError(message);
+        const cooldownMs = config.ninehire.evaluationRateLimitCooldownMs ?? 15 * 60_000;
+        const failed = db.failIntegrationRetryJob(
+          job.id,
+          message,
+          new Date(),
+          rateLimited ? cooldownMs : undefined,
+        );
+        if (rateLimited) {
+          const nextAttemptAt = workflow.deferNinehireRequestsAfterRateLimit();
+          db.setCursor("ninehire:evaluation_lookup:rate_limit_until", nextAttemptAt.toISOString());
+        }
         if (failed.status === "FAILED") {
           workflow.handleIntegrationRetryExhausted(failed);
         }
@@ -498,23 +545,57 @@ async function runCycle(): Promise<void> {
   }
   cycleRunning = true;
   const failures: string[] = [];
+  let ninehireRateLimited = Boolean(workflow.getNinehireRateLimitUntil());
   const runStep = async (label: string, step: () => Promise<unknown>) => {
     try {
       await step();
     } catch (error) {
+      const until = registerNinehireRateLimit(error);
+      if (until) {
+        ninehireRateLimited = true;
+        process.stdout.write(
+          `NineHire rate limit detected. Deferred requests until ${until.toISOString()}.\n`,
+        );
+        return;
+      }
       failures.push(`${label}: ${errorMessage(error)}`);
     }
   };
   try {
     await ensureDailyDatabaseBackup();
-    await runStep("나인하이어 서류 평가 보완 동기화", () =>
-      workflow.reconcileReceiptEvaluationCompletions(),
-    );
+    if (!ninehireRateLimited) {
+      await runStep("나인하이어 서류 평가 보완 동기화", () =>
+        workflow.reconcileReceiptEvaluationCompletions(),
+      );
+    }
     await runStep("Slack 동기화", reconcileSlackNotifications);
-    await runStep("나인하이어 현재 인터뷰 단계 확인", () =>
-      workflow.refreshOpenInterviewArrangementReviewStages(),
+    await runStep("일정과 무관한 후보자 메시지 정리", async () =>
+      workflow.reconcileNonSchedulingCandidateMessageReviews(),
     );
-    await runStep("나인하이어 일정 동기화", reconcileNinehireConfirmedSchedules);
+    if (!ninehireRateLimited) {
+      await runStep("나인하이어 현재 인터뷰 단계 확인", () =>
+        workflow.refreshOpenInterviewArrangementReviewStages(),
+      );
+    }
+    await runStep("지난 미발송 일정 요청 날짜 갱신", async () => {
+      const refreshed = workflow.refreshExpiredUnsentAvailabilityRequestDrafts();
+      if (refreshed.refreshedCaseIds.length > 0) {
+        process.stdout.write(
+          `Expired unsent availability requests refreshed: ${refreshed.refreshedCaseIds.length}\n`,
+        );
+      }
+    });
+    await runStep("기존 재조율 일정 요청 날짜 보정", async () => {
+      const refreshed = workflow.refreshLegacyRecollectionAvailabilityRequestDrafts();
+      if (refreshed.refreshedCaseIds.length > 0) {
+        process.stdout.write(
+          `Legacy recollection availability requests refreshed: ${refreshed.refreshedCaseIds.length}\n`,
+        );
+      }
+    });
+    if (!ninehireRateLimited) {
+      await runStep("나인하이어 일정 동기화", reconcileNinehireConfirmedSchedules);
+    }
     await runStep("다우오피스 캘린더 동기화", reconcileDaouCalendarConfirmedSchedules);
     await runStep(
       `다우오피스 회의실 동기화 (${DAOU_ROOM_SYNC_WINDOW_DAYS}일)`,
@@ -538,8 +619,14 @@ async function runCycle(): Promise<void> {
         if (!db.claimReminder(reminder.id)) return;
         const candidateLabel = reminder.candidateName ?? "해당";
         try {
+          const channelId = db.getRequestChannelForCase(reminder.caseId);
+          if (!channelId) {
+            throw new Error(
+              "이 채용에는 면접관 일정 요청 Slack 채널이 연결되지 않아 리마인드를 보내지 않았습니다.",
+            );
+          }
           await app.client.chat.postMessage({
-            channel: db.getRequestChannelForCase(reminder.caseId) ?? requestChannelId,
+            channel: channelId,
             text: `<@${reminder.slackUserId}> ${candidateLabel} 후보자 인터뷰 가능 일정 입력 리마인드입니다. Slack에서 “${candidateLabel} 후보자 인터뷰 가능 일정 입력” 메시지의 [가능 일정 입력] 버튼을 눌러 주세요.`,
           });
           db.markReminderSent(reminder.id);
@@ -599,6 +686,15 @@ if (workerStart.downtime) {
   const recovery = workflow.createWorkerDowntimeReviews(workerStart.downtime);
   process.stdout.write(
     `Worker downtime detected. Impacted availability cases: ${recovery.impactedCaseIds.length}\n`,
+  );
+}
+const recoveredRateLimitedEvaluationJobs = workflow.recoverRateLimitedEvaluationRetries({
+  cooldownMs: config.ninehire.evaluationRateLimitCooldownMs ?? 15 * 60_000,
+  intervalMs: config.ninehire.evaluationLookupIntervalMs ?? 30_000,
+});
+if (recoveredRateLimitedEvaluationJobs > 0) {
+  process.stdout.write(
+    `Recovered ${recoveredRateLimitedEvaluationJobs} NineHire evaluation lookup job(s) with paced retries.\n`,
   );
 }
 process.stdout.write(

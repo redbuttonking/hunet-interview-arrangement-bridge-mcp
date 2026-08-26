@@ -1,7 +1,10 @@
 // 후보자별 통합 또는 연속 인터뷰 예외 계획을 저장한다.
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { setDashboardCaseInterviewPlan } from "../../../../../../../dist/src/dashboard/runtime.js";
+import {
+  resetDashboardCaseInterviewPlanToTemplate,
+  setDashboardCaseInterviewPlan,
+} from "../../../../../../../dist/src/dashboard/runtime.js";
 
 const bodySchema = z.discriminatedUnion("mode", [
   z.object({
@@ -31,6 +34,23 @@ export async function POST(
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "인터뷰 예외 계획을 저장하지 못했습니다." },
+      { status: 400 },
+    );
+  }
+}
+
+export async function DELETE(
+  _request: Request,
+  context: { params: Promise<{ id: string }> },
+) {
+  try {
+    const { id } = await context.params;
+    return NextResponse.json(
+      await resetDashboardCaseInterviewPlanToTemplate({ caseId: id }),
+    );
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "기본 인터뷰 계획으로 되돌리지 못했습니다." },
       { status: 400 },
     );
   }

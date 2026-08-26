@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { parseNinehireSlackMessage } from "../src/slack/parser.js";
+import {
+  isCandidateScheduleRelatedMessage,
+  parseNinehireSlackMessage,
+} from "../src/slack/parser.js";
 
 describe("NineHire Slack parser", () => {
   it("recognizes an evaluation-completed notification and extracts links", () => {
@@ -128,6 +131,30 @@ describe("NineHire Slack parser", () => {
       eventType: "CANDIDATE_INTERVIEW_ABSENCE",
       candidateName: "테스트1",
       recruitmentName: "인터뷰 어레인지 자동화 테스트 채용",
+      candidateMessage: "테스트1 지원자 일정에 불참합니다.",
     });
+  });
+
+  it("distinguishes scheduling requests from general candidate messages", () => {
+    expect(
+      isCandidateScheduleRelatedMessage(
+        "The proposed interview time is difficult. Please reschedule for next week.",
+      ),
+    ).toBe(true);
+    expect(
+      isCandidateScheduleRelatedMessage(
+        "I cannot upload my reference material. Please send the request again.",
+      ),
+    ).toBe(false);
+    expect(
+      isCandidateScheduleRelatedMessage(
+        "\uC81C\uC548\uD574 \uC8FC\uC2E0 \uC778\uD130\uBDF0 \uC77C\uC815\uC740 \uC5B4\uB835\uC2B5\uB2C8\uB2E4. \uB2E4\uC74C \uC8FC\uB294 \uAC00\uB2A5\uD569\uB2C8\uB2E4.",
+      ),
+    ).toBe(true);
+    expect(
+      isCandidateScheduleRelatedMessage(
+        "\uB808\uD37C\uB7F0\uC2A4 \uC790\uB8CC \uC81C\uCD9C\uC774 \uB9C9\uD600 \uB2E4\uC2DC \uBCF4\uB0B4\uC8FC\uC2DC\uBA74 \uAC10\uC0AC\uD558\uACA0\uC2B5\uB2C8\uB2E4.",
+      ),
+    ).toBe(false);
   });
 });

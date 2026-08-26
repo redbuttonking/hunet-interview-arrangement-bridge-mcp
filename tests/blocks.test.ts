@@ -93,6 +93,7 @@ describe("availability modal", () => {
     ).blocks);
 
     expect(request).toContain("인터뷰 가능 일정 입력");
+    expect(request).toContain("제안 날짜:");
     expect(request).toContain("상기 일정 불가");
     expect(request).not.toContain("이번 인터뷰 참여 어려움");
     expect(recovery).toContain("내부 시스템 중단으로 일정을 다시 요청드립니다.");

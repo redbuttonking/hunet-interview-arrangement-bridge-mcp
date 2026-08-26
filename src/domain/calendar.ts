@@ -24,33 +24,72 @@ function weekday(date: string): number {
   return parseDateOnly(date).getUTCDay();
 }
 
+const KOREAN_PUBLIC_HOLIDAYS = new Set([
+  "2026-01-01",
+  "2026-02-16",
+  "2026-02-17",
+  "2026-02-18",
+  "2026-03-01",
+  "2026-03-02",
+  "2026-05-05",
+  "2026-05-24",
+  "2026-05-25",
+  "2026-06-06",
+  "2026-08-15",
+  "2026-08-17",
+  "2026-09-24",
+  "2026-09-25",
+  "2026-09-26",
+  "2026-10-03",
+  "2026-10-05",
+  "2026-10-09",
+  "2026-12-25",
+  "2027-01-01",
+  "2027-02-06",
+  "2027-02-07",
+  "2027-02-08",
+  "2027-02-09",
+  "2027-03-01",
+  "2027-05-01",
+  "2027-05-03",
+  "2027-05-05",
+  "2027-05-13",
+  "2027-06-06",
+  "2027-06-07",
+  "2027-07-17",
+  "2027-07-19",
+  "2027-08-15",
+  "2027-08-16",
+  "2027-09-14",
+  "2027-09-15",
+  "2027-09-16",
+  "2027-10-03",
+  "2027-10-04",
+  "2027-10-09",
+  "2027-10-11",
+  "2027-12-25",
+  "2027-12-27",
+]);
+
+function isKoreanBusinessDate(date: string): boolean {
+  return ![0, 6].includes(weekday(date)) && !KOREAN_PUBLIC_HOLIDAYS.has(date);
+}
+
 function nextBusinessDate(date: string): string {
   let next = addDays(date, 1);
-  while ([0, 6].includes(weekday(next))) next = addDays(next, 1);
+  while (!isKoreanBusinessDate(next)) next = addDays(next, 1);
   return next;
 }
 
-/**
- * PDF rule:
- * - Monday request: this Thursday + next Monday through Thursday.
- * - Other request days: next Monday through Thursday.
- */
 export function proposalDates(requestDate: string): string[] {
-  const day = weekday(requestDate);
-  if (day === 1) {
-    const thisThursday = addDays(requestDate, 3);
-    return [
-      thisThursday,
-      addDays(requestDate, 7),
-      addDays(requestDate, 8),
-      addDays(requestDate, 9),
-      addDays(requestDate, 10),
-    ];
+  parseDateOnly(requestDate);
+  const dates: string[] = [];
+  let cursor = requestDate;
+  while (dates.length < 4) {
+    cursor = nextBusinessDate(cursor);
+    dates.push(cursor);
   }
-
-  const daysUntilNextMonday = (8 - day) % 7 || 7;
-  const monday = addDays(requestDate, daysUntilNextMonday);
-  return [monday, addDays(monday, 1), addDays(monday, 2), addDays(monday, 3)];
+  return dates;
 }
 
 export function nextProposalWeekDates(
@@ -65,7 +104,16 @@ export function nextProposalWeekDates(
   while (notBefore && next.some((date) => date < notBefore)) {
     next = next.map((date) => addDays(date, 7));
   }
-  return next;
+
+  const resolved: string[] = [];
+  for (const targetDate of next) {
+    let candidate = targetDate;
+    while (!isKoreanBusinessDate(candidate) || resolved.includes(candidate)) {
+      candidate = addDays(candidate, 1);
+    }
+    resolved.push(candidate);
+  }
+  return resolved;
 }
 
 export function defaultHourlySlots(): Array<{ start: string; end: string }> {

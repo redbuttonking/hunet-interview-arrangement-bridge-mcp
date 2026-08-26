@@ -9,7 +9,7 @@ describe("BridgeDatabase", () => {
   it("applies every schema migration when the database opens", () => {
     db = new BridgeDatabase(":memory:");
 
-    expect(db.getLatestSchemaVersion()).toBe(24);
+    expect(db.getLatestSchemaVersion()).toBe(25);
   });
 
   it("stores a Slack request channel per recruitment and resolves it for a case", () => {
@@ -273,6 +273,16 @@ describe("BridgeDatabase", () => {
     expect(database.claimReminder(second.id, new Date("2026-08-06T03:00:00.000Z"))).toBe(true);
     database.markReminderSent(second.id);
     database.markReminderSent(second.id);
+    expect(database.listCaseEvents(interviewCase.id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        eventType: "AVAILABILITY_REMINDER_SENT",
+        actor: "SYSTEM",
+        detail: expect.objectContaining({
+          reminderNumber: 2,
+          interviewerName: "Interviewer",
+        }),
+      }),
+    ]));
     expect(
       database.listOpenReviews().filter((review) => review.reviewType === "INTERVIEWER_NO_RESPONSE"),
     ).toHaveLength(1);
@@ -282,6 +292,39 @@ describe("BridgeDatabase", () => {
     expect(
       database.listOpenReviews().find((review) => review.reviewType === "INTERVIEWER_NO_RESPONSE")?.reason,
     ).toBe("Interviewer 면접관이 리마인드 2회 후에도 가능 일정을 제출하지 않았습니다.");
+  });
+
+  it("refreshes expired dates only for unsent interviewer request drafts", () => {
+    const database = (db = new BridgeDatabase(":memory:"));
+    const interviewCase = database.createInterviewCase({
+      candidateName: "Candidate",
+      proposalDates: ["2026-08-17", "2026-08-18", "2026-08-19", "2026-08-20"],
+    });
+    const staleDraft = database.createDraft({
+      caseId: interviewCase.id,
+      channelId: "C1",
+      previewText: "Expired availability request",
+      blocksJson: "[]",
+      payloadHash: "expired-request",
+      messageType: "INTERVIEWER_REQUEST",
+    });
+
+    const refreshed = database.refreshExpiredProposalDatesForUnsentRequest({
+      caseId: interviewCase.id,
+      proposalDates: ["2026-08-21", "2026-08-24", "2026-08-25", "2026-08-26"],
+      referenceDate: "2026-08-20",
+    });
+
+    expect(refreshed).toMatchObject({
+      interviewCase: {
+        proposalDates: ["2026-08-21", "2026-08-24", "2026-08-25", "2026-08-26"],
+      },
+      cancelledDraftIds: [staleDraft.id],
+    });
+    expect(database.getDraft(staleDraft.id)?.status).toBe("CANCELLED");
+    expect(database.listCaseEvents(interviewCase.id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ eventType: "PROPOSAL_DATES_AUTO_REFRESHED" }),
+    ]));
   });
 
   it("restores historic no-response cases to availability collection without hiding other reviews", () => {
@@ -1272,6 +1315,8 @@ describe("BridgeDatabase", () => {
       endTime: "16:00",
     });
     db.confirmInternalSchedule(interviewCase.id);
+    db.recordCandidateScheduleProposalSent(interviewCase.id);
+    expect(db.hasCandidateScheduleProposalSent(interviewCase.id)).toBe(true);
     const sentDraft = db.createDraft({
       caseId: interviewCase.id,
       channelId: "C1",
@@ -1287,6 +1332,7 @@ describe("BridgeDatabase", () => {
       caseId: interviewCase.id,
       availabilityPolicy: "RECOLLECT",
       reason: "후보자가 일정 변경을 요청했습니다.",
+      proposalDates: ["2026-08-06"],
     });
 
     expect(reopened).toMatchObject({
@@ -1299,6 +1345,11 @@ describe("BridgeDatabase", () => {
     ]);
     expect(db.getCaseBundle(interviewCase.id)?.availability).toEqual([]);
     expect(db.listInterviewers(interviewCase.id)[0]?.status).toBe("PENDING");
+    expect(db.getCase(interviewCase.id)?.proposalDates).toEqual(["2026-08-06"]);
+    expect(db.hasCandidateScheduleProposalSent(interviewCase.id)).toBe(false);
+    expect(db.listCandidateScheduleOptions(interviewCase.id)).toMatchObject([
+      { status: "RELEASED" },
+    ]);
 
     const cancelled = db.cancelInterviewArrangement({
       caseId: interviewCase.id,

@@ -27,6 +27,8 @@ export interface AppConfig {
     authHeader: string;
     authScheme: string;
     timeoutMs: number;
+    evaluationLookupIntervalMs?: number;
+    evaluationRateLimitCooldownMs?: number;
     browserProfileDir?: string;
     remoteDebugPort?: number;
     chromeExecutablePath?: string;
@@ -35,7 +37,16 @@ export interface AppConfig {
 
 let envLoaded = false;
 
-export function loadLocalEnv(envPath = resolve(".env")): void {
+export function getApplicationRoot(): string {
+  const configuredRoot = process.env.INTERVIEW_BRIDGE_ROOT?.trim();
+  return configuredRoot ? resolve(configuredRoot) : process.cwd();
+}
+
+export function getLocalEnvPath(): string {
+  return resolve(getApplicationRoot(), ".env");
+}
+
+export function loadLocalEnv(envPath = getLocalEnvPath()): void {
   if (envLoaded) return;
   if (existsSync(envPath)) {
     loadEnvFile(envPath);
@@ -68,7 +79,8 @@ function port(name: string, fallback: number): number {
 
 export function getConfig(): AppConfig {
   loadLocalEnv();
-  const dbPath = resolve(optional("BRIDGE_DB_PATH") ?? "./data/bridge.db");
+  const root = getApplicationRoot();
+  const dbPath = resolve(root, optional("BRIDGE_DB_PATH") ?? "./data/bridge.db");
   mkdirSync(dirname(dbPath), { recursive: true });
 
   return {
@@ -78,7 +90,7 @@ export function getConfig(): AppConfig {
     daouOffice: {
       url: optional("DAOU_OFFICE_URL") ?? "https://hug.hunet.co.kr/app/asset",
       calendarUrl: optional("DAOU_OFFICE_CALENDAR_URL") ?? "https://hug.hunet.co.kr/app/calendar",
-      browserProfileDir: resolve(
+      browserProfileDir: resolve(root,
         optional("DAOU_CHROME_PROFILE_DIR") ?? "./data/daou-office-chrome-profile",
       ),
       remoteDebugPort: port("DAOU_BROWSER_REMOTE_DEBUG_PORT", 9222),
@@ -105,7 +117,15 @@ export function getConfig(): AppConfig {
           ? "Bearer"
           : process.env.NINEHIRE_MCP_AUTH_SCHEME.trim(),
       timeoutMs: positiveInteger("NINEHIRE_MCP_TIMEOUT_MS", 30_000),
-      browserProfileDir: resolve(
+      evaluationLookupIntervalMs: positiveInteger(
+        "NINEHIRE_EVALUATION_LOOKUP_INTERVAL_MS",
+        30_000,
+      ),
+      evaluationRateLimitCooldownMs: positiveInteger(
+        "NINEHIRE_EVALUATION_RATE_LIMIT_COOLDOWN_MS",
+        15 * 60_000,
+      ),
+      browserProfileDir: resolve(root,
         optional("NINEHIRE_CHROME_PROFILE_DIR") ?? "./data/ninehire-chrome-profile",
       ),
       remoteDebugPort: port("NINEHIRE_BROWSER_REMOTE_DEBUG_PORT", 9223),
@@ -121,7 +141,6 @@ export function requireWorkerConfig(config: AppConfig): asserts config is AppCon
     appToken: string;
     botToken: string;
     sourceChannelId: string;
-    requestChannelId: string;
     ninehireBotId?: string;
   };
 } {
@@ -129,7 +148,6 @@ export function requireWorkerConfig(config: AppConfig): asserts config is AppCon
     ["SLACK_APP_TOKEN", config.slack.appToken],
     ["SLACK_BOT_TOKEN", config.slack.botToken],
     ["SLACK_SOURCE_CHANNEL_ID", config.slack.sourceChannelId],
-    ["SLACK_REQUEST_CHANNEL_ID", config.slack.requestChannelId],
   ]
     .filter(([, value]) => !value)
     .map(([name]) => name);
