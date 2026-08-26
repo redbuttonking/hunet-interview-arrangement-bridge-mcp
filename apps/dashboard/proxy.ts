@@ -18,8 +18,34 @@ function isMutation(request: NextRequest): boolean {
   return ["POST", "PUT", "PATCH", "DELETE"].includes(request.method);
 }
 
-function hasSameOrigin(request: NextRequest): boolean {
-  return request.headers.get("origin") === request.nextUrl.origin;
+function isLoopbackHost(hostname: string): boolean {
+  return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1";
+}
+
+function requestPort(request: NextRequest): string {
+  const host = request.headers.get("host");
+  if (!host) return request.nextUrl.port || "80";
+  try {
+    return new URL(`http://${host}`).port || "80";
+  } catch {
+    return request.nextUrl.port || "80";
+  }
+}
+
+function hasTrustedLocalOrigin(request: NextRequest): boolean {
+  const origin = request.headers.get("origin");
+  if (!origin) {
+    return request.headers.get("sec-fetch-site") === "same-origin";
+  }
+
+  try {
+    const originUrl = new URL(origin);
+    return originUrl.protocol === "http:"
+      && isLoopbackHost(originUrl.hostname)
+      && originUrl.port === requestPort(request);
+  } catch {
+    return false;
+  }
 }
 
 function applySecurityHeaders(response: NextResponse): NextResponse {
@@ -47,7 +73,7 @@ export async function proxy(request: NextRequest) {
   }
 
   if (pathname === "/api/auth/login") {
-    if (isMutation(request) && !hasSameOrigin(request)) {
+    if (isMutation(request) && !hasTrustedLocalOrigin(request)) {
       return applySecurityHeaders(NextResponse.json({ error: "허용되지 않은 요청입니다." }, { status: 403 }));
     }
     return applySecurityHeaders(NextResponse.next());
@@ -56,7 +82,7 @@ export async function proxy(request: NextRequest) {
   const sessionToken = request.cookies.get(DASHBOARD_SESSION_COOKIE)?.value;
   if (!validateDashboardSession(sessionToken)) return unauthorized(request);
 
-  if (pathname.startsWith("/api/") && isMutation(request) && !hasSameOrigin(request)) {
+  if (pathname.startsWith("/api/") && isMutation(request) && !hasTrustedLocalOrigin(request)) {
     return applySecurityHeaders(NextResponse.json({ error: "허용되지 않은 요청입니다." }, { status: 403 }));
   }
 
