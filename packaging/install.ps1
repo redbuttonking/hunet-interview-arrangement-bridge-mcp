@@ -9,6 +9,29 @@ $taskName = "Hunet Interview Ops Worker"
 $payloadPath = Join-Path $PSScriptRoot "hunet-interview-ops-payload.zip"
 $temporaryDirectory = Join-Path $env:TEMP ("HunetInterviewOps-" + [guid]::NewGuid().ToString("N"))
 
+function Test-SqliteDatabaseHeader {
+  param([string]$Path)
+
+  try {
+    $stream = [System.IO.File]::Open(
+      $Path,
+      [System.IO.FileMode]::Open,
+      [System.IO.FileAccess]::Read,
+      [System.IO.FileShare]::ReadWrite
+    )
+    try {
+      if ($stream.Length -lt 16) { return $false }
+      $header = New-Object byte[] 16
+      if ($stream.Read($header, 0, $header.Length) -ne $header.Length) { return $false }
+      return [System.Text.Encoding]::ASCII.GetString($header) -eq ("SQLite format 3" + [char]0)
+    } finally {
+      $stream.Dispose()
+    }
+  } catch {
+    return $false
+  }
+}
+
 if (-not (Test-Path -LiteralPath $payloadPath -PathType Leaf)) {
   throw "설치 파일에 앱 패키지가 없습니다."
 }
@@ -23,7 +46,10 @@ try {
   }
 
   $installedNodePath = Join-Path $installRoot "runtime\node.exe"
+  $installedDataDirectory = Join-Path $installRoot "data"
   $installedDatabasePath = Join-Path $installRoot "data\bridge.db"
+  New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
+  New-Item -ItemType Directory -Path $installedDataDirectory -Force | Out-Null
   if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
     Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
   }
@@ -46,18 +72,30 @@ try {
   }
 
   if (Test-Path -LiteralPath $installedDatabasePath -PathType Leaf) {
-    $backupScript = Join-Path $applicationSource "scripts\backup-existing-database.mjs"
-    $backupNode = Join-Path $applicationSource "runtime\node.exe"
-    $backupDirectory = Join-Path $installRoot "data\backups"
-    & $backupNode $backupScript $installedDatabasePath $backupDirectory
-    if ($LASTEXITCODE -ne 0) {
-      throw "업데이트 전 DB 백업에 실패해 설치를 중단했습니다."
+    if (-not (Test-SqliteDatabaseHeader -Path $installedDatabasePath)) {
+      $invalidDatabasePath = Join-Path $installedDataDirectory (
+        "bridge.incomplete-" + (Get-Date -Format "yyyyMMddHHmmss") + ".db"
+      )
+      try {
+        Move-Item -LiteralPath $installedDatabasePath -Destination $invalidDatabasePath -Force
+      } catch {
+        throw "기존 DB가 유효한 SQLite 파일이 아니며 안전하게 보관하지 못했습니다. 경로: $installedDatabasePath"
+      }
+      Write-Warning "이전 설치에서 남은 불완전한 DB를 보관하고 새 DB를 준비합니다: $invalidDatabasePath"
+    } else {
+      $backupScript = Join-Path $applicationSource "scripts\backup-existing-database.mjs"
+      $backupNode = Join-Path $applicationSource "runtime\node.exe"
+      $backupDirectory = Join-Path $installedDataDirectory "backups"
+      & $backupNode $backupScript $installedDatabasePath $backupDirectory
+      if ($LASTEXITCODE -ne 0) {
+        throw "업데이트 전 DB 백업에 실패해 설치를 중단했습니다. DB는 변경하지 않았습니다. 경로: $installedDatabasePath"
+      }
     }
   }
 
   New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
   Copy-Item -Path (Join-Path $applicationSource "*") -Destination $installRoot -Recurse -Force
-  New-Item -ItemType Directory -Path (Join-Path $installRoot "data") -Force | Out-Null
+  New-Item -ItemType Directory -Path $installedDataDirectory -Force | Out-Null
   New-Item -ItemType Directory -Path (Join-Path $installRoot "logs") -Force | Out-Null
 
   $installedEnvPath = Join-Path $installRoot ".env"

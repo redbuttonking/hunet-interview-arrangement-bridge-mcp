@@ -2,6 +2,7 @@
 @echo off
 setlocal
 cd /d "%~dp0.."
+set "INTERVIEW_BRIDGE_ROOT=%CD%"
 set "LOG_DIR=%CD%\logs"
 set "LOG_FILE=%LOG_DIR%\worker.log"
 

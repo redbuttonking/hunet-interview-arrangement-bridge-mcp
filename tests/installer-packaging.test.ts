@@ -49,6 +49,20 @@ describe("installer packaging", () => {
     }
   });
 
+  it("creates persistent database directories before opening an update database", () => {
+    const backupScript = readFileSync(
+      "packaging/app/scripts/backup-existing-database.mjs",
+      "utf8",
+    );
+    const installer = readFileSync("packaging/install.ps1", "utf8");
+
+    expect(backupScript.indexOf("mkdirSync(dirname(databasePath), { recursive: true })"))
+      .toBeLessThan(backupScript.indexOf("new DatabaseSync(databasePath)"));
+    expect(installer).toContain("Test-SqliteDatabaseHeader");
+    expect(installer.indexOf("New-Item -ItemType Directory -Path $installedDataDirectory -Force"))
+      .toBeLessThan(installer.indexOf("& $backupNode $backupScript $installedDatabasePath $backupDirectory"));
+  });
+
   it("waits for installer creation and keeps the current installer until a candidate is complete", () => {
     const script = readFileSync("scripts/build-installer.ps1", "utf8");
     expect(script).toContain("HunetInterviewOps-Setup.new.exe");
@@ -64,6 +78,7 @@ describe("installer packaging", () => {
     expect(launcher).toContain("http://127.0.0.1:3100/login");
     expect(launcher).toContain("for /L %%I in (1,1,30)");
     expect(worker).toContain("worker.log");
+    expect(worker).toContain("INTERVIEW_BRIDGE_ROOT=%CD%");
     expect(dashboard).toContain("dashboard.log");
   });
 });

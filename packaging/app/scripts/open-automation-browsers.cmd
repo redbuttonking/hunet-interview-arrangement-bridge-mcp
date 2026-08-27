@@ -2,6 +2,7 @@
 @echo off
 setlocal
 cd /d "%~dp0.."
+set "INTERVIEW_BRIDGE_ROOT=%CD%"
 
 powershell.exe -NoProfile -WindowStyle Hidden -Command "Start-Process -WindowStyle Hidden -FilePath '%CD%\runtime\node.exe' -ArgumentList '%CD%\dist\src\cli\open-daou-office.js'"
 powershell.exe -NoProfile -WindowStyle Hidden -Command "Start-Process -WindowStyle Hidden -FilePath '%CD%\runtime\node.exe' -ArgumentList '%CD%\dist\src\cli\open-ninehire-automation.js'"

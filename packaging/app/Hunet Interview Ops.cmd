@@ -3,6 +3,7 @@
 setlocal
 set "APP_ROOT=%~dp0"
 set "APP_ROOT=%APP_ROOT:~0,-1%"
+set "INTERVIEW_BRIDGE_ROOT=%APP_ROOT%"
 
 powershell.exe -NoProfile -Command "try { $client = New-Object Net.Sockets.TcpClient; $client.Connect('127.0.0.1', 3100); $client.Close(); exit 0 } catch { exit 1 }"
 if errorlevel 1 (
