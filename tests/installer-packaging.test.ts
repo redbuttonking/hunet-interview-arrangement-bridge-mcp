@@ -69,9 +69,18 @@ describe("installer packaging", () => {
     const installer = readFileSync("packaging/install.ps1", "utf8");
 
     expect(installer).toContain("$shell.SpecialFolders.Item(\"Desktop\")");
+    expect(installer).toContain("[switch]$SkipWorkerRegistration");
+    expect(installer).toContain("[string]$ShortcutDirectory");
     expect(installer).toContain("바탕화면 바로가기를 만들지 못했습니다.");
     expect(installer.indexOf("$shortcutTarget = Join-Path $installRoot"))
       .toBeLessThan(installer.indexOf("Register-ScheduledTask"));
+  });
+
+  it("records the installer failure reason in the persistent log", () => {
+    const installer = readFileSync("packaging/install.ps1", "utf8");
+
+    expect(installer).toContain("logs\\installer.log");
+    expect(installer).toContain("Write-InstallerLog \"설치 실패:");
   });
 
   it("waits for installer creation and keeps the current installer until a candidate is complete", () => {
@@ -79,6 +88,10 @@ describe("installer packaging", () => {
     expect(script).toContain("HunetInterviewOps-Setup.new.exe");
     expect(script).toContain("Wait-Process -Id $iexpressProcess.Id -Timeout 600");
     expect(script).toContain("HunetInterviewOps-Setup.previous.exe");
+    expect(script).toContain("$installerNpmCacheDirectory");
+    expect(script).toContain("npm.cmd ci --omit=dev --ignore-scripts --cache $installerNpmCacheDirectory");
+    expect(script).toContain("$installerSource = Get-Content");
+    expect(script).toContain("Set-Content -LiteralPath $installerScript -Value $installerSource -Encoding UTF8");
   });
 
   it("starts the dashboard only after readiness is checked and captures local logs", () => {

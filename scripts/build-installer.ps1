@@ -40,6 +40,7 @@ $applicationRoot = Join-Path $payloadRoot "app"
 $seedRoot = Join-Path $payloadRoot "seed"
 $payloadArchive = Join-Path $stagingRoot "hunet-interview-ops-payload.zip"
 $installerScript = Join-Path $stagingRoot "install.ps1"
+$installerNpmCacheDirectory = Join-Path $stagingRoot "npm-cache"
 $sedPath = Join-Path $stagingRoot "hunet-interview-ops.sed"
 $installerPath = Join-Path $outputRoot "HunetInterviewOps-Setup.exe"
 $candidateInstallerPath = Join-Path $outputRoot "HunetInterviewOps-Setup.new.exe"
@@ -50,6 +51,7 @@ if (Test-Path -LiteralPath $stagingRoot) {
 }
 New-Item -ItemType Directory -Path $applicationRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $seedRoot -Force | Out-Null
+New-Item -ItemType Directory -Path $installerNpmCacheDirectory -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $applicationRoot "runtime") -Force | Out-Null
 
 Copy-Item -LiteralPath (Join-Path $projectRoot "dist") -Destination (Join-Path $applicationRoot "dist") -Recurse -Force
@@ -61,11 +63,13 @@ Copy-Item -LiteralPath (Join-Path $projectRoot "apps\dashboard\.next\standalone"
 Copy-Item -LiteralPath (Join-Path $projectRoot "apps\dashboard\.next\static") -Destination (Join-Path $applicationRoot "dashboard\apps\dashboard\.next\static") -Recurse -Force
 Copy-Item -LiteralPath $seedDatabasePath -Destination (Join-Path $seedRoot "bridge.db") -Force
 Copy-Item -LiteralPath $seedEnvPath -Destination (Join-Path $seedRoot ".env") -Force
-Copy-Item -LiteralPath (Join-Path $projectRoot "packaging\install.ps1") -Destination $installerScript -Force
+$installerSource = Get-Content -LiteralPath (Join-Path $projectRoot "packaging\install.ps1") -Raw -Encoding UTF8
+Set-Content -LiteralPath $installerScript -Value $installerSource -Encoding UTF8
 
 Push-Location $applicationRoot
 try {
-    & npm.cmd ci --omit=dev --ignore-scripts
+    # 사용자 공용 npm 캐시가 잠겨도 설치 파일 생성은 계속할 수 있도록 전용 캐시를 사용한다.
+    & npm.cmd ci --omit=dev --ignore-scripts --cache $installerNpmCacheDirectory
     if ($LASTEXITCODE -ne 0) { throw "?뚯빱 ?ㅽ뻾???꾩슂???ㅻ? ?섏튂???ㅽ뙣?덉뒿?덈떎." }
 } finally {
     Pop-Location

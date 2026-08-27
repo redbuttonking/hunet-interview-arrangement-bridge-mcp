@@ -1,6 +1,10 @@
 # 설치형 EXE가 현재 사용자 로컬 폴더에 인터뷰 운영 앱과 워커를 배치한다.
 [CmdletBinding()]
-param()
+param(
+  [switch]$SkipWorkerRegistration,
+  [switch]$SkipAppLaunch,
+  [string]$ShortcutDirectory = ""
+)
 
 $ErrorActionPreference = "Stop"
 $applicationName = "Hunet Interview Ops"
@@ -8,6 +12,18 @@ $installRoot = Join-Path $env:LOCALAPPDATA $applicationName
 $taskName = "Hunet Interview Ops Worker"
 $payloadPath = Join-Path $PSScriptRoot "hunet-interview-ops-payload.zip"
 $temporaryDirectory = Join-Path $env:TEMP ("HunetInterviewOps-" + [guid]::NewGuid().ToString("N"))
+$installerLogPath = Join-Path $installRoot "logs\installer.log"
+
+function Write-InstallerLog {
+  param([string]$Message)
+
+  try {
+    New-Item -ItemType Directory -Path (Split-Path -Parent $installerLogPath) -Force | Out-Null
+    Add-Content -LiteralPath $installerLogPath -Value ("[{0}] {1}" -f (Get-Date -Format o), $Message) -Encoding UTF8
+  } catch {
+    # 설치 로그 기록 실패는 원래 설치 오류를 가리지 않는다.
+  }
+}
 
 function Test-SqliteDatabaseHeader {
   param([string]$Path)
@@ -37,6 +53,7 @@ if (-not (Test-Path -LiteralPath $payloadPath -PathType Leaf)) {
 }
 
 try {
+  Write-InstallerLog "설치를 시작합니다."
   New-Item -ItemType Directory -Path $temporaryDirectory -Force | Out-Null
   Expand-Archive -LiteralPath $payloadPath -DestinationPath $temporaryDirectory -Force
   $applicationSource = Join-Path $temporaryDirectory "app"
@@ -51,24 +68,26 @@ try {
   $installationMarkerPath = Join-Path $installRoot ".installation-complete"
   New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
   New-Item -ItemType Directory -Path $installedDataDirectory -Force | Out-Null
-  if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
-    Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-  }
-  if (Test-Path -LiteralPath $installedNodePath -PathType Leaf) {
-    Get-Process -Name "node" -ErrorAction SilentlyContinue |
-      Where-Object { $_.Path -eq $installedNodePath } |
-      Stop-Process -Force -ErrorAction SilentlyContinue
-    $stopDeadline = (Get-Date).AddSeconds(10)
-    while (
-      (Get-Process -Name "node" -ErrorAction SilentlyContinue |
-        Where-Object { $_.Path -eq $installedNodePath }) -and
-      (Get-Date) -lt $stopDeadline
-    ) {
-      Start-Sleep -Milliseconds 250
+  if (-not $SkipWorkerRegistration) {
+    if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+      Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     }
-    if (Get-Process -Name "node" -ErrorAction SilentlyContinue |
-      Where-Object { $_.Path -eq $installedNodePath }) {
-      throw "기존 워커 또는 대시보드를 종료하지 못해 업데이트를 중단했습니다."
+    if (Test-Path -LiteralPath $installedNodePath -PathType Leaf) {
+      Get-Process -Name "node" -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -eq $installedNodePath } |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+      $stopDeadline = (Get-Date).AddSeconds(10)
+      while (
+        (Get-Process -Name "node" -ErrorAction SilentlyContinue |
+          Where-Object { $_.Path -eq $installedNodePath }) -and
+        (Get-Date) -lt $stopDeadline
+      ) {
+        Start-Sleep -Milliseconds 250
+      }
+      if (Get-Process -Name "node" -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -eq $installedNodePath }) {
+        throw "기존 워커 또는 대시보드를 종료하지 못해 업데이트를 중단했습니다."
+      }
     }
   }
 
@@ -126,11 +145,17 @@ try {
 
   $shortcutTarget = Join-Path $installRoot "Hunet Interview Ops.cmd"
   $shell = New-Object -ComObject WScript.Shell
-  $desktopCandidates = @([Environment]::GetFolderPath("Desktop"))
-  try {
-    $desktopCandidates += [string]$shell.SpecialFolders.Item("Desktop")
-  } catch {
-    # 기본 Windows 바탕화면 경로가 이미 후보에 포함되어 있다.
+  $desktopCandidates = if ($ShortcutDirectory) {
+    @($ShortcutDirectory)
+  } else {
+    @([Environment]::GetFolderPath("Desktop"))
+  }
+  if (-not $ShortcutDirectory) {
+    try {
+      $desktopCandidates += [string]$shell.SpecialFolders.Item("Desktop")
+    } catch {
+      # 기본 Windows 바탕화면 경로가 이미 후보에 포함되어 있다.
+    }
   }
   $shortcutPaths = @()
   foreach ($desktopPath in ($desktopCandidates | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)) {
@@ -150,43 +175,45 @@ try {
     throw "바탕화면 경로를 확인하지 못해 바로가기를 만들지 못했습니다."
   }
 
-  $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-  $taskAction = New-ScheduledTaskAction `
-    -Execute $env:ComSpec `
-    -Argument ('/d /c ""{0}""' -f $workerLauncher) `
-    -WorkingDirectory $installRoot
-  $taskTrigger = New-ScheduledTaskTrigger -AtLogOn -User $currentUser
-  $taskSettings = New-ScheduledTaskSettingsSet `
-    -StartWhenAvailable `
-    -MultipleInstances IgnoreNew `
-    -RestartCount 3 `
-    -RestartInterval (New-TimeSpan -Minutes 1) `
-    -ExecutionTimeLimit ([TimeSpan]::Zero)
-  $taskPrincipal = New-ScheduledTaskPrincipal `
-    -UserId $currentUser `
-    -LogonType Interactive `
-    -RunLevel Limited
-  Register-ScheduledTask `
-    -TaskName $taskName `
-    -Action $taskAction `
-    -Trigger $taskTrigger `
-    -Settings $taskSettings `
-    -Principal $taskPrincipal `
-    -Description "인터뷰 어레인지 워커를 Windows 로그인 시 자동으로 실행합니다." `
-    -Force | Out-Null
-  Start-ScheduledTask -TaskName $taskName
-
-  $currentUserSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-  & icacls.exe $installRoot /inheritance:r /grant:r "*$currentUserSid`:(OI)(CI)F" "*S-1-5-18`:(OI)(CI)F" "*S-1-5-32-544`:(OI)(CI)F" /T /C | Out-Null
-  if ($LASTEXITCODE -ne 0) {
-    throw "설치 폴더의 접근 권한을 안전하게 설정하지 못했습니다."
+  if (-not $SkipWorkerRegistration) {
+    $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $taskAction = New-ScheduledTaskAction `
+      -Execute $env:ComSpec `
+      -Argument ('/d /c ""{0}""' -f $workerLauncher) `
+      -WorkingDirectory $installRoot
+    $taskTrigger = New-ScheduledTaskTrigger -AtLogOn -User $currentUser
+    $taskSettings = New-ScheduledTaskSettingsSet `
+      -StartWhenAvailable `
+      -MultipleInstances IgnoreNew `
+      -RestartCount 3 `
+      -RestartInterval (New-TimeSpan -Minutes 1) `
+      -ExecutionTimeLimit ([TimeSpan]::Zero)
+    $taskPrincipal = New-ScheduledTaskPrincipal `
+      -UserId $currentUser `
+      -LogonType Interactive `
+      -RunLevel Limited
+    Register-ScheduledTask `
+      -TaskName $taskName `
+      -Action $taskAction `
+      -Trigger $taskTrigger `
+      -Settings $taskSettings `
+      -Principal $taskPrincipal `
+      -Description "인터뷰 어레인지 워커를 Windows 로그인 시 자동으로 실행합니다." `
+      -Force | Out-Null
+    Start-ScheduledTask -TaskName $taskName
   }
 
   Set-Content -LiteralPath $installationMarkerPath -Value "completed $(Get-Date -Format o)" -NoNewline -Encoding UTF8
+  Write-InstallerLog "설치 완료. 바로가기: $($shortcutPaths -join '; ')"
 
-  Start-Process -FilePath (Join-Path $installRoot "Hunet Interview Ops.cmd")
+  if (-not $SkipAppLaunch) {
+    Start-Process -FilePath (Join-Path $installRoot "Hunet Interview Ops.cmd")
+  }
   Write-Output "설치 완료: $installRoot"
   Write-Output "바탕화면 바로가기: $($shortcutPaths -join '; ')"
+} catch {
+  Write-InstallerLog "설치 실패: $($_.Exception.Message)"
+  throw
 } finally {
   if (Test-Path -LiteralPath $temporaryDirectory) {
     Remove-Item -LiteralPath $temporaryDirectory -Recurse -Force
