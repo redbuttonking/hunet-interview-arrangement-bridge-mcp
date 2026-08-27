@@ -48,6 +48,7 @@ try {
   $installedNodePath = Join-Path $installRoot "runtime\node.exe"
   $installedDataDirectory = Join-Path $installRoot "data"
   $installedDatabasePath = Join-Path $installRoot "data\bridge.db"
+  $installationMarkerPath = Join-Path $installRoot ".installation-complete"
   New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
   New-Item -ItemType Directory -Path $installedDataDirectory -Force | Out-Null
   if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
@@ -71,8 +72,11 @@ try {
     }
   }
 
-  if (Test-Path -LiteralPath $installedDatabasePath -PathType Leaf) {
-    if (-not (Test-SqliteDatabaseHeader -Path $installedDatabasePath)) {
+  $hasExistingDatabase = Test-Path -LiteralPath $installedDatabasePath -PathType Leaf
+  $hasValidExistingDatabase = $hasExistingDatabase -and (Test-SqliteDatabaseHeader -Path $installedDatabasePath)
+  $hasCompletedPreviousInstallation = $hasValidExistingDatabase -and (Test-Path -LiteralPath $installationMarkerPath -PathType Leaf)
+  if ($hasExistingDatabase) {
+    if (-not $hasValidExistingDatabase) {
       $invalidDatabasePath = Join-Path $installedDataDirectory (
         "bridge.incomplete-" + (Get-Date -Format "yyyyMMddHHmmss") + ".db"
       )
@@ -82,7 +86,7 @@ try {
         throw "기존 DB가 유효한 SQLite 파일이 아니며 안전하게 보관하지 못했습니다. 경로: $installedDatabasePath"
       }
       Write-Warning "이전 설치에서 남은 불완전한 DB를 보관하고 새 DB를 준비합니다: $invalidDatabasePath"
-    } else {
+    } elseif ($hasCompletedPreviousInstallation) {
       $backupScript = Join-Path $applicationSource "scripts\backup-existing-database.mjs"
       $backupNode = Join-Path $applicationSource "runtime\node.exe"
       $backupDirectory = Join-Path $installedDataDirectory "backups"
@@ -90,6 +94,8 @@ try {
       if ($LASTEXITCODE -ne 0) {
         throw "업데이트 전 DB 백업에 실패해 설치를 중단했습니다. DB는 변경하지 않았습니다. 경로: $installedDatabasePath"
       }
+    } else {
+      Write-Warning "기존 설치 완료 표식이 없어 DB를 그대로 유지하고 업데이트 전 자동 백업은 건너뜁니다."
     }
   }
 
@@ -118,6 +124,32 @@ try {
     throw "워커 실행 파일이 완전하지 않습니다."
   }
 
+  $shortcutTarget = Join-Path $installRoot "Hunet Interview Ops.cmd"
+  $shell = New-Object -ComObject WScript.Shell
+  $desktopCandidates = @([Environment]::GetFolderPath("Desktop"))
+  try {
+    $desktopCandidates += [string]$shell.SpecialFolders.Item("Desktop")
+  } catch {
+    # 기본 Windows 바탕화면 경로가 이미 후보에 포함되어 있다.
+  }
+  $shortcutPaths = @()
+  foreach ($desktopPath in ($desktopCandidates | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)) {
+    New-Item -ItemType Directory -Path $desktopPath -Force | Out-Null
+    $shortcutPath = Join-Path $desktopPath "$applicationName.lnk"
+    $shortcut = $shell.CreateShortcut($shortcutPath)
+    $shortcut.TargetPath = $shortcutTarget
+    $shortcut.WorkingDirectory = $installRoot
+    $shortcut.Description = "인터뷰 운영 대시보드를 엽니다."
+    $shortcut.Save()
+    if (-not (Test-Path -LiteralPath $shortcutPath -PathType Leaf)) {
+      throw "바탕화면 바로가기를 만들지 못했습니다. 경로: $shortcutPath"
+    }
+    $shortcutPaths += $shortcutPath
+  }
+  if ($shortcutPaths.Count -eq 0) {
+    throw "바탕화면 경로를 확인하지 못해 바로가기를 만들지 못했습니다."
+  }
+
   $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
   $taskAction = New-ScheduledTaskAction `
     -Execute $env:ComSpec `
@@ -144,23 +176,17 @@ try {
     -Force | Out-Null
   Start-ScheduledTask -TaskName $taskName
 
-  $desktopPath = [Environment]::GetFolderPath("Desktop")
-  $shortcutPath = Join-Path $desktopPath "$applicationName.lnk"
-  $shell = New-Object -ComObject WScript.Shell
-  $shortcut = $shell.CreateShortcut($shortcutPath)
-  $shortcut.TargetPath = Join-Path $installRoot "Hunet Interview Ops.cmd"
-  $shortcut.WorkingDirectory = $installRoot
-  $shortcut.Description = "인터뷰 운영 대시보드를 엽니다."
-  $shortcut.Save()
-
   $currentUserSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
   & icacls.exe $installRoot /inheritance:r /grant:r "*$currentUserSid`:(OI)(CI)F" "*S-1-5-18`:(OI)(CI)F" "*S-1-5-32-544`:(OI)(CI)F" /T /C | Out-Null
   if ($LASTEXITCODE -ne 0) {
     throw "설치 폴더의 접근 권한을 안전하게 설정하지 못했습니다."
   }
 
+  Set-Content -LiteralPath $installationMarkerPath -Value "completed $(Get-Date -Format o)" -NoNewline -Encoding UTF8
+
   Start-Process -FilePath (Join-Path $installRoot "Hunet Interview Ops.cmd")
   Write-Output "설치 완료: $installRoot"
+  Write-Output "바탕화면 바로가기: $($shortcutPaths -join '; ')"
 } finally {
   if (Test-Path -LiteralPath $temporaryDirectory) {
     Remove-Item -LiteralPath $temporaryDirectory -Recurse -Force

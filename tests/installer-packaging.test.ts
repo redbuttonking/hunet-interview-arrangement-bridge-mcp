@@ -59,8 +59,19 @@ describe("installer packaging", () => {
     expect(backupScript.indexOf("mkdirSync(dirname(databasePath), { recursive: true })"))
       .toBeLessThan(backupScript.indexOf("new DatabaseSync(databasePath)"));
     expect(installer).toContain("Test-SqliteDatabaseHeader");
+    expect(installer).toContain("$hasCompletedPreviousInstallation");
+    expect(installer).toContain(".installation-complete");
     expect(installer.indexOf("New-Item -ItemType Directory -Path $installedDataDirectory -Force"))
       .toBeLessThan(installer.indexOf("& $backupNode $backupScript $installedDatabasePath $backupDirectory"));
+  });
+
+  it("creates and verifies the desktop shortcut before registering the worker", () => {
+    const installer = readFileSync("packaging/install.ps1", "utf8");
+
+    expect(installer).toContain("$shell.SpecialFolders.Item(\"Desktop\")");
+    expect(installer).toContain("바탕화면 바로가기를 만들지 못했습니다.");
+    expect(installer.indexOf("$shortcutTarget = Join-Path $installRoot"))
+      .toBeLessThan(installer.indexOf("Register-ScheduledTask"));
   });
 
   it("waits for installer creation and keeps the current installer until a candidate is complete", () => {
